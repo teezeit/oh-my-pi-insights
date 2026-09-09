@@ -97,6 +97,24 @@ const META_BATCH_SIZE = 50;
 const LOAD_BATCH_SIZE = 10;
 const OVERLAP_WINDOW_MS = 30 * 60_000;
 
+// Stage 1 is deterministic only: scan, stats and the rendered numbers, with no
+// model call anywhere. Facet extraction, the section prompts and the synthesis
+// are upstream code kept intact and switched on in Stage 2 (HANDOVER.md).
+const LLM_PHASES_ENABLED = false;
+
+/** `--<flag> N` on the command line, else `$ENV`, else the default. */
+function resolveLimit(
+	args: string,
+	flag: string,
+	envVar: string,
+	fallback: number,
+): number {
+	const match = args.match(new RegExp(`--${flag}[\\s=](\\d+)`));
+	if (match) return Number(match[1]);
+	const env = Number(process.env[envVar]);
+	return Number.isFinite(env) && env > 0 ? env : fallback;
+}
+
 const EXTENSION_TO_LANGUAGE: Record<string, string> = {
 	".ts": "TypeScript",
 	".tsx": "TypeScript",
@@ -251,6 +269,12 @@ type SessionMeta = {
 	model_switches: number;
 	compactions: number;
 	steering_messages: number;
+	// Why: the meta cache is keyed by session id, but a session's logs keep
+	// growing (and its advisor sidecar keeps appending) while it is open.
+	// Stale cached numbers would silently diverge from the logs, so the size
+	// and mtime of the primary log plus every sidecar are recorded and any
+	// change invalidates the entry.
+	log_signature: string;
 	median_ttft_ms: number;
 	median_response_ms: number;
 	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number }>;
@@ -365,6 +389,7 @@ type UserContext = {
 type ScanSummary = {
 	sessions_dir: string;
 	primary_logs: number;
+	duplicate_logs: number;
 	advisor_logs: number;
 	subagent_logs: number;
 	excluded_meta: number;
@@ -394,10 +419,17 @@ async function ensureDirs(): Promise<void> {
 	await mkdir(FACETS_DIR, { recursive: true });
 }
 
-async function loadCachedMeta(sessionId: string): Promise<SessionMeta | null> {
+async function loadCachedMeta(
+	sessionId: string,
+	signature: string,
+): Promise<SessionMeta | null> {
 	try {
 		const raw = await readFile(join(META_DIR, `${sessionId}.json`), "utf-8");
-		return JSON.parse(raw) as SessionMeta;
+		const meta = JSON.parse(raw) as SessionMeta;
+		// A log that has grown since the entry was written must be re-read, or
+		// the report's totals stop matching the logs they claim to summarise.
+		if (meta.log_signature !== signature) return null;
+		return meta;
 	} catch {
 		return null;
 	}
@@ -633,7 +665,7 @@ function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, Sessio
 		const models: Record<string, number> = {};
 		let cost = 0, errors = 0;
 		for (const m of sessions) { cost += m.total_cost; errors += m.tool_errors; for (const [model, s] of Object.entries(m.model_usage)) models[model] = (models[model] || 0) + s.message_count; }
-		return { sessions: sessions.length, avg_cost: cost / sessions.length, errors_per_session: errors / sessions.length, primary_model: Object.entries(models).sort((a, b) => b[1] - a[1])[0]?.[0]?.replace(/.*\./, "") || "unknown" };
+		return { sessions: sessions.length, avg_cost: cost / sessions.length, errors_per_session: errors / sessions.length, primary_model: Object.entries(models).sort((a, b) => b[1] - a[1])[0]?.[0]?.replace(/.*\//, "") || "unknown" };
 	}
 
 	const tw = periodSummary(thisWeekSessions);
@@ -689,7 +721,7 @@ function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, Sessio
 			const afterErrors = after.reduce((s, m) => s + m.tool_errors, 0) / after.length;
 			major_transition = {
 				when: sorted[i]!.start_time.slice(0, 10),
-				what: `Shifted from ${beforeModel.replace(/.*\./, "")} to ${afterModel.replace(/.*\./, "")}`,
+				what: `Shifted from ${beforeModel.replace(/.*\//, "")} to ${afterModel.replace(/.*\//, "")}`,
 				impact: `Cost ${afterCost > beforeCost ? "up" : "down"} ${Math.abs(Math.round((afterCost - beforeCost) / (beforeCost || 1) * 100))}%, errors ${afterErrors > beforeErrors ? "up" : "down"} ${Math.abs(Math.round((afterErrors - beforeErrors) / (beforeErrors || 1) * 100))}%`,
 			};
 			break;
@@ -717,6 +749,184 @@ function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, Sessio
 	return { diff_headlines, this_week: tw, last_week: lw, trajectory, anomalies: anomalies.slice(0, 5), major_transition, resolved_friction: resolved_friction.slice(0, 5), ongoing_friction: ongoing_friction.slice(0, 8), staleness_pct };
 }
 
+// ─── Session Sources ──────────────────────────────────────────────────────────
+
+// Why an interface: Stage 3 adds a ~/.claude/projects adapter. Everything
+// above this boundary works on SessionRef/AnyEntry and knows nothing about
+// omp's on-disk layout.
+
+type SidecarKind = "advisor" | "subagent";
+
+/**
+ * A nested transcript that belongs to a parent session: the advisor log, or a
+ * subagent's own log. These are separate sessions with their own spend, so
+ * they must never surface as top-level sessions but must be counted.
+ */
+type SidecarRef = {
+	kind: SidecarKind;
+	name: string;
+	path: string;
+	size: number;
+	mtime_ms: number;
+};
+
+type SessionRef = {
+	id: string;
+	path: string;
+	project_path: string;
+	size: number;
+	created: Date;
+	modified: Date;
+	sidecars: SidecarRef[];
+	/** size:mtime of the primary log and every sidecar; keys the meta cache. */
+	signature: string;
+};
+
+type SessionScan = {
+	sessions: SessionRef[];
+	/** Logs dropped because another copy carried the same session id. */
+	duplicate_logs: number;
+};
+
+type SessionSource = {
+	readonly name: string;
+	/** Top-level sessions only; nested logs hang off their parent. */
+	listSessions(): Promise<SessionScan>;
+	readEntries(path: string): Promise<AnyEntry[]>;
+};
+
+async function readJsonl(path: string): Promise<AnyEntry[]> {
+	const raw = await readFile(path, "utf-8");
+	const out: AnyEntry[] = [];
+	for (const line of raw.split("\n")) {
+		// Why the brace check: a live session's tail can be a partial write, and
+		// the first record is padded — both are cheaper to skip than to parse.
+		if (!line.startsWith("{")) continue;
+		try {
+			out.push(JSON.parse(line) as AnyEntry);
+		} catch {
+			/* truncated or mid-write line */
+		}
+	}
+	return out;
+}
+
+/** The subset of node's Dirent this scanner needs. */
+type DirEntry = { name: string; isDirectory(): boolean };
+
+/** Collect every *.jsonl under a session's sidecar directory, recursively. */
+async function collectSidecars(
+	dir: string,
+	prefix: string,
+	out: SidecarRef[],
+): Promise<void> {
+	let entries: DirEntry[] = [];
+	try {
+		entries = await readdir(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		const path = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			await collectSidecars(path, `${prefix}${entry.name}/`, out);
+			continue;
+		}
+		// *.bash.log / *.read.log / *.eval.log are tool-output spill, not
+		// transcripts. Only .jsonl files carry messages and cost.
+		if (!entry.name.endsWith(".jsonl")) continue;
+		const info = await stat(path).catch(() => null);
+		if (!info) continue;
+		out.push({
+			kind: entry.name === "__advisor.jsonl" ? "advisor" : "subagent",
+			name: `${prefix}${entry.name.replace(/\.jsonl$/, "")}`,
+			path,
+			size: info.size,
+			mtime_ms: info.mtimeMs,
+		});
+	}
+}
+
+/**
+ * ~/.omp/agent/sessions/<slugified-cwd>/<ISO-ts>_<session-id>.jsonl, with an
+ * optional sibling directory of the same basename holding __advisor.jsonl,
+ * subagent logs and tool-output spill.
+ *
+ * Filesystem-only by design: no omp internals, so the scan keeps working
+ * across harness versions.
+ */
+const ompSessionSource: SessionSource = {
+	name: "omp",
+	readEntries: readJsonl,
+	async listSessions(): Promise<SessionScan> {
+		const sessions: SessionRef[] = [];
+		let projects: DirEntry[] = [];
+		try {
+			projects = await readdir(SESSIONS_DIR, { withFileTypes: true });
+		} catch {
+			return { sessions, duplicate_logs: 0 };
+		}
+
+		for (const project of projects) {
+			if (!project.isDirectory()) continue;
+			const projectDir = join(SESSIONS_DIR, project.name);
+			let entries: DirEntry[] = [];
+			try {
+				entries = await readdir(projectDir, { withFileTypes: true });
+			} catch {
+				continue;
+			}
+			const sidecarDirs = new Set(
+				entries.filter((e) => e.isDirectory()).map((e) => e.name),
+			);
+
+			for (const entry of entries) {
+				if (entry.isDirectory() || !entry.name.endsWith(".jsonl")) continue;
+				const base = entry.name.replace(/\.jsonl$/, "");
+				const path = join(projectDir, entry.name);
+				const info = await stat(path).catch(() => null);
+				if (!info) continue;
+
+				const sidecars: SidecarRef[] = [];
+				if (sidecarDirs.has(base))
+					await collectSidecars(join(projectDir, base), "", sidecars);
+
+				// <ISO-ts>_<session-id>: the id is authoritative from the session
+				// record, but the filename gives it before parsing so the meta
+				// cache can be consulted without reading the log.
+				const sep = base.indexOf("_");
+				sessions.push({
+					id: sep >= 0 ? base.slice(sep + 1) : base,
+					path,
+					project_path: "",
+					size: info.size,
+					created: info.birthtime.getTime() ? info.birthtime : info.mtime,
+					modified: info.mtime,
+					sidecars,
+					signature: [
+						`${info.size}:${info.mtimeMs}`,
+						...sidecars.map((s) => `${s.name}=${s.size}:${s.mtime_ms}`),
+					].join("|"),
+				});
+			}
+		}
+
+		// The same session can exist twice on disk under two slugified-cwd
+		// directories (a copied or relocated log keeps its session record id).
+		// Counting it twice would double-count its spend, so the largest copy
+		// wins — it is the most complete one.
+		const byId = new Map<string, SessionRef>();
+		for (const ref of sessions) {
+			const seen = byId.get(ref.id);
+			if (!seen || ref.size > seen.size) byId.set(ref.id, ref);
+		}
+		return {
+			sessions: [...byId.values()],
+			duplicate_logs: sessions.length - byId.size,
+		};
+	},
+};
+
 // ─── Session Parsing ──────────────────────────────────────────────────────────
 
 type AnyEntry = Record<string, unknown>;
@@ -743,6 +953,10 @@ function extractTextFromContent(content: unknown): string {
 }
 
 function isHumanMessage(msg: AnyMessage): boolean {
+	// omp attributes every user-role message; anything not attributed to the
+	// human (tool follow-ups, injected notices) is not human activity.
+	if (typeof msg.attribution === "string" && msg.attribution !== "user")
+		return false;
 	const content = msg.content;
 	if (typeof content === "string" && (content as string).trim()) return true;
 	if (Array.isArray(content)) {
@@ -783,7 +997,143 @@ function isMetaSession(entries: AnyEntry[]): boolean {
 	return false;
 }
 
-function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
+type UsageRecord = {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+};
+
+type ModelUsageMap = Record<
+	string,
+	{ input_tokens: number; output_tokens: number; cost: number; message_count: number }
+>;
+
+/**
+ * omp prices every model call itself: assistant messages carry
+ * `message.usage`, and out-of-band calls (titles, auto-thinking, advisor
+ * prompts) are `model_usage` records. Both hold `usage.cost.total` in USD, so
+ * this port reads the recorded cost instead of re-deriving it from token
+ * counts and a price table the way upstream had to.
+ */
+function readUsage(usage: unknown): UsageRecord {
+	const u = (usage ?? {}) as Record<string, unknown>;
+	const cost = (u.cost ?? {}) as Record<string, unknown>;
+	return {
+		input: typeof u.input === "number" ? u.input : 0,
+		output: typeof u.output === "number" ? u.output : 0,
+		cacheRead: typeof u.cacheRead === "number" ? u.cacheRead : 0,
+		cacheWrite: typeof u.cacheWrite === "number" ? u.cacheWrite : 0,
+		cost: typeof cost.total === "number" ? cost.total : 0,
+	};
+}
+
+function addUsage(target: UsageRecord, add: UsageRecord): void {
+	target.input += add.input;
+	target.output += add.output;
+	target.cacheRead += add.cacheRead;
+	target.cacheWrite += add.cacheWrite;
+	target.cost += add.cost;
+}
+
+function accumulateModel(
+	map: ModelUsageMap,
+	model: string,
+	usage: UsageRecord,
+): void {
+	const slot = (map[model] ??= {
+		input_tokens: 0,
+		output_tokens: 0,
+		cost: 0,
+		message_count: 0,
+	});
+	slot.input_tokens += usage.input;
+	slot.output_tokens += usage.output;
+	slot.cost += usage.cost;
+	slot.message_count++;
+}
+
+const TOOL_ERROR_FAMILY: Record<string, string> = {
+	bash: "Shell Failed",
+	read: "Read Failed",
+	write: "Write Failed",
+	edit: "Edit Failed",
+	glob: "Glob Failed",
+	grep: "Grep Failed",
+	task: "Subagent Failed",
+	eval: "Eval Failed",
+	hub: "Hub Failed",
+	todo: "Todo Failed",
+	ask: "Ask Failed",
+	learn: "Learn Failed",
+	web_search: "Web Search Failed",
+	manage_skill: "Skill Write Failed",
+};
+
+/**
+ * omp sets `toolResult.isError`, so the error count is exact and upstream's
+ * regex bucketing over tool output is deleted rather than ported. The category
+ * stays coarse and is derived from the tool that failed.
+ */
+function toolErrorCategory(toolName: string): string {
+	if (!toolName) return "Unknown Tool";
+	if (toolName.startsWith("mcp__"))
+		return `MCP: ${toolName.slice(5).split("_")[0]}`;
+	return TOOL_ERROR_FAMILY[toolName] ?? `${displayLabel(toolName)} Failed`;
+}
+
+type SidecarUsage = {
+	totals: UsageRecord;
+	utility_cost: number;
+	model_usage: ModelUsageMap;
+	tool_calls: number;
+	tool_errors: number;
+};
+
+/**
+ * Sidecar logs (advisor, subagents) are separate sessions with their own
+ * spend. Only that spend and their tool volume are folded into the parent:
+ * their "user" messages are prompts omp wrote, so counting them as human
+ * activity would corrupt message counts, response times and hour-of-day.
+ */
+function extractSidecarUsage(entries: AnyEntry[]): SidecarUsage {
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const modelUsage: ModelUsageMap = {};
+	let utilityCost = 0;
+	let toolCalls = 0;
+	let toolErrors = 0;
+
+	for (const entry of entries) {
+		if (entry.type === "model_usage") {
+			const usage = readUsage(entry.usage);
+			addUsage(totals, usage);
+			utilityCost += usage.cost;
+			accumulateModel(modelUsage, typeof entry.model === "string" ? entry.model : "unknown", usage);
+			continue;
+		}
+		if (entry.type !== "message") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg) continue;
+
+		if (msg.role === "assistant") {
+			const usage = readUsage(msg.usage);
+			addUsage(totals, usage);
+			accumulateModel(modelUsage, typeof msg.model === "string" ? msg.model : "unknown", usage);
+			if (Array.isArray(msg.content)) {
+				for (const block of msg.content as ContentBlock[]) {
+					if (block.type === "toolCall") toolCalls++;
+				}
+			}
+		} else if (msg.role === "toolResult" && msg.isError === true) {
+			toolErrors++;
+		}
+	}
+
+	return { totals, utility_cost: utilityCost, model_usage: modelUsage, tool_calls: toolCalls, tool_errors: toolErrors };
+}
+
+function extractSessionStats(entries: AnyEntry[]) {
 	const toolCounts: Record<string, number> = {};
 	const languages: Record<string, number> = {};
 	const toolErrorCategories: Record<string, number> = {};
@@ -791,13 +1141,19 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 	const userResponseTimes: number[] = [];
 	const messageHours: number[] = [];
 	const userMessageTimestamps: string[] = [];
+	const ttfts: number[] = [];
+	const responseDurations: number[] = [];
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const modelUsage: ModelUsageMap = {};
 
+	let sessionId = "";
+	let sessionStart = "";
+	let projectPath = "";
+	let lastEntryTs = 0;
+	let utilityCost = 0;
 	let gitCommits = 0;
 	let gitPushes = 0;
-	let inputTokens = 0;
-	let outputTokens = 0;
-	let totalCost = 0;
-	let userInterruptions = 0;
+	let steeringMessages = 0;
 	let toolErrors = 0;
 	let usesSubagent = false;
 	let usesMcp = false;
@@ -805,48 +1161,73 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 	let linesRemoved = 0;
 	let userMessageCount = 0;
 	let assistantMessageCount = 0;
+	let thinkingEscalations = 0;
+	let modelSwitches = 0;
+	let compactions = 0;
 	let firstPrompt = "";
-
-	const modelUsage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number }> = {};
-
 	let lastAssistantTs: number | null = null;
 
 	// Deduplicate tool call IDs to avoid double-counting branched entries
 	const seenToolCallIds = new Set<string>();
 
 	for (const entry of entries) {
+		const entryTs =
+			typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+		if (!Number.isNaN(entryTs) && entryTs > lastEntryTs) lastEntryTs = entryTs;
+
+		if (entry.type === "session") {
+			// The session record is authoritative for id, start time and project.
+			if (typeof entry.id === "string") sessionId = entry.id;
+			if (typeof entry.timestamp === "string") sessionStart = entry.timestamp;
+			if (typeof entry.cwd === "string") projectPath = entry.cwd;
+			continue;
+		}
+		// Mid-session escalation: a behavioural signal Pi had no equivalent for.
+		if (entry.type === "thinking_level_change") {
+			thinkingEscalations++;
+			continue;
+		}
+		if (entry.type === "model_change") {
+			modelSwitches++;
+			continue;
+		}
+		if (entry.type === "compaction") {
+			compactions++;
+			continue;
+		}
+		if (entry.type === "model_usage") {
+			const usage = readUsage(entry.usage);
+			addUsage(totals, usage);
+			utilityCost += usage.cost;
+			accumulateModel(modelUsage, typeof entry.model === "string" ? entry.model : "unknown", usage);
+			continue;
+		}
 		if (entry.type !== "message") continue;
+
 		const msg = entry.message as AnyMessage | undefined;
 		if (!msg) continue;
 
-		const msgTs = typeof msg.timestamp === "number" ? msg.timestamp : null;
+		// Assistant/user messages carry epoch-ms timestamps; fall back to the
+		// envelope's ISO timestamp for records that do not.
+		const msgTs =
+			typeof msg.timestamp === "number"
+				? msg.timestamp
+				: Number.isNaN(entryTs)
+					? null
+					: entryTs;
 
 		// ── assistant message ──
 		if (msg.role === "assistant") {
 			assistantMessageCount++;
 			if (msgTs) lastAssistantTs = msgTs;
 
-			// Model tracking
-			const modelName = (msg.model as string) ?? "unknown";
+			const usage = readUsage(msg.usage);
+			addUsage(totals, usage);
+			accumulateModel(modelUsage, typeof msg.model === "string" ? msg.model : "unknown", usage);
 
-			// Tokens + cost
-			const usage = msg.usage as Record<string, unknown> | undefined;
-			if (usage) {
-				const msgInput = (usage.input as number) ?? 0;
-				const msgOutput = (usage.output as number) ?? 0;
-				const cost = usage.cost as Record<string, number> | undefined;
-				const msgCost = cost?.total ?? 0;
-
-				inputTokens += msgInput;
-				outputTokens += msgOutput;
-				if (msgCost) totalCost += msgCost;
-
-				if (!modelUsage[modelName]) modelUsage[modelName] = { input_tokens: 0, output_tokens: 0, cost: 0, message_count: 0 };
-				modelUsage[modelName]!.input_tokens += msgInput;
-				modelUsage[modelName]!.output_tokens += msgOutput;
-				modelUsage[modelName]!.cost += msgCost;
-				modelUsage[modelName]!.message_count++;
-			}
+			if (typeof msg.ttft === "number" && msg.ttft > 0) ttfts.push(msg.ttft);
+			if (typeof msg.duration === "number" && msg.duration > 0)
+				responseDurations.push(msg.duration);
 
 			// Tool calls inside content
 			const content = msg.content;
@@ -859,40 +1240,58 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 					if (seenToolCallIds.has(toolId)) continue;
 					seenToolCallIds.add(toolId);
 
-					toolCounts[toolName] = (toolCounts[toolName] ?? 0) + 1;
+					const args = (block.arguments as Record<string, unknown>) ?? {};
+					const filePath = typeof args.path === "string" ? args.path : "";
 
-					if (toolName === "subagent") usesSubagent = true;
+					// omp routes MCP servers and tool devices through a write to
+					// `xd://<device>`. Counting those as file writes would both
+					// inflate write volume and hide MCP/device usage entirely.
+					const device = filePath.startsWith("xd://")
+						? filePath.slice(5).split(/[/?:]/)[0]!
+						: "";
+					if (toolName === "write" && device) {
+						toolCounts[`xd://${device}`] = (toolCounts[`xd://${device}`] ?? 0) + 1;
+						if (device.startsWith("mcp__")) usesMcp = true;
+						continue;
+					}
+
+					toolCounts[toolName] = (toolCounts[toolName] ?? 0) + 1;
+					if (toolName === "task") usesSubagent = true;
 					if (toolName.startsWith("mcp__")) usesMcp = true;
 
-					const args = (block.arguments as Record<string, unknown>) ?? {};
-					const filePath =
-						(args.path as string) ?? (args.file_path as string) ?? "";
-
-					if (filePath) {
-						const lang = getLanguageFromPath(filePath);
+					if (toolName === "read" || toolName === "write") {
+						// Strip any read selector (`file.ts:10-20`) before the extension lookup.
+						const clean = filePath.replace(/:[^/\\]*$/, "");
+						const lang = getLanguageFromPath(clean);
 						if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
 					}
 
 					if (toolName === "write" && filePath) {
 						filesModified.add(filePath);
-						const content_ = (args.content as string) ?? "";
-						linesAdded += countNewlines(content_) + 1;
+						linesAdded += countNewlines((args.content as string) ?? "") + 1;
 					}
 
-					if (toolName === "edit" && filePath) {
-						filesModified.add(filePath);
-						const edits =
-							(args.edits as Array<{
-								oldText?: string;
-								newText?: string;
-								old_string?: string;
-								new_string?: string;
-							}>) ?? [];
-						for (const e of edits) {
-							const oldText = e.oldText ?? e.old_string ?? "";
-							const newText = e.newText ?? e.new_string ?? "";
-							linesAdded += countNewlines(newText) + 1;
-							linesRemoved += countNewlines(oldText) + 1;
+					if (toolName === "edit") {
+						// omp's edit tool takes one hashline patch in `input`: sections
+						// are `[path#TAG]`, `+` rows are the new content, and
+						// `PUT a.=b` / `CUT a.=b` name the original lines replaced.
+						const patch = (args.input as string) ?? "";
+						for (const line of patch.split("\n")) {
+							const section = line.match(/^\[([^\]]+)#[0-9A-Fa-f]{4}\]$/);
+							if (section) {
+								const path = section[1]!;
+								filesModified.add(path);
+								const lang = getLanguageFromPath(path);
+								if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
+								continue;
+							}
+							const range = line.match(/^(?:PUT|CUT)\s+(\d+)\.=(\d+)/);
+							if (range) {
+								linesRemoved += Number(range[2]) - Number(range[1]) + 1;
+								continue;
+							}
+							if (line.startsWith("+")) linesAdded++;
+							else if (line.startsWith("-") && !line.startsWith("---")) linesRemoved++;
 						}
 					}
 
@@ -912,7 +1311,9 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 
 			if (!firstPrompt && text.trim()) firstPrompt = text.trim().slice(0, 300);
 
-			if (text.includes("[Request interrupted by user")) userInterruptions++;
+			// omp flags interruptions structurally: `steering` is set when the
+			// user typed while the agent was still working.
+			if (msg.steering) steeringMessages++;
 
 			if (msgTs) {
 				const d = new Date(msgTs);
@@ -927,41 +1328,18 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 		}
 
 		// ── tool result ──
-		if (msg.role === "toolResult") {
-			const isError = (msg.isError as boolean) === true;
-			if (isError) {
-				toolErrors++;
-				const resultText = extractTextFromContent(msg.content).toLowerCase();
-				let cat = "Other";
-				if (resultText.includes("exit code")) cat = "Command Failed";
-				else if (
-					resultText.includes("rejected") ||
-					resultText.includes("doesn't want")
-				)
-					cat = "User Rejected";
-				else if (
-					resultText.includes("string to replace not found") ||
-					resultText.includes("no changes")
-				)
-					cat = "Edit Failed";
-				else if (resultText.includes("modified since read"))
-					cat = "File Changed";
-				else if (
-					resultText.includes("exceeds maximum") ||
-					resultText.includes("too large")
-				)
-					cat = "File Too Large";
-				else if (
-					resultText.includes("file not found") ||
-					resultText.includes("does not exist")
-				)
-					cat = "File Not Found";
-				toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
-			}
+		if (msg.role === "toolResult" && msg.isError === true) {
+			toolErrors++;
+			const cat = toolErrorCategory((msg.toolName as string) ?? "");
+			toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
 		}
 	}
 
 	return {
+		sessionId,
+		sessionStart,
+		projectPath,
+		lastEntryTs,
 		toolCounts,
 		languages,
 		toolErrorCategories,
@@ -969,12 +1347,13 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 		userResponseTimes,
 		messageHours,
 		userMessageTimestamps,
+		ttfts,
+		responseDurations,
 		gitCommits,
 		gitPushes,
-		inputTokens,
-		outputTokens,
-		totalCost,
-		userInterruptions,
+		totals,
+		utilityCost,
+		steeringMessages,
 		toolErrors,
 		usesSubagent,
 		usesMcp,
@@ -982,29 +1361,67 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 		linesRemoved,
 		userMessageCount,
 		assistantMessageCount,
+		thinkingEscalations,
+		modelSwitches,
+		compactions,
 		firstPrompt,
 		modelUsage,
 	};
 }
 
+/**
+ * Fold a session and its sidecars into one SessionMeta. Cost is attributed to
+ * the parent and broken out per class, so a run's total can be reconciled
+ * against the logs while still showing where the money went.
+ */
 function buildSessionMeta(
-	info: {
-		id: string;
-		path: string;
-		cwd: string;
-		created: Date;
-		modified: Date;
-	},
+	ref: SessionRef,
 	entries: AnyEntry[],
+	sidecars: Array<{ kind: SidecarKind; usage: SidecarUsage }>,
 ): SessionMeta {
-	const stats = extractSessionStats(entries, info.path);
+	const stats = extractSessionStats(entries);
+
+	const startTime = stats.sessionStart || ref.created.toISOString();
+	const endMs = stats.lastEntryTs || ref.modified.getTime();
+	const totals: UsageRecord = { ...stats.totals };
+	const modelUsage: ModelUsageMap = stats.modelUsage;
+
+	let costAdvisor = 0;
+	let costSubagent = 0;
+	let utilityCost = stats.utilityCost;
+	let sidecarToolCalls = 0;
+	let sidecarToolErrors = 0;
+	const sidecarCounts = { advisor: 0, subagent: 0 };
+
+	for (const sidecar of sidecars) {
+		sidecarCounts[sidecar.kind]++;
+		addUsage(totals, sidecar.usage.totals);
+		utilityCost += sidecar.usage.utility_cost;
+		sidecarToolCalls += sidecar.usage.tool_calls;
+		sidecarToolErrors += sidecar.usage.tool_errors;
+		if (sidecar.kind === "advisor") costAdvisor += sidecar.usage.totals.cost;
+		else costSubagent += sidecar.usage.totals.cost;
+		for (const [model, usage] of Object.entries(sidecar.usage.model_usage)) {
+			accumulateModel(modelUsage, model, {
+				input: usage.input_tokens,
+				output: usage.output_tokens,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: usage.cost,
+			});
+			// accumulateModel counts one message; restore the real count.
+			modelUsage[model]!.message_count += usage.message_count - 1;
+		}
+	}
+
 	return {
-		session_id: info.id,
-		session_path: info.path,
-		project_path: info.cwd,
-		start_time: info.created.toISOString(),
-		duration_minutes: Math.round(
-			(info.modified.getTime() - info.created.getTime()) / 1000 / 60,
+		session_id: stats.sessionId || ref.id,
+		session_path: ref.path,
+		project_path: stats.projectPath || ref.project_path,
+		start_time: startTime,
+		duration_minutes: Math.max(
+			0,
+			Math.round((endMs - new Date(startTime).getTime()) / 1000 / 60),
 		),
 		user_message_count: stats.userMessageCount,
 		assistant_message_count: stats.assistantMessageCount,
@@ -1012,22 +1429,38 @@ function buildSessionMeta(
 		languages: stats.languages,
 		git_commits: stats.gitCommits,
 		git_pushes: stats.gitPushes,
-		input_tokens: stats.inputTokens,
-		output_tokens: stats.outputTokens,
-		total_cost: stats.totalCost,
+		input_tokens: totals.input,
+		output_tokens: totals.output,
+		total_cost: totals.cost,
 		first_prompt: stats.firstPrompt,
-		user_interruptions: stats.userInterruptions,
+		user_interruptions: stats.steeringMessages,
 		user_response_times: stats.userResponseTimes,
 		tool_errors: stats.toolErrors,
 		tool_error_categories: stats.toolErrorCategories,
-		uses_subagent: stats.usesSubagent,
+		uses_subagent: stats.usesSubagent || sidecarCounts.subagent > 0,
 		uses_mcp: stats.usesMcp,
 		lines_added: stats.linesAdded,
 		lines_removed: stats.linesRemoved,
 		files_modified: stats.filesModified,
 		message_hours: stats.messageHours,
 		user_message_timestamps: stats.userMessageTimestamps,
-		model_usage: stats.modelUsage,
+		cost_primary: stats.totals.cost,
+		cost_advisor: costAdvisor,
+		cost_subagent: costSubagent,
+		cache_read_tokens: totals.cacheRead,
+		cache_write_tokens: totals.cacheWrite,
+		utility_cost: utilityCost,
+		sidecar_counts: sidecarCounts,
+		sidecar_tool_calls: sidecarToolCalls,
+		sidecar_tool_errors: sidecarToolErrors,
+		thinking_escalations: stats.thinkingEscalations,
+		model_switches: stats.modelSwitches,
+		compactions: stats.compactions,
+		steering_messages: stats.steeringMessages,
+		log_signature: ref.signature,
+		median_ttft_ms: median(stats.ttfts),
+		median_response_ms: median(stats.responseDurations),
+		model_usage: modelUsage,
 	};
 }
 
@@ -1515,36 +1948,20 @@ function aggregateData(
 
 // ─── LLM Calling ─────────────────────────────────────────────────────────────
 
+// Stage 1 stub. Every caller is behind LLM_PHASES_ENABLED, so this is
+// unreachable until Stage 2 wires it to omp's completion API. Upstream called
+// `complete()` from @earendil-works/pi-ai with
+// ctx.modelRegistry.getApiKeyAndHeaders(ctx.model); the omp context exposes
+// the same shape (see HANDOVER.md P4), but the port takes no dependency on
+// that package name, so the call itself is deliberately not carried over yet.
 async function callModel(
-	ctx: ExtensionCommandContext,
-	prompt: string,
+	_ctx: ExtensionCommandContext,
+	_prompt: string,
 	_maxTokens?: number,
 ): Promise<string> {
-	const model = ctx.model;
-	if (!model) throw new Error("No active model");
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model as never);
-	if (!auth.ok) throw new Error(auth.error);
-	const apiKey = auth.apiKey ?? "";
-	const headers = auth.headers;
-
-	const response = await complete(
-		model as never,
-		{
-			messages: [
-				{
-					role: "user",
-					content: [{ type: "text", text: prompt }],
-					timestamp: Date.now(),
-				},
-			],
-		},
-		{ apiKey, headers },
+	throw new Error(
+		"LLM phases are not wired in Stage 1 — deterministic sections only",
 	);
-
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("");
 }
 
 function parseJsonFromResponse(text: string): unknown {
@@ -1869,7 +2286,7 @@ ${data}`,
 			const modelLines = Object.entries(agg.model_usage).sort((a, b) => b[1].cost - a[1].cost).map(([m, u]) => {
 				const totalTok = u.input_tokens + u.output_tokens;
 				const cpt = totalTok > 0 ? (u.cost / totalTok * 1000).toFixed(4) : "0";
-				return `- ${m.replace(/.*\./, "")}: ${u.sessions} sessions, $${u.cost.toFixed(2)} total, ${u.message_count} msgs, tier=${u.tier || "mid"}, $/1k-tok=${cpt}`;
+				return `- ${m.replace(/.*\//, "")}: ${u.sessions} sessions, $${u.cost.toFixed(2)} total, ${u.message_count} msgs, tier=${u.tier || "mid"}, $/1k-tok=${cpt}`;
 			}).join("\n");
 			return `Analyze this model usage data and identify efficiency issues.
 
@@ -2088,11 +2505,18 @@ function generateMarkdown(
 	sections: Record<string, unknown>,
 	synthesis: Record<string, string>,
 	temporal: TemporalData,
+	scan: ScanSummary,
+	userCtx: UserContext,
 ): string {
 	const lines: string[] = [];
-	lines.push("# Pi Insights");
+	lines.push("# omp Insights");
 	lines.push(`> ${agg.date_range.start} to ${agg.date_range.end} | ${agg.total_sessions} sessions | Generated ${new Date().toLocaleDateString()}`);
 	lines.push("");
+
+	if (!LLM_PHASES_ENABLED) {
+		lines.push("_Deterministic run: session scan, stats and totals only. Facet extraction, the eight section prompts and the synthesis are not wired yet (Stage 1)._");
+		lines.push("");
+	}
 
 	if (temporal.diff_headlines.length) {
 		lines.push("## \u{1F4C8} What Changed This Week");
@@ -2101,24 +2525,104 @@ function generateMarkdown(
 		lines.push("");
 	}
 
-	lines.push("## \u26A1 Summary");
-	if (synthesis.whats_working) lines.push(`**What's working:** ${synthesis.whats_working}`);
-	if (synthesis.whats_hindering) lines.push(`\n**What's hindering you:** ${synthesis.whats_hindering}`);
-	if (synthesis.quick_wins) lines.push(`\n**Quick wins:** ${synthesis.quick_wins}`);
-	if (synthesis.ambitious_workflows) lines.push(`\n**Ambitious workflows:** ${synthesis.ambitious_workflows}`);
-	lines.push("");
+	if (synthesis.whats_working || synthesis.whats_hindering || synthesis.quick_wins || synthesis.ambitious_workflows) {
+		lines.push("## \u26A1 Summary");
+		if (synthesis.whats_working) lines.push(`**What's working:** ${synthesis.whats_working}`);
+		if (synthesis.whats_hindering) lines.push(`\n**What's hindering you:** ${synthesis.whats_hindering}`);
+		if (synthesis.quick_wins) lines.push(`\n**Quick wins:** ${synthesis.quick_wins}`);
+		if (synthesis.ambitious_workflows) lines.push(`\n**Ambitious workflows:** ${synthesis.ambitious_workflows}`);
+		lines.push("");
+	}
 
 	lines.push("## \u{1F4CA} By the Numbers");
 	lines.push(`| Metric | Value |`);
 	lines.push(`|--------|-------|`);
 	lines.push(`| Sessions | ${agg.total_sessions} (${agg.days_active} active days) |`);
-	lines.push(`| Messages | ${agg.total_messages} |`);
+	lines.push(`| User Messages | ${agg.total_messages} |`);
 	lines.push(`| Total Cost | $${agg.total_cost.toFixed(2)} |`);
 	lines.push(`| Tokens In | ${fmtTokens(agg.total_input_tokens)} |`);
 	lines.push(`| Tokens Out | ${fmtTokens(agg.total_output_tokens)} |`);
+	lines.push(`| Cache Read | ${fmtTokens(agg.total_cache_read_tokens)} |`);
+	lines.push(`| Cache Write | ${fmtTokens(agg.total_cache_write_tokens)} |`);
 	lines.push(`| Lines Added | ${agg.total_lines_added} |`);
+	lines.push(`| Lines Removed | ${agg.total_lines_removed} |`);
+	lines.push(`| Files Touched | ${agg.total_files_modified} |`);
 	lines.push(`| Git Commits | ${agg.git_commits} |`);
+	lines.push(`| Git Pushes | ${agg.git_pushes} |`);
 	lines.push(`| Tool Errors | ${agg.total_tool_errors} |`);
+	lines.push(`| Steering / Interruptions | ${agg.total_steering} |`);
+	lines.push(`| Thinking Escalations | ${agg.total_thinking_escalations} |`);
+	lines.push(`| Model Switches | ${agg.total_model_switches} |`);
+	lines.push(`| Compactions | ${agg.total_compactions} |`);
+	lines.push(`| Median TTFT | ${(agg.median_ttft_ms / 1000).toFixed(1)}s |`);
+	lines.push(`| Median Reply Wait | ${agg.median_response_time.toFixed(0)}s |`);
+	lines.push(`| Parallel Sessions | ${agg.concurrent_sessions.overlap_events} overlap events across ${agg.concurrent_sessions.sessions_involved} sessions |`);
+	lines.push("");
+
+	// Cost attribution. Advisor and subagent logs are separate sessions with
+	// their own spend; omitting them undercounts badly, so they are folded
+	// into the total and shown separately.
+	lines.push("## \u{1F4B0} Where the Money Went");
+	lines.push(`| Bucket | Cost | Share |`);
+	lines.push(`|--------|------|-------|`);
+	const share = (v: number) => (agg.total_cost > 0 ? `${((v / agg.total_cost) * 100).toFixed(1)}%` : "0%");
+	lines.push(`| Primary sessions | $${agg.total_cost_primary.toFixed(2)} | ${share(agg.total_cost_primary)} |`);
+	lines.push(`| Advisor sidecars (${agg.advisor_logs} logs) | $${agg.total_cost_advisor.toFixed(2)} | ${share(agg.total_cost_advisor)} |`);
+	lines.push(`| Subagent sidecars (${agg.subagent_logs} logs) | $${agg.total_cost_subagent.toFixed(2)} | ${share(agg.total_cost_subagent)} |`);
+	lines.push(`| **Total** | **$${agg.total_cost.toFixed(2)}** | 100% |`);
+	lines.push("");
+	lines.push(`Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that total: $${agg.total_utility_cost.toFixed(2)}. ${agg.sessions_with_sidecars} of ${agg.total_sessions} sessions had at least one sidecar.`);
+	lines.push("");
+
+	lines.push("## \u{1F527} Tools");
+	lines.push(`| Tool | Calls |`);
+	lines.push(`|------|-------|`);
+	for (const [tool, count] of top8(agg.tool_counts)) lines.push(`| ${tool} | ${count} |`);
+	lines.push("");
+	if (Object.keys(agg.tool_error_categories).length) {
+		lines.push("**Failures by tool** (from `toolResult.isError`, not text matching):");
+		for (const [cat, count] of top8(agg.tool_error_categories)) lines.push(`- ${cat}: ${count}`);
+		lines.push("");
+	}
+
+	if (Object.keys(agg.languages).length) {
+		lines.push("## \u{1F4C1} Languages and Projects");
+		lines.push(`Languages: ${top8(agg.languages).map(([l, c]) => `${l} (${c})`).join(", ")}`);
+		lines.push("");
+		lines.push(`| Project | Sessions |`);
+		lines.push(`|---------|----------|`);
+		for (const [project, count] of top8(agg.projects)) lines.push(`| ${project} | ${count} |`);
+		lines.push("");
+	}
+
+	// Provenance: what the scan actually looked at, so the numbers above can
+	// be reconciled against the logs rather than trusted.
+	lines.push("## \u{1F50D} Corpus");
+	lines.push(`Scanned \`${scan.sessions_dir}\`: ${scan.primary_logs} distinct sessions, ${scan.advisor_logs} advisor sidecars, ${scan.subagent_logs} subagent sidecars${scan.duplicate_logs ? `, ${scan.duplicate_logs} duplicate log(s) dropped` : ""}.`);
+	lines.push("");
+	lines.push(`| Excluded | Sessions |`);
+	lines.push(`|----------|----------|`);
+	lines.push(`| Current session | ${scan.excluded_current} |`);
+	lines.push(`| Insights meta-sessions | ${scan.excluded_meta} |`);
+	lines.push(`| Unparseable | ${scan.excluded_unparsed} |`);
+	lines.push(`| Below substance floor (<2 user messages or <1 min) | ${scan.excluded_not_substantive} |`);
+	lines.push(`| Outside --since window | ${scan.excluded_by_since} |`);
+	lines.push(`| **Included** | **${scan.included}** |`);
+	lines.push("");
+	lines.push(`Session set and per-session cost: \`${SESSION_SET_PATH}\``);
+	lines.push("");
+
+	lines.push("## \u2699\uFE0F Your Setup");
+	lines.push(`- Default model: \`${userCtx.default_model || "not set"}\``);
+	if (Object.keys(userCtx.model_roles).length)
+		lines.push(`- Model roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => `${r}=\`${m}\``).join(", ")}`);
+	if (Object.keys(userCtx.fallback_chains).length)
+		lines.push(`- Fallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => `${r}: ${c.join(" \u2192 ")}`).join("; ")}`);
+	lines.push(`- Skills: ${userCtx.installed_skills.length} user + ${userCtx.installed_managed_skills.length} managed`);
+	lines.push(`- Extensions: ${userCtx.installed_extensions.length ? userCtx.installed_extensions.join(", ") : "none"}`);
+	lines.push(`- Hooks: ${userCtx.installed_hooks.length ? userCtx.installed_hooks.join(", ") : "none"}`);
+	lines.push(`- MCP servers: ${userCtx.mcp_servers.length ? userCtx.mcp_servers.join(", ") : "none"}`);
+	lines.push(`- Global instruction rules read: ${userCtx.existing_agents_md_rules.length}`);
 	lines.push("");
 
 	const areas = (sections.project_areas as { areas?: Array<{ name: string; session_count: number; description: string }> })?.areas ?? [];
@@ -2195,7 +2699,7 @@ function generateMarkdown(
 	lines.push(`| Model | Cost | Messages |`);
 	lines.push(`|-------|------|----------|`);
 	for (const [model, usage] of Object.entries(agg.model_usage).sort((a, b) => b[1].cost - a[1].cost).slice(0, 8)) {
-		lines.push(`| ${model.replace(/.*\./, "")} | $${usage.cost.toFixed(2)} | ${usage.message_count} |`);
+		lines.push(`| ${model.replace(/.*\//, "")} | $${usage.cost.toFixed(2)} | ${usage.message_count} |`);
 	}
 	if (agg.estimated_waste > 0) lines.push(`\n**Estimated waste from model mismatch:** $${agg.estimated_waste.toFixed(2)}`);
 	lines.push("");
@@ -2790,38 +3294,75 @@ async function runInsights(
 	const noOpen = args.includes("--no-open");
 	const formatMd = args.includes("--format md") || args.includes("--md");
 
-	// Parse --since flag (e.g. --since 7d, --since 14d, --since 30d)
-	const sinceMatch = args.match(/--since\s+(\d+)d/);
-	const sinceDays = sinceMatch ? parseInt(sinceMatch[1]!, 10) : 0;
+	// Parse --since flag (e.g. --since 7d, --since 2w, --since 30d)
+	const sinceMatch = args.match(/--since\s+(\d+)([dw])/);
+	const sinceDays = sinceMatch
+		? Number(sinceMatch[1]) * (sinceMatch[2] === "w" ? 7 : 1)
+		: 0;
 
-	if (!ctx.model) {
+	const limits = {
+		maxSessions: resolveLimit(args, "max-sessions", "OMP_INSIGHTS_MAX_SESSIONS", DEFAULT_MAX_SESSIONS_TO_LOAD),
+		maxFacets: resolveLimit(args, "max-facets", "OMP_INSIGHTS_MAX_FACETS", DEFAULT_MAX_FACET_EXTRACTIONS),
+		facetConcurrency: resolveLimit(args, "facet-concurrency", "OMP_INSIGHTS_FACET_CONCURRENCY", DEFAULT_FACET_CONCURRENCY),
+	};
+
+	// Stage 1 never calls a model, so an active model is only required once the
+	// LLM phases are wired.
+	if (LLM_PHASES_ENABLED && !ctx.model) {
 		ctx.ui.notify("No active model — set a model first (/model)", "error");
 		return;
 	}
 
 	await ensureDirs();
 
-	const currentSessionId = ctx.sessionManager.getSessionId() ?? "";
+	const source = ompSessionSource;
+	const currentSessionId = ctx.sessionManager?.getSessionId?.() ?? "";
 
 	// ── Phase 1: Scan ────────────────────────────────────────────────────────────
 	ctx.ui.setStatus("insights", "🔍 Scanning sessions...");
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
 		"  Phase 1/5: Scanning session files...",
 	]);
 
-	let allInfos = await SessionManager.listAll();
+	const scanned = await source.listSessions();
+	const scan: ScanSummary = {
+		sessions_dir: SESSIONS_DIR,
+		primary_logs: scanned.sessions.length,
+		duplicate_logs: scanned.duplicate_logs,
+		advisor_logs: 0,
+		subagent_logs: 0,
+		excluded_meta: 0,
+		excluded_current: 0,
+		excluded_unparsed: 0,
+		excluded_not_substantive: 0,
+		excluded_by_since: 0,
+		included: 0,
+	};
+	for (const ref of scanned.sessions) {
+		for (const sidecar of ref.sidecars) {
+			if (sidecar.kind === "advisor") scan.advisor_logs++;
+			else scan.subagent_logs++;
+		}
+	}
 
-	// Filter current session and meta-sessions by ID
-	allInfos = allInfos.filter((info) => info.id !== currentSessionId);
+	// The session running this command is excluded by id: its own transcript
+	// would otherwise be summarised mid-write.
+	const allRefs = scanned.sessions.filter((ref) => {
+		if (ref.id === currentSessionId) {
+			scan.excluded_current++;
+			return false;
+		}
+		return true;
+	});
 
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
-		`  Phase 1/5 done — found ${allInfos.length} sessions`,
+		`  Phase 1/5 done — ${allRefs.length} sessions, ${scan.advisor_logs} advisor + ${scan.subagent_logs} subagent logs`,
 		"  Phase 2/5: Extracting session stats...",
 	]);
 
@@ -2830,10 +3371,10 @@ async function runInsights(
 
 	// Load cached metas first (batch)
 	const cachedMetaIds = new Set<string>();
-	for (let i = 0; i < allInfos.length; i += META_BATCH_SIZE) {
-		const batch = allInfos.slice(i, i + META_BATCH_SIZE);
+	for (let i = 0; i < allRefs.length; i += META_BATCH_SIZE) {
+		const batch = allRefs.slice(i, i + META_BATCH_SIZE);
 		const results = await Promise.all(
-			batch.map((info) => loadCachedMeta(info.id)),
+			batch.map((ref) => loadCachedMeta(ref.id, ref.signature)),
 		);
 		for (let j = 0; j < batch.length; j++) {
 			const cached = results[j];
@@ -2844,62 +3385,75 @@ async function runInsights(
 		}
 	}
 
-	// Parse uncached sessions (up to MAX_SESSIONS_TO_LOAD)
-	const uncached = allInfos.filter((info) => !cachedMetaIds.has(info.id));
-	const toLoad = uncached.slice(0, MAX_SESSIONS_TO_LOAD);
+	// Parse uncached sessions (up to the load cap)
+	const uncached = allRefs.filter((ref) => !cachedMetaIds.has(ref.id));
+	const toLoad = uncached.slice(0, limits.maxSessions);
 
 	let loadedCount = 0;
 	for (let i = 0; i < toLoad.length; i += LOAD_BATCH_SIZE) {
 		const batch = toLoad.slice(i, i + LOAD_BATCH_SIZE);
 		await Promise.all(
-			batch.map(async (info) => {
+			batch.map(async (ref) => {
 				try {
-					const sm = await SessionManager.open(info.path);
-					const entries = sm.getEntries() as unknown as AnyEntry[];
+					const entries = await source.readEntries(ref.path);
 
-					if (isMetaSession(entries)) return;
+					if (isMetaSession(entries)) {
+						scan.excluded_meta++;
+						return;
+					}
 
-					const meta = buildSessionMeta(
-						{
-							id: info.id,
-							path: info.path,
-							cwd: info.cwd,
-							created: info.created,
-							modified: info.modified,
-						},
-						entries,
+					// Sidecars are read here and folded into the parent: advisor and
+					// subagent spend is real money that belongs to this session.
+					const sidecars = await Promise.all(
+						ref.sidecars.map(async (sidecar) => ({
+							kind: sidecar.kind,
+							usage: extractSidecarUsage(await source.readEntries(sidecar.path)),
+						})),
 					);
+
+					const meta = buildSessionMeta(ref, entries, sidecars);
 					await saveMeta(meta);
 					metas.push(meta);
 				} catch {
 					// Skip sessions that fail to load
+					scan.excluded_unparsed++;
 				}
 				loadedCount++;
 			}),
 		);
 		ctx.ui.setWidget("insights", [
 			"",
-			"  📊 Pi Insights",
+			"  📊 omp Insights",
 			"  ─────────────────────────────────",
 			`  Phase 2/5: Loaded ${cachedMetaIds.size} cached, ${loadedCount}/${toLoad.length} new`,
 		]);
 	}
 
 	// Filter substantive sessions (≥2 user messages, ≥1 min)
-	const substantive = metas.filter(
-		(m) => m.user_message_count >= 2 && m.duration_minutes >= 1,
-	).filter((m) => {
-		if (!sinceDays) return true;
-		const age = Date.now() - new Date(m.start_time).getTime();
-		return age < sinceDays * 86400000;
+	const substantive = metas.filter((m) => {
+		if (m.user_message_count < 2 || m.duration_minutes < 1) {
+			scan.excluded_not_substantive++;
+			return false;
+		}
+		if (sinceDays) {
+			const age = Date.now() - new Date(m.start_time).getTime();
+			if (age >= sinceDays * 86400000) {
+				scan.excluded_by_since++;
+				return false;
+			}
+		}
+		return true;
 	});
+	scan.included = substantive.length;
 
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
 		`  Phase 2/5 done — ${substantive.length} substantive sessions`,
-		"  Phase 3/5: LLM facet extraction...",
+		LLM_PHASES_ENABLED
+			? "  Phase 3/5: LLM facet extraction..."
+			: "  Phase 3/5: skipped (deterministic run)",
 	]);
 
 	// ── Phase 3: Facet Extraction ─────────────────────────────────────────────────
@@ -2915,20 +3469,23 @@ async function runInsights(
 		}
 	}
 
-	// Extract new facets
-	const needsFacets = substantive
-		.filter((m) => !facetsMap.has(m.session_id))
-		.slice(0, MAX_FACET_EXTRACTIONS);
+	// Stage 1 stub: no facet extraction, so a run spends nothing. The
+	// extraction loop below is upstream's and is enabled in Stage 2 by
+	// flipping LLM_PHASES_ENABLED (HANDOVER.md staging).
+	const needsFacets = LLM_PHASES_ENABLED
+		? substantive
+				.filter((m) => !facetsMap.has(m.session_id))
+				.slice(0, limits.maxFacets)
+		: [];
 
 	if (needsFacets.length > 0) {
 		let facetsDone = 0;
-		for (let i = 0; i < needsFacets.length; i += FACET_CONCURRENCY) {
-			const batch = needsFacets.slice(i, i + FACET_CONCURRENCY);
+		for (let i = 0; i < needsFacets.length; i += limits.facetConcurrency) {
+			const batch = needsFacets.slice(i, i + limits.facetConcurrency);
 			await Promise.all(
 				batch.map(async (meta) => {
 					try {
-						const sm = await SessionManager.open(meta.session_path);
-						const entries = sm.getEntries() as unknown as AnyEntry[];
+						const entries = await source.readEntries(meta.session_path);
 						let transcript = formatTranscript(entries, meta);
 
 						// Summarize long transcripts
@@ -2980,7 +3537,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 					facetsDone++;
 					ctx.ui.setWidget("insights", [
 						"",
-						"  📊 Pi Insights",
+						"  📊 omp Insights",
 						"  ─────────────────────────────────",
 						`  Phase 3/5: Facets ${facetsDone}/${needsFacets.length}...`,
 					]);
@@ -3001,10 +3558,12 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
-		`  Phase 3/5 done — ${facetsMap.size} facets extracted`,
-		"  Phase 4/5: Generating insights...",
+		LLM_PHASES_ENABLED
+			? `  Phase 3/5 done — ${facetsMap.size} facets extracted`
+			: "  Phase 3/5 skipped — deterministic sections only",
+		"  Phase 4/5: Aggregating...",
 	]);
 
 	// ── Phase 4: Aggregate + Insight Prompts ─────────────────────────────────────
@@ -3014,9 +3573,11 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx);
 	const sectionPrompts = buildSectionPrompts(dataBlock, temporal, userCtx, agg);
 
-	const sectionKeys = Object.keys(sectionPrompts) as Array<
-		keyof typeof sectionPrompts
-	>;
+	// Stage 1 stub: the section prompts are built (so the shared data block is
+	// exercised) but none are sent. Stage 2 enables them.
+	const sectionKeys = LLM_PHASES_ENABLED
+		? (Object.keys(sectionPrompts) as Array<keyof typeof sectionPrompts>)
+		: [];
 	const sectionResults: Record<string, unknown> = {};
 	let sectionsDone = 0;
 
@@ -3032,53 +3593,95 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 			sectionsDone++;
 			ctx.ui.setWidget("insights", [
 				"",
-				"  📊 Pi Insights",
+				"  📊 omp Insights",
 				"  ─────────────────────────────────",
 				`  Phase 4/5: Insights ${sectionsDone}/${sectionKeys.length}...`,
 			]);
 		}),
 	);
 
-	// Synthesis (At a Glance)
-	ctx.ui.setWidget("insights", [
-		"",
-		"  📊 Pi Insights",
-		"  ─────────────────────────────────",
-		"  Phase 4/5: Synthesis...",
-	]);
-
 	let synthesis: Record<string, string> = {};
-	try {
-		const synthText = await callModel(
-			ctx,
-			buildSynthesisPrompt(dataBlock, sectionResults),
-			8192,
-		);
-		synthesis =
-			(parseJsonFromResponse(synthText) as Record<string, string>) ?? {};
-	} catch {
-		synthesis = {
-			whats_working:
-				"Analysis complete — see sections below for detailed breakdown.",
-			whats_hindering: "See Friction Analysis section.",
-			quick_wins: "See Suggestions section.",
-			ambitious_workflows: "See On the Horizon section.",
-		};
+	if (LLM_PHASES_ENABLED) {
+		// Synthesis (At a Glance)
+		ctx.ui.setWidget("insights", [
+			"",
+			"  📊 omp Insights",
+			"  ─────────────────────────────────",
+			"  Phase 4/5: Synthesis...",
+		]);
+
+		try {
+			const synthText = await callModel(
+				ctx,
+				buildSynthesisPrompt(dataBlock, sectionResults),
+				8192,
+			);
+			synthesis =
+				(parseJsonFromResponse(synthText) as Record<string, string>) ?? {};
+		} catch {
+			synthesis = {
+				whats_working:
+					"Analysis complete — see sections below for detailed breakdown.",
+				whats_hindering: "See Friction Analysis section.",
+				quick_wins: "See Suggestions section.",
+				ambitious_workflows: "See On the Horizon section.",
+			};
+		}
 	}
 
 	// ── Phase 5: Render HTML ──────────────────────────────────────────────────────
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
 		"  Phase 5/5: Rendering report...",
 	]);
+
+	// Audit manifest: the exact session set behind the numbers, so a report's
+	// total cost can be reconciled against the logs with jq (acceptance
+	// criterion 2 in HANDOVER.md) instead of being taken on trust.
+	await writeFile(
+		SESSION_SET_PATH,
+		JSON.stringify(
+			{
+				generated_at: new Date().toISOString(),
+				source: source.name,
+				sessions_dir: SESSIONS_DIR,
+				since_days: sinceDays || null,
+				scan,
+				totals: {
+					sessions: agg.total_sessions,
+					cost: agg.total_cost,
+					cost_primary: agg.total_cost_primary,
+					cost_advisor: agg.total_cost_advisor,
+					cost_subagent: agg.total_cost_subagent,
+					input_tokens: agg.total_input_tokens,
+					output_tokens: agg.total_output_tokens,
+				},
+				sessions: kept.map((m) => ({
+					session_id: m.session_id,
+					path: m.session_path,
+					log_signature: m.log_signature,
+					start_time: m.start_time,
+					cost: m.total_cost,
+					cost_primary: m.cost_primary,
+					cost_advisor: m.cost_advisor,
+					cost_subagent: m.cost_subagent,
+					sidecars:
+						scanned.sessions.find((r) => r.id === m.session_id)?.sidecars.map((s) => s.path) ?? [],
+				})),
+			},
+			null,
+			2,
+		),
+		{ encoding: "utf-8", mode: 0o600 },
+	);
 
 	const html = generateHTML(agg, sectionResults, synthesis, temporal);
 	await writeFile(REPORT_PATH, html, { encoding: "utf-8" });
 
 	if (formatMd) {
-		const md = generateMarkdown(agg, sectionResults, synthesis, temporal);
+		const md = generateMarkdown(agg, sectionResults, synthesis, temporal, scan, userCtx);
 		await writeFile(REPORT_MD_PATH, md, { encoding: "utf-8" });
 		ctx.ui.setStatus("insights", "");
 		ctx.ui.setWidget("insights", undefined);
@@ -3102,9 +3705,9 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 // ─── Extension Entry ──────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-	pi.registerCommand("pi-insights", {
+	pi.registerCommand("insights", {
 		description:
-			"Generate a personal usage insights report from your Pi session history",
+			"Generate a personal usage insights report from your omp session history",
 		handler: async (args, ctx) => {
 			try {
 				await runInsights(args ?? "", ctx);
