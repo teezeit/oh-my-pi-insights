@@ -116,3 +116,27 @@ Read-only against `~/.omp/agent/sessions`. Results are cached in
 ## License
 
 AGPL-3.0-only, as upstream.
+
+## Tests
+
+```bash
+npm test                    # node --test, no dependencies
+npm run test:update-golden   # after an intentional report-layout change
+```
+
+26 tests, ~0.4s. Node >= 22.6 (native TypeScript type-stripping); upstream ships
+no test suite, builder or linter config, so this adds a runner rather than
+adopting one.
+
+- `test/config.test.ts` - the hand-rolled `config.yml` YAML subset reader and
+  flag/env/default limit resolution.
+- `test/stats.test.ts` - cost from both `message.usage` and `model_usage`,
+  `isError` counting, `xd://` device classification, hashline-patch line
+  accounting, steering/escalation signals, and the
+  `total_cost == primary + advisor + subagent` identity the jq cross-check
+  reconciles against the logs.
+- `test/scanner.test.ts` - a temp fixture tree: sidecar classification and
+  recursion, `.log` spill ignored, duplicate-session-id dedupe, signature
+  coverage, partial trailing lines from a live session.
+- `test/report.test.ts` - aggregation and weekly-diff noise gates, plus a
+  golden-file comparison of the rendered Markdown (`test/golden/report.md`).

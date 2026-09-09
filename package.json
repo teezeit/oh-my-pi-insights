@@ -5,6 +5,14 @@
   "description": "omp Insights extension — generates a personal usage insights report from your omp session history",
   "author": "Hari Srinivasan <harisrini21@gmail.com>",
   "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types 'test/*.test.ts'",
+    "test:update-golden": "UPDATE_GOLDEN=1 node --test --experimental-strip-types test/report.test.ts",
+    "verify:cost": "./tools/verify-cost.sh"
+  },
   "keywords": [
     "omp-extension",
     "insights",

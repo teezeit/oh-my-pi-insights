@@ -855,77 +855,83 @@ async function collectSidecars(
  * Filesystem-only by design: no omp internals, so the scan keeps working
  * across harness versions.
  */
-const ompSessionSource: SessionSource = {
-	name: "omp",
-	readEntries: readJsonl,
-	async listSessions(): Promise<SessionScan> {
-		const sessions: SessionRef[] = [];
-		let projects: DirEntry[] = [];
-		try {
-			projects = await readdir(SESSIONS_DIR, { withFileTypes: true });
-		} catch {
-			return { sessions, duplicate_logs: 0 };
-		}
-
-		for (const project of projects) {
-			if (!project.isDirectory()) continue;
-			const projectDir = join(SESSIONS_DIR, project.name);
-			let entries: DirEntry[] = [];
+// Why a factory: the sessions directory is injectable so the scanner can be
+// exercised against a fixture tree instead of the user's real corpus.
+function createOmpSessionSource(sessionsDir: string = SESSIONS_DIR): SessionSource {
+	return {
+		name: "omp",
+		readEntries: readJsonl,
+		async listSessions(): Promise<SessionScan> {
+			const sessions: SessionRef[] = [];
+			let projects: DirEntry[] = [];
 			try {
-				entries = await readdir(projectDir, { withFileTypes: true });
+				projects = await readdir(sessionsDir, { withFileTypes: true });
 			} catch {
-				continue;
+				return { sessions, duplicate_logs: 0 };
 			}
-			const sidecarDirs = new Set(
-				entries.filter((e) => e.isDirectory()).map((e) => e.name),
-			);
 
-			for (const entry of entries) {
-				if (entry.isDirectory() || !entry.name.endsWith(".jsonl")) continue;
-				const base = entry.name.replace(/\.jsonl$/, "");
-				const path = join(projectDir, entry.name);
-				const info = await stat(path).catch(() => null);
-				if (!info) continue;
+			for (const project of projects) {
+				if (!project.isDirectory()) continue;
+				const projectDir = join(sessionsDir, project.name);
+				let entries: DirEntry[] = [];
+				try {
+					entries = await readdir(projectDir, { withFileTypes: true });
+				} catch {
+					continue;
+				}
+				const sidecarDirs = new Set(
+					entries.filter((e) => e.isDirectory()).map((e) => e.name),
+				);
 
-				const sidecars: SidecarRef[] = [];
-				if (sidecarDirs.has(base))
-					await collectSidecars(join(projectDir, base), "", sidecars);
+				for (const entry of entries) {
+					if (entry.isDirectory() || !entry.name.endsWith(".jsonl")) continue;
+					const base = entry.name.replace(/\.jsonl$/, "");
+					const path = join(projectDir, entry.name);
+					const info = await stat(path).catch(() => null);
+					if (!info) continue;
 
-				// <ISO-ts>_<session-id>: the id is authoritative from the session
-				// record, but the filename gives it before parsing so the meta
-				// cache can be consulted without reading the log.
-				const sep = base.indexOf("_");
-				sessions.push({
-					id: sep >= 0 ? base.slice(sep + 1) : base,
-					path,
-					project_path: "",
-					size: info.size,
-					created: info.birthtime.getTime() ? info.birthtime : info.mtime,
-					modified: info.mtime,
-					sidecars,
-					signature: [
-						`${info.size}:${info.mtimeMs}`,
-						...sidecars.map((s) => `${s.name}=${s.size}:${s.mtime_ms}`),
-					].join("|"),
-				});
+					const sidecars: SidecarRef[] = [];
+					if (sidecarDirs.has(base))
+						await collectSidecars(join(projectDir, base), "", sidecars);
+
+					// <ISO-ts>_<session-id>: the id is authoritative from the session
+					// record, but the filename gives it before parsing so the meta
+					// cache can be consulted without reading the log.
+					const sep = base.indexOf("_");
+					sessions.push({
+						id: sep >= 0 ? base.slice(sep + 1) : base,
+						path,
+						project_path: "",
+						size: info.size,
+						created: info.birthtime.getTime() ? info.birthtime : info.mtime,
+						modified: info.mtime,
+						sidecars,
+						signature: [
+							`${info.size}:${info.mtimeMs}`,
+							...sidecars.map((s) => `${s.name}=${s.size}:${s.mtime_ms}`),
+						].join("|"),
+					});
+				}
 			}
-		}
 
-		// The same session can exist twice on disk under two slugified-cwd
-		// directories (a copied or relocated log keeps its session record id).
-		// Counting it twice would double-count its spend, so the largest copy
-		// wins — it is the most complete one.
-		const byId = new Map<string, SessionRef>();
-		for (const ref of sessions) {
-			const seen = byId.get(ref.id);
-			if (!seen || ref.size > seen.size) byId.set(ref.id, ref);
-		}
-		return {
-			sessions: [...byId.values()],
-			duplicate_logs: sessions.length - byId.size,
-		};
-	},
-};
+			// The same session can exist twice on disk under two slugified-cwd
+			// directories (a copied or relocated log keeps its session record id).
+			// Counting it twice would double-count its spend, so the largest copy
+			// wins — it is the most complete one.
+			const byId = new Map<string, SessionRef>();
+			for (const ref of sessions) {
+				const seen = byId.get(ref.id);
+				if (!seen || ref.size > seen.size) byId.set(ref.id, ref);
+			}
+			return {
+				sessions: [...byId.values()],
+				duplicate_logs: sessions.length - byId.size,
+			};
+		},
+	};
+}
+
+const ompSessionSource = createOmpSessionSource();
 
 // ─── Session Parsing ──────────────────────────────────────────────────────────
 
@@ -2567,8 +2573,8 @@ function generateMarkdown(
 	lines.push(`|--------|------|-------|`);
 	const share = (v: number) => (agg.total_cost > 0 ? `${((v / agg.total_cost) * 100).toFixed(1)}%` : "0%");
 	lines.push(`| Primary sessions | $${agg.total_cost_primary.toFixed(2)} | ${share(agg.total_cost_primary)} |`);
-	lines.push(`| Advisor sidecars (${agg.advisor_logs} logs) | $${agg.total_cost_advisor.toFixed(2)} | ${share(agg.total_cost_advisor)} |`);
-	lines.push(`| Subagent sidecars (${agg.subagent_logs} logs) | $${agg.total_cost_subagent.toFixed(2)} | ${share(agg.total_cost_subagent)} |`);
+	lines.push(`| Advisor sidecars (${agg.advisor_logs} ${agg.advisor_logs === 1 ? "log" : "logs"}) | $${agg.total_cost_advisor.toFixed(2)} | ${share(agg.total_cost_advisor)} |`);
+	lines.push(`| Subagent sidecars (${agg.subagent_logs} ${agg.subagent_logs === 1 ? "log" : "logs"}) | $${agg.total_cost_subagent.toFixed(2)} | ${share(agg.total_cost_subagent)} |`);
 	lines.push(`| **Total** | **$${agg.total_cost.toFixed(2)}** | 100% |`);
 	lines.push("");
 	lines.push(`Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that total: $${agg.total_utility_cost.toFixed(2)}. ${agg.sessions_with_sidecars} of ${agg.total_sessions} sessions had at least one sidecar.`);
@@ -3719,3 +3725,33 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 }
+
+// ─── Test Seam ────────────────────────────────────────────────────────────────
+
+// Why: the port stays a single file until Stage 2 lands (see HANDOVER.md
+// constraints), so the unit-testable internals are re-exported here rather
+// than split into modules. Not part of the extension's public surface.
+export {
+	aggregateData,
+	buildSessionMeta,
+	computeTemporalData,
+	createOmpSessionSource,
+	detectConcurrentSessions,
+	extractSessionStats,
+	extractSidecarUsage,
+	gatherUserContext,
+	generateMarkdown,
+	isMetaSession,
+	parseSimpleYaml,
+	readUsage,
+	resolveLimit,
+	toolErrorCategory,
+};
+export type {
+	AggregatedData,
+	ScanSummary,
+	SessionMeta,
+	SessionSource,
+	TemporalData,
+	UserContext,
+};
