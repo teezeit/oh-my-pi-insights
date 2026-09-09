@@ -1,135 +1,118 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com> -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
-![Pi Insights header showing weekly changes and navigation](assets/main.png)
+# omp Insights
 
-# Pi Insights
+Personal usage analytics for the **omp** coding harness. Scans your session
+history, extracts deterministic stats, and generates a report covering your
+workflows, spend and friction points.
 
-Personal usage analytics for the [Pi coding agent](https://github.com/earendil-works/pi). Scans your session history, extracts deterministic stats and LLM-powered facets, then generates a self-contained HTML report covering your workflows, friction points, and suggestions for improvement.
+This is a port of [`Observal/pi-insights`](https://github.com/Observal/pi-insights)
+(AGPL-3.0-only, © Hari Srinivasan) from the Pi coding agent to omp. The initial
+commit of this repository is upstream verbatim; diff against it to read the
+port. Upstream is itself a rewrite of a Claude Code command; the temporal
+layer, facet taxonomy, prompts and report structure are upstream's work.
 
-Built by the [Observal](https://github.com/BlazeUp-AI/Observal) team while developing our agent observability platform. We needed to understand how we actually use Pi across hundreds of sessions, what patterns emerge, and where we waste time or money. This extension is the result.
+## Port status
+
+| Stage | Contents | State |
+|-------|----------|-------|
+| 1 | paths and user context, filesystem session scanner, deterministic stats, caps, `--md` report | **landed** |
+| 2 | LLM facet extraction, 8 section prompts, synthesis, HTML report | not started |
+| 3 | `~/.claude/projects` source adapter | not started |
+
+Stage 1 calls no model: `LLM_PHASES_ENABLED` is `false`, `callModel` throws, and
+the facet/section/synthesis code paths (upstream's, kept intact) are skipped. A
+run costs nothing and does not need an active model.
 
 ## Install
 
-**From npm** (recommended):
-
 ```bash
-pi install npm:@observal/pi-insights
+omp -e ./index.ts          # try it from a checkout
+omp install ./oh-my-pi-insights
 ```
 
-**From source:**
-
-```bash
-git clone https://github.com/BlazeUp-AI/pi-insights.git
-pi install ./pi-insights
-```
-
-**Try without installing:**
-
-```bash
-pi -e npm:@observal/pi-insights
-```
+`omp -e npm:<pkg>` does not work for an uninstalled package: it resolves as a
+path and fails with `Cannot find module`.
 
 ## Usage
 
-Run the command inside any Pi session:
-
 ```
-/pi-insights
+/insights --md --no-open
 ```
-
-The report opens in your browser automatically.
-
-### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--refresh` / `-r` | Invalidate all cached LLM facet extractions and re-run them |
-| `--no-open` | Generate the report without opening it in the browser |
-| `--since <N>d` | Only analyze sessions from the last N days (e.g. `--since 7d`) |
-| `--md` | Output a Markdown report instead of opening the HTML version |
+| `--md` / `--format md` | Write the Markdown export |
+| `--no-open` | Do not open the HTML report in a browser |
+| `--since <N>d` / `<N>w` | Only analyse sessions from the last N days/weeks |
+| `--refresh` / `-r` | Invalidate cached facet extractions (Stage 2) |
+| `--max-sessions <N>` | Session load cap (default 2000, env `OMP_INSIGHTS_MAX_SESSIONS`) |
+| `--max-facets <N>` | Facet extraction cap (default 50, env `OMP_INSIGHTS_MAX_FACETS`) |
+| `--facet-concurrency <N>` | Facet extraction concurrency (default 50, env `OMP_INSIGHTS_FACET_CONCURRENCY`) |
 
-### Examples
+## What omp gives it that Pi did not
 
-```bash
-# Normal run (uses caches, fast on re-runs)
-/pi-insights
+- **Cost is recorded, not estimated.** Assistant messages carry
+  `message.usage.cost.total` and out-of-band calls are `model_usage` records.
+  Upstream's price table and token-derived cost are gone.
+- **Tool failures are a boolean.** `toolResult.isError` replaces upstream's
+  regex bucketing over tool output; the category comes from the tool name.
+- **Nested logs are real sessions.** `__advisor.jsonl` and per-subagent logs
+  live in a sidecar directory beside their parent's log and hold their own
+  spend. They are attributed to the parent, reported as
+  `cost_primary`/`cost_advisor`/`cost_subagent`, and never counted as
+  top-level sessions.
+- **Behavioural signals with no Pi equivalent**: `steering` (interruptions),
+  `thinking_level_change` and `model_change` (mid-session escalation),
+  `compaction`, `ttft`/`duration` (latency), `cacheRead`/`cacheWrite`.
+- **`xd://` writes are tool-device calls**, not file writes, so MCP and device
+  usage is visible instead of hidden inside a `write` count.
 
-# Force re-extraction of all session facets
-/pi-insights --refresh
+## Verifying the numbers
 
-# Generate without auto-opening
-/pi-insights --no-open
+Every run writes an audit manifest next to the report:
 
-# Only analyze the last 7 days
-/pi-insights --since 7d
-
-# Export as Markdown (for Slack, docs, etc.)
-/pi-insights --md
+```
+~/.omp/agent/usage-data/session-set.json
 ```
 
-## What the Report Shows
+It lists the exact session set, per-session cost split by class, each sidecar
+path, and a `size:mtime` signature per log. `tools/verify-cost.sh` re-sums
+`usage.cost.total` with `jq` over those same files (including
+`__advisor.jsonl`), checks no log changed since the run, and compares:
 
-### Session stats at a glance
+```bash
+$ ./tools/verify-cost.sh
+{
+  "sessions_checked": 114,
+  "logs_changed_since_run": 0,
+  "jq":     { "primary": 2459.844615600002, "advisor": 20.02110515, "subagent": 215.55632425000005, "total": 2695.422045000002 },
+  "report": { "primary": 2459.844615600002, "advisor": 20.02110515, "subagent": 215.55632425000002, "total": 2695.422045 },
+  "advisor_sidecars_summed": 16,
+  "subagent_sidecars_summed": 175,
+  "match": true
+}
+```
 
-Tokens, cost, lines changed, commits, tool errors, parallel sessions, and more.
+## Data layout
 
-![Stats grid showing sessions, messages, tokens, cost, lines, commits](assets/stats.png)
-
-### Context-aware suggestions with copyable prompts
-
-Suggests features, skills, and config additions tailored to your actual workflow. References your real projects and tools.
-
-![Features to try section with lifecycle hooks and skills suggestions](assets/features.png)
-
-### "Stop Doing" section
-
-Tells you what patterns are costing you time or money, with concrete alternatives.
-
-![Consider Stopping section with three anti-patterns and green alternatives](assets/bad_patterns.png)
-
-### Model spend analysis
-
-Identifies overspend (Opus on simple tasks) and underspend (Sonnet failing on complex work), with a recommendation and estimated savings.
-
-![Model efficiency showing overspend, underspend, and recommendation](assets/save_money.png)
-
-## What Makes This Different
-
-Most Pi insight extensions dump flat aggregates into an LLM prompt and get the same generic report every time. This one is temporal-aware:
-
-- **Week-over-week diffs**: see what actually changed, not a static portrait
-- **Decay-weighted charts**: recent sessions have more influence on friction/satisfaction/outcome charts (10-day half-life)
-- **Trajectory detection**: are your costs/errors improving, worsening, or stable?
-- **Anomaly detection**: spikes in cost or errors are surfaced with context
-- **Resolved vs ongoing friction**: only surfaces problems you still have, not ones you fixed
-- **Context-aware suggestions**: reads your existing AGENTS.md, installed skills, extensions, and packages. Will not suggest what you already have.
-- **Negative suggestions**: tells you what to stop doing, not just what to add
-
-## How It Works
-
-The pipeline runs in five phases:
-
-1. **Scan** all Pi session log files
-2. **Extract stats** deterministically from each session (tool counts, tokens, languages, git activity, response times)
-3. **LLM facet extraction** per session to classify goals, outcomes, satisfaction, and friction
-4. **Aggregate with decay weighting**, compute diffs, detect anomalies and transitions, gather user context
-5. **Generate insights** using 8 parallel LLM prompts (with temporal and user context injected) plus a synthesis prompt, then **render** a self-contained HTML report
-
-Results are cached in `~/.pi/agent/usage-data/`:
+Read-only against `~/.omp/agent/sessions`. Results are cached in
+`~/.omp/agent/usage-data/`:
 
 | Path | Contents |
 |------|----------|
-| `session-meta/<id>.json` | Deterministic stats, cached permanently |
-| `facets/<id>.json` | LLM-extracted facets, cached permanently (clear with `--refresh`) |
-| `report.html` | Last generated report |
-| `report.md` | Last markdown export (when using `--md`) |
+| `session-meta/<id>.json` | Deterministic stats; invalidated when a log's size or mtime changes |
+| `facets/<id>.json` | LLM-extracted facets (Stage 2), cleared by `--refresh` |
+| `report.html` | Last generated HTML report |
+| `report.md` | Last Markdown export |
+| `session-set.json` | Audit manifest for the last run |
 
 ## Requirements
 
-- [Pi](https://github.com/earendil-works/pi) v0.74.0 or later
-- An active model configured in Pi (used for both facet extraction and insight generation)
+- omp 18.x (developed against `omp/18.1.14`)
+- No runtime dependencies beyond node builtins
 
 ## License
 
-AGPL-3.0-only
+AGPL-3.0-only, as upstream.

@@ -1950,7 +1950,7 @@ function aggregateData(
 
 // Stage 1 stub. Every caller is behind LLM_PHASES_ENABLED, so this is
 // unreachable until Stage 2 wires it to omp's completion API. Upstream called
-// `complete()` from @earendil-works/pi-ai with
+// its own AI package's `complete()` with
 // ctx.modelRegistry.getApiKeyAndHeaders(ctx.model); the omp context exposes
 // the same shape (see HANDOVER.md P4), but the port takes no dependency on
 // that package name, so the call itself is deliberately not carried over yet.
