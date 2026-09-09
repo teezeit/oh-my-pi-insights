@@ -2,48 +2,97 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 /**
- * /insights — Pi Usage Insights
+ * /insights — omp Usage Insights
  *
- * Scans all Pi session logs, extracts deterministic stats, runs LLM
+ * Scans all omp session logs, extracts deterministic stats, runs LLM
  * facet extraction per session (cached), fires 7 parallel insight prompts
  * + 1 synthesis, and writes a self-contained HTML report.
+ *
+ * Ported from Observal/pi-insights (AGPL-3.0-only) to the omp harness.
  *
  * Usage:
  *   /insights             — run with caches (fast on re-runs)
  *   /insights --refresh   — invalidate all LLM facet caches, re-extract
+ *   /insights --md        — write the Markdown export instead of HTML
  *   /insights --no-open   — don't open the report in the browser
+ *   /insights --since 7d  — restrict the corpus to the last 7 days
  *
- * Data dir: ~/.pi/agent/usage-data/
+ * Data dir: ~/.omp/agent/usage-data/
  *   session-meta/<id>.json   deterministic stats, cached permanently
  *   facets/<id>.json         LLM-extracted facets, cached permanently
  *   report.html              last generated report
+ *   session-set.json         audit manifest of the last run's session set
  */
 
-import { complete } from "@earendil-works/pi-ai";
-import type {
-	ExtensionAPI,
-	ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { execFile as execFileCb } from "node:child_process";
-import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { extname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCb);
 
+// ─── Host API (structural) ────────────────────────────────────────────────────
+
+// Why: no package-specific type import here. Pi and omp expose the same
+// extension API but publish their types under different package names, so the
+// host is typed structurally — same rationale as the note at the top of
+// ~/.omp/agent/extensions/orca-agent-status.ts.
+
+type ExtensionUI = {
+	notify(message: string, level?: "info" | "success" | "warning" | "error"): void;
+	setStatus(key: string, text: string): void;
+	setWidget(key: string, lines?: string[]): void;
+};
+
+type ExtensionCommandContext = {
+	ui: ExtensionUI;
+	cwd?: string;
+	model?: unknown;
+	modelRegistry?: {
+		getApiKeyAndHeaders(model: unknown): Promise<{
+			ok: boolean;
+			error?: string;
+			apiKey?: string;
+			headers?: Record<string, string>;
+		}>;
+	};
+	sessionManager?: { getSessionId?(): string | null | undefined };
+};
+
+type ExtensionAPI = {
+	registerCommand(
+		name: string,
+		spec: {
+			description: string;
+			handler(
+				args: string | undefined,
+				ctx: ExtensionCommandContext,
+			): Promise<void> | void;
+		},
+	): void;
+};
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DATA_DIR = join(homedir(), ".pi", "agent", "usage-data");
+const AGENT_DIR = join(homedir(), ".omp", "agent");
+const SESSIONS_DIR = join(AGENT_DIR, "sessions");
+const DATA_DIR = join(AGENT_DIR, "usage-data");
 const FACETS_DIR = join(DATA_DIR, "facets");
 const META_DIR = join(DATA_DIR, "session-meta");
 const REPORT_PATH = join(DATA_DIR, "report.html");
 const REPORT_MD_PATH = join(DATA_DIR, "report.md");
+const SESSION_SET_PATH = join(DATA_DIR, "session-set.json");
 
-const MAX_SESSIONS_TO_LOAD = 200;
-const MAX_FACET_EXTRACTIONS = 50;
-const FACET_CONCURRENCY = 50;
+// Why: the corpus is already ~400 sessions, so upstream's 200 load cap would
+// silently truncate it. Loading is cached per session and costs no tokens, so
+// the default is raised past the corpus size; facet extraction stays capped
+// because that phase spends money. All three are flag- and env-overridable
+// (--max-sessions / --max-facets / --facet-concurrency,
+// OMP_INSIGHTS_MAX_SESSIONS / _MAX_FACETS / _FACET_CONCURRENCY).
+const DEFAULT_MAX_SESSIONS_TO_LOAD = 2000;
+const DEFAULT_MAX_FACET_EXTRACTIONS = 50;
+const DEFAULT_FACET_CONCURRENCY = 50;
 const META_BATCH_SIZE = 50;
 const LOAD_BATCH_SIZE = 10;
 const OVERLAP_WINDOW_MS = 30 * 60_000;
@@ -184,6 +233,26 @@ type SessionMeta = {
 	files_modified: number;
 	message_hours: number[];
 	user_message_timestamps: string[];
+	// ── omp additions ──
+	// Why: omp writes explicit per-call cost, and advisor/subagent sidecars are
+	// separate logs with their own spend. total_cost is the parent-attributed
+	// sum of all three buckets; the buckets are kept so the report can show
+	// where the money actually went (HANDOVER.md "nested logs").
+	cost_primary: number;
+	cost_advisor: number;
+	cost_subagent: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	utility_cost: number;
+	sidecar_counts: { advisor: number; subagent: number };
+	sidecar_tool_calls: number;
+	sidecar_tool_errors: number;
+	thinking_escalations: number;
+	model_switches: number;
+	compactions: number;
+	steering_messages: number;
+	median_ttft_ms: number;
+	median_response_ms: number;
 	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number }>;
 };
 
@@ -245,11 +314,26 @@ type AggregatedData = {
 	total_files_modified: number;
 	days_active: number;
 	message_hours: number[];
-	multi_clauding: {
+	concurrent_sessions: {
 		overlap_events: number;
 		sessions_involved: number;
 		user_messages_during: number;
 	};
+	// ── omp additions ──
+	total_cost_primary: number;
+	total_cost_advisor: number;
+	total_cost_subagent: number;
+	total_utility_cost: number;
+	total_cache_read_tokens: number;
+	total_cache_write_tokens: number;
+	advisor_logs: number;
+	subagent_logs: number;
+	sessions_with_sidecars: number;
+	total_thinking_escalations: number;
+	total_model_switches: number;
+	total_compactions: number;
+	total_steering: number;
+	median_ttft_ms: number;
 	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number; sessions: number; tier?: string }>;
 	model_efficiency: Array<{
 		model: string;
@@ -268,9 +352,27 @@ type AggregatedData = {
 type UserContext = {
 	existing_agents_md_rules: string[];
 	installed_skills: string[];
+	installed_managed_skills: string[];
 	installed_extensions: string[];
-	installed_packages: string[];
+	installed_hooks: string[];
+	mcp_servers: string[];
+	model_roles: Record<string, string>;
+	fallback_chains: Record<string, string[]>;
 	default_model: string;
+};
+
+/** What the scan itself saw — reported so the numbers can be audited. */
+type ScanSummary = {
+	sessions_dir: string;
+	primary_logs: number;
+	advisor_logs: number;
+	subagent_logs: number;
+	excluded_meta: number;
+	excluded_current: number;
+	excluded_unparsed: number;
+	excluded_not_substantive: number;
+	excluded_by_since: number;
+	included: number;
 };
 
 type TemporalData = {
@@ -340,35 +442,170 @@ async function deleteCachedFacets(sessionId: string): Promise<void> {
 	}
 }
 
-async function gatherUserContext(): Promise<UserContext> {
-	const agentDir = join(homedir(), ".pi", "agent");
-	const ctx: UserContext = { existing_agents_md_rules: [], installed_skills: [], installed_extensions: [], installed_packages: [], default_model: "" };
+type YamlNode = { [k: string]: string | string[] | YamlNode };
 
+function unquoteYaml(v: string): string {
+	const t = v.trim().replace(/\s+#.*$/, "").trim();
+	if (
+		(t.startsWith('"') && t.endsWith('"')) ||
+		(t.startsWith("'") && t.endsWith("'"))
+	)
+		return t.slice(1, -1);
+	return t;
+}
+
+/**
+ * Minimal YAML-subset reader for ~/.omp/agent/config.yml: indented mappings,
+ * `- ` scalar sequences, optionally quoted scalars.
+ *
+ * Why not a real YAML parser: the port takes no new runtime dependencies
+ * (node builtins only), and the only consumers here are `modelRoles` and
+ * `retry.fallbackChains` — both plain string maps and string lists.
+ */
+function parseSimpleYaml(text: string): YamlNode {
+	const root: YamlNode = {};
+	const stack: Array<{ indent: number; node: YamlNode }> = [
+		{ indent: -1, node: root },
+	];
+	let lastKey: { node: YamlNode; key: string } | null = null;
+
+	for (const raw of text.split("\n")) {
+		const trimmed = raw.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		const indent = raw.search(/\S/);
+
+		if (trimmed.startsWith("- ")) {
+			if (!lastKey) continue;
+			const existing = lastKey.node[lastKey.key];
+			const item = unquoteYaml(trimmed.slice(2));
+			if (Array.isArray(existing)) existing.push(item);
+			else lastKey.node[lastKey.key] = [item];
+			continue;
+		}
+
+		const colon = trimmed.indexOf(":");
+		if (colon < 0) continue;
+		const key = unquoteYaml(trimmed.slice(0, colon));
+		const value = trimmed.slice(colon + 1).trim();
+
+		while (stack.length > 1 && indent <= stack[stack.length - 1]!.indent)
+			stack.pop();
+		const parent = stack[stack.length - 1]!.node;
+
+		if (!value) {
+			const child: YamlNode = {};
+			parent[key] = child;
+			stack.push({ indent, node: child });
+		} else {
+			parent[key] = unquoteYaml(value);
+		}
+		lastKey = { node: parent, key };
+	}
+	return root;
+}
+
+function yamlMap(node: YamlNode | undefined, key: string): YamlNode | undefined {
+	const v = node?.[key];
+	return v && !Array.isArray(v) && typeof v === "object" ? v : undefined;
+}
+
+async function listDirNames(
+	dir: string,
+	kind: "dirs" | "files",
+	exts: string[] = [],
+): Promise<string[]> {
 	try {
-		const agentsMd = await readFile(join(agentDir, "AGENTS.md"), "utf-8");
-		for (const line of agentsMd.split("\n")) {
-			const t = line.trim();
-			if (t.length > 20 && t.length < 200 && /\b(always|never|do not|don't|must|require|forbid)\b/i.test(t)) {
-				ctx.existing_agents_md_rules.push(t.slice(0, 150));
+		const entries = await readdir(dir, { withFileTypes: true });
+		return entries
+			.filter((e) => (kind === "dirs" ? e.isDirectory() : !e.isDirectory()))
+			.map((e) => e.name)
+			.filter((n) => !n.startsWith("."))
+			.filter((n) => !exts.length || exts.some((x) => n.endsWith(x)))
+			.map((n) => (exts.length ? n.replace(/\.[^.]+$/, "") : n))
+			.sort();
+	} catch {
+		return [];
+	}
+}
+
+async function gatherUserContext(): Promise<UserContext> {
+	const ctx: UserContext = {
+		existing_agents_md_rules: [],
+		installed_skills: [],
+		installed_managed_skills: [],
+		installed_extensions: [],
+		installed_hooks: [],
+		mcp_servers: [],
+		model_roles: {},
+		fallback_chains: {},
+		default_model: "",
+	};
+
+	// Global instructions. omp has no ~/.omp/agent/AGENTS.md; the user-level
+	// identity file is ~/.claude/CLAUDE.md, and AGENTS.md files are per project.
+	for (const file of [
+		join(homedir(), ".claude", "CLAUDE.md"),
+		join(AGENT_DIR, "AGENTS.md"),
+	]) {
+		try {
+			const text = await readFile(file, "utf-8");
+			for (const line of text.split("\n")) {
+				const t = line.trim();
+				if (t.length > 20 && t.length < 200 && /\b(always|never|do not|don't|must|require|forbid)\b/i.test(t)) {
+					ctx.existing_agents_md_rules.push(t.slice(0, 150));
+				}
+			}
+		} catch {}
+	}
+	ctx.existing_agents_md_rules = ctx.existing_agents_md_rules.slice(0, 20);
+
+	// config.yml is YAML, not settings.json. The default model is a model role,
+	// and retry.fallbackChains is the routing the report must not re-suggest.
+	try {
+		const cfg = parseSimpleYaml(await readFile(join(AGENT_DIR, "config.yml"), "utf-8"));
+		const roles = yamlMap(cfg, "modelRoles");
+		if (roles) {
+			for (const [role, model] of Object.entries(roles)) {
+				if (typeof model === "string") ctx.model_roles[role] = model;
+			}
+			// Roles may alias another role with "@name" (e.g. tiny: "@smol").
+			for (const [role, model] of Object.entries(ctx.model_roles)) {
+				if (model.startsWith("@")) {
+					const target = ctx.model_roles[model.slice(1)];
+					if (target) ctx.model_roles[role] = target;
+				}
+			}
+			ctx.default_model = ctx.model_roles.default ?? "";
+		}
+		const chains = yamlMap(yamlMap(cfg, "retry"), "fallbackChains");
+		if (chains) {
+			for (const [role, list] of Object.entries(chains)) {
+				if (Array.isArray(list)) ctx.fallback_chains[role] = list;
 			}
 		}
-		ctx.existing_agents_md_rules = ctx.existing_agents_md_rules.slice(0, 20);
+	} catch {}
+
+	// Both skill dirs matter: a suggestion recommending an already-installed
+	// skill is a bug, and most skills live under managed-skills/.
+	ctx.installed_skills = await listDirNames(join(AGENT_DIR, "skills"), "dirs");
+	ctx.installed_managed_skills = await listDirNames(join(AGENT_DIR, "managed-skills"), "dirs");
+	ctx.installed_extensions = await listDirNames(join(AGENT_DIR, "extensions"), "files", [".ts", ".js"]);
+
+	try {
+		const events = await readdir(join(AGENT_DIR, "hooks"), { withFileTypes: true });
+		for (const event of events) {
+			if (!event.isDirectory()) continue;
+			const hooks = await listDirNames(join(AGENT_DIR, "hooks", event.name), "files");
+			for (const h of hooks) ctx.installed_hooks.push(`${event.name}/${h}`);
+		}
 	} catch {}
 
 	try {
-		const settings = JSON.parse(await readFile(join(agentDir, "settings.json"), "utf-8"));
-		ctx.default_model = settings.defaultModel || "";
-		ctx.installed_packages = (settings.packages || []).map((p: string) => p.replace(/.*\//, ""));
-	} catch {}
-
-	try {
-		const entries = await readdir(join(agentDir, "skills"), { withFileTypes: true });
-		ctx.installed_skills = entries.filter((e: { isDirectory(): boolean; name: string }) => e.isDirectory()).map((e: { name: string }) => e.name);
-	} catch {}
-
-	try {
-		const entries = await readdir(join(agentDir, "extensions"));
-		ctx.installed_extensions = entries.filter((f: string) => f.endsWith(".ts") || f.endsWith(".js")).map((f: string) => f.replace(/\.[^.]+$/, ""));
+		const mcp = JSON.parse(await readFile(join(AGENT_DIR, "mcp.json"), "utf-8")) as {
+			mcpServers?: Record<string, unknown>;
+			servers?: Record<string, unknown>;
+		};
+		ctx.mcp_servers = Object.keys(mcp.mcpServers ?? mcp.servers ?? {}).sort();
 	} catch {}
 
 	return ctx;
@@ -830,7 +1067,8 @@ function formatTranscript(entries: AnyEntry[], meta: SessionMeta): string {
 
 // ─── Parallel Session Detection ───────────────────────────────────────────────
 
-function detectMultiClauding(
+/** Sessions whose user messages interleave inside a 30-minute window. */
+function detectConcurrentSessions(
 	sessions: Array<{ session_id: string; user_message_timestamps: string[] }>,
 ) {
 	const all: Array<{ ts: number; sid: string }> = [];
@@ -954,11 +1192,25 @@ function aggregateData(
 		total_files_modified: 0,
 		days_active: 0,
 		message_hours: [],
-		multi_clauding: {
+		concurrent_sessions: {
 			overlap_events: 0,
 			sessions_involved: 0,
 			user_messages_during: 0,
 		},
+		total_cost_primary: 0,
+		total_cost_advisor: 0,
+		total_cost_subagent: 0,
+		total_utility_cost: 0,
+		total_cache_read_tokens: 0,
+		total_cache_write_tokens: 0,
+		advisor_logs: 0,
+		subagent_logs: 0,
+		sessions_with_sidecars: 0,
+		total_thinking_escalations: 0,
+		total_model_switches: 0,
+		total_compactions: 0,
+		total_steering: 0,
+		median_ttft_ms: 0,
 		model_usage: {},
 		model_efficiency: [],
 		estimated_waste: 0,
@@ -1006,6 +1258,20 @@ function aggregateData(
 		agg.message_hours.push(...meta.message_hours);
 		if (meta.uses_subagent) agg.sessions_using_subagent++;
 		if (meta.uses_mcp) agg.sessions_using_mcp++;
+		agg.total_cost_primary += meta.cost_primary;
+		agg.total_cost_advisor += meta.cost_advisor;
+		agg.total_cost_subagent += meta.cost_subagent;
+		agg.total_utility_cost += meta.utility_cost;
+		agg.total_cache_read_tokens += meta.cache_read_tokens;
+		agg.total_cache_write_tokens += meta.cache_write_tokens;
+		agg.advisor_logs += meta.sidecar_counts.advisor;
+		agg.subagent_logs += meta.sidecar_counts.subagent;
+		if (meta.sidecar_counts.advisor + meta.sidecar_counts.subagent > 0)
+			agg.sessions_with_sidecars++;
+		agg.total_thinking_escalations += meta.thinking_escalations;
+		agg.total_model_switches += meta.model_switches;
+		agg.total_compactions += meta.compactions;
+		agg.total_steering += meta.steering_messages;
 
 		// Aggregate per-model usage
 		for (const [model, usage] of Object.entries(meta.model_usage ?? {})) {
@@ -1078,7 +1344,11 @@ function aggregateData(
 	agg.friction_details = agg.friction_details.slice(0, 20);
 	agg.user_instructions = agg.user_instructions.slice(0, 15);
 
-	agg.multi_clauding = detectMultiClauding(
+	agg.median_ttft_ms = median(
+		metas.map((m) => m.median_ttft_ms).filter((v) => v > 0),
+	);
+
+	agg.concurrent_sessions = detectConcurrentSessions(
 		metas.map((m) => ({
 			session_id: m.session_id,
 			user_message_timestamps: m.user_message_timestamps,
@@ -1350,7 +1620,16 @@ function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData, userC
 				lines_added: agg.total_lines_added,
 				lines_removed: agg.total_lines_removed,
 				files_modified: agg.total_files_modified,
-				multi_clauding: agg.multi_clauding,
+				concurrent_sessions: agg.concurrent_sessions,
+				cost_primary_usd: agg.total_cost_primary.toFixed(2),
+				cost_advisor_usd: agg.total_cost_advisor.toFixed(2),
+				cost_subagent_usd: agg.total_cost_subagent.toFixed(2),
+				cache_read_tokens: agg.total_cache_read_tokens,
+				cache_write_tokens: agg.total_cache_write_tokens,
+				thinking_escalations: agg.total_thinking_escalations,
+				model_switches: agg.total_model_switches,
+				compactions: agg.total_compactions,
+				steering_messages: agg.total_steering,
 				subagent_sessions: agg.sessions_using_subagent,
 				mcp_sessions: agg.sessions_using_mcp,
 				model_usage: agg.model_usage,
@@ -1370,28 +1649,57 @@ ${agg.friction_details.map((d) => `- ${d}`).join("\n")}
 
 USER INSTRUCTIONS TO ASSISTANT:
 ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
-		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "What changed this week: " + temporal.diff_headlines.join("; ") : "No significant weekly changes."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nPackages: ${userCtx.installed_packages.join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
+		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "What changed this week: " + temporal.diff_headlines.join("; ") : "No significant weekly changes."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
 	);
 }
 
-const PI_FEATURES_REFERENCE = `## PI FEATURES REFERENCE:
-1. Extensions — TypeScript modules in ~/.pi/agent/extensions/ that register custom tools, commands, shortcuts, and react to lifecycle events
-   - Good for: automating repetitive actions, gating dangerous operations, custom UI, external integrations
+// Why this list is load-bearing: the model can only suggest features it is
+// told exist, so a wrong or Pi-shaped list is the main way the report turns
+// into useless advice. Keep it aligned with omp's real surface.
+const OMP_FEATURES_REFERENCE = `## OMP FEATURES REFERENCE:
+1. Skills — SKILL.md procedures in ~/.omp/agent/skills/ (user-authored) and
+   ~/.omp/agent/managed-skills/ (agent-authored via the manage_skill tool);
+   surfaced automatically by name/description match, read with skill://<name>
+   - Good for: repeatable procedures, debugging recipes, project workflows
+   - Rule: never suggest a skill whose name already appears in the installed list
 
-2. Skills — Markdown prompt templates in ~/.pi/agent/skills/ invoked with /skill:name
-   - Good for: repeatable workflows like code review, commit message generation, debugging guides
+2. Memory (learn tool) — durable project/user facts recorded to long-term
+   memory, summarised at memory://root
+   - Good for: conventions, non-obvious fixes, user preferences that must survive sessions
 
-3. Subagents (via pi-subagents extension) — spawn focused agents for parallel/exploratory work
-   - Good for: large codebase exploration, parallel tasks, multi-step investigations
+3. Hooks — executables under ~/.omp/agent/hooks/<event>/ (e.g. pre/) that run
+   on tool lifecycle events and can block or annotate a call
+   - Good for: format/type gates, permission gates, injecting scoped instructions
 
-4. Lifecycle hooks (via extensions) — react to tool_call, tool_result, before_agent_start events
-   - Good for: auto-formatting, type checks, permission gates, auto-commit checkpoints
+4. Extensions — TypeScript modules in ~/.omp/agent/extensions/ that register
+   commands, tools and widgets (this report is one)
+   - Good for: custom commands, external integrations, bespoke UI
 
-5. AGENTS.md / SYSTEM.md — project-specific context files loaded automatically
-   - Good for: team conventions, architecture notes, coding standards the assistant always follows
+5. Subagents (task tool) — background agents with their own context, batched in
+   one tasks[] array; typed agents (scout for read-only research, reviewer,
+   sonic for mechanical edits); coordinate over hub messaging
+   - Good for: parallel independent slices, unknown-code mapping, review passes
 
-6. Settings (settings.json) — default model, packages, custom providers
-   - Good for: standardizing across projects, pinning a model, enabling packages`;
+6. xd:// tool devices — schema-driven tools invoked by writing JSON args
+   (ast_edit for codemods, lsp for symbol-aware refactors, debug for DAP,
+   github for gh ops, plus every mounted MCP tool)
+   - Good for: structural rewrites, reference-safe renames, breakpoint debugging
+
+7. MCP servers — configured in ~/.omp/agent/mcp.json, mounted as xd:// devices
+   - Good for: Jira/Confluence, Outline, Sentry, Metabase, Postgres and similar
+
+8. Model roles and fallback chains — ~/.omp/agent/config.yml modelRoles
+   (default, plan, task, smol, tiny, advisor) and retry.fallbackChains
+   - Good for: routing cheap work to smol/tiny, pinning a stronger default,
+     surviving provider rate limits
+
+9. Advisor — a second model reviewing the main loop, logged to a per-session
+   __advisor.jsonl sidecar with its own cost
+   - Good for: catching wrong turns early; costs real money, so worth toggling
+
+10. AGENTS.md — per-repo instruction files, plus scoped
+   .agent/instructions/*.instructions.md with applyTo globs
+   - Good for: team conventions and per-path rules the agent always follows`;
 
 function buildSectionPrompts(data: string, temporal: TemporalData, userCtx: UserContext, agg: AggregatedData) {
 	return {
@@ -1476,13 +1784,13 @@ Max 2 resolved, 3 ongoing.
 DATA:
 ${data}`,
 
-		suggestions: `Analyze this usage data and suggest improvements for working with Pi.
+		suggestions: `Analyze this usage data and suggest improvements for working with omp.
 
-${PI_FEATURES_REFERENCE}
+${OMP_FEATURES_REFERENCE}
 
 CRITICAL: The user's existing setup is in the data below. DO NOT suggest:
 - Rules already in their AGENTS.md
-- Skills/extensions/packages they already have installed
+- Skills (including managed skills), extensions, hooks or MCP servers they already have installed
 - Fixes for "resolved friction" (listed in TEMPORAL CONTEXT)
 FOCUS on ongoing friction. Include at least one NEGATIVE suggestion (something to stop/remove).
 Tailor copyable prompts to their actual model (${userCtx.default_model || "unknown"}) and projects.
@@ -1493,12 +1801,12 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
     {
       "addition": "a specific rule NOT already in their AGENTS.md",
       "why": "1 sentence referencing actual ongoing friction",
-      "where": "AGENTS.md | settings.json | ~/.pi/agent/extensions/ | ~/.pi/agent/skills/"
+      "where": "AGENTS.md | ~/.omp/agent/config.yml | ~/.omp/agent/extensions/ | ~/.omp/agent/managed-skills/ | ~/.omp/agent/hooks/"
     }
   ],
   "features_to_try": [
     {
-      "feature": "feature name from PI FEATURES REFERENCE",
+      "feature": "feature name from OMP FEATURES REFERENCE",
       "one_liner": "what it does",
       "why_for_you": "why this helps YOUR ongoing friction patterns",
       "example": "actual command or config referencing their real projects"
@@ -2153,7 +2461,7 @@ ${temporal.diff_headlines.length ? `
     ${statCard("Interruptions", String(agg.total_interruptions), "")}
     ${agg.sessions_using_subagent ? statCard("Subagent Sessions", String(agg.sessions_using_subagent), "") : ""}
     ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "") : ""}
-    ${agg.multi_clauding.overlap_events ? statCard("Parallel Sessions", String(agg.multi_clauding.overlap_events), "overlap events") : ""}
+    ${agg.concurrent_sessions.overlap_events ? statCard("Parallel Sessions", String(agg.concurrent_sessions.overlap_events), "overlap events") : ""}
   </div>
 
   <div class="charts-grid">
