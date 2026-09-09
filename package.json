@@ -1,0 +1,41 @@
+{
+  "name": "@observal/pi-insights",
+  "version": "1.2.3",
+  "type": "module",
+  "description": "Pi Insights extension — generates a personal usage insights report from your Pi session history",
+  "author": "Hari Srinivasan <harisrini21@gmail.com>",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BlazeUp-AI/pi-insights.git"
+  },
+  "homepage": "https://github.com/BlazeUp-AI/pi-insights",
+  "bugs": {
+    "url": "https://github.com/BlazeUp-AI/pi-insights/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "insights",
+    "usage-analytics",
+    "ai-agent",
+    "coding-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-agent-core": ">=0.74.0",
+    "@earendil-works/pi-ai": ">=0.74.0"
+  }
+}
