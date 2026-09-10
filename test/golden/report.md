@@ -1,8 +1,6 @@
 # omp Insights
 > 2026-09-01 to 2026-09-02 | 2 sessions | Generated <date>
 
-_Deterministic run: session scan, stats and totals only. Facet extraction, the eight section prompts and the synthesis are not wired yet (Stage 1)._
-
 ## 📊 By the Numbers
 | Metric | Value |
 |--------|-------|
@@ -70,6 +68,8 @@ Scanned `/fixture/sessions`: 4 distinct sessions, 1 advisor sidecars, 2 subagent
 | Below substance floor (<2 user messages or <1 min) | 1 |
 | Outside --since window | 0 |
 | **Included** | **2** |
+
+Facet coverage: 1 of 2 sessions analysed, 1 extraction(s) failed. Sessions without facets still count in every deterministic number above; they are absent only from the LLM-derived sections.
 
 Session set and per-session cost: `<data-dir>/session-set.json`
 

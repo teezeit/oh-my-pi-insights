@@ -25,6 +25,7 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { extname, join } from "node:path";
@@ -80,6 +81,7 @@ const SESSIONS_DIR = join(AGENT_DIR, "sessions");
 const DATA_DIR = join(AGENT_DIR, "usage-data");
 const FACETS_DIR = join(DATA_DIR, "facets");
 const META_DIR = join(DATA_DIR, "session-meta");
+const SECTIONS_DIR = join(DATA_DIR, "sections");
 const REPORT_PATH = join(DATA_DIR, "report.html");
 const REPORT_MD_PATH = join(DATA_DIR, "report.md");
 const SESSION_SET_PATH = join(DATA_DIR, "session-set.json");
@@ -97,10 +99,14 @@ const META_BATCH_SIZE = 50;
 const LOAD_BATCH_SIZE = 10;
 const OVERLAP_WINDOW_MS = 30 * 60_000;
 
-// Stage 1 is deterministic only: scan, stats and the rendered numbers, with no
-// model call anywhere. Facet extraction, the section prompts and the synthesis
-// are upstream code kept intact and switched on in Stage 2 (HANDOVER.md).
-const LLM_PHASES_ENABLED = false;
+// Stage 2: the LLM phases are wired. Facet extraction, the section prompts and
+// the synthesis run through `omp -p` subprocesses (see callModel).
+const LLM_PHASES_ENABLED = true;
+
+// The omp binary this extension shells out to for model calls. Overridable so
+// a non-PATH install still works.
+const OMP_BIN = process.env.OMP_INSIGHTS_OMP_BIN || "omp";
+const MODEL_CALL_TIMEOUT_MS = 300_000;
 
 /** `--<flag> N` on the command line, else `$ENV`, else the default. */
 function resolveLimit(
@@ -397,7 +403,12 @@ type ScanSummary = {
 	excluded_unparsed: number;
 	excluded_not_substantive: number;
 	excluded_by_since: number;
+	/** Sessions whose facet extraction failed or returned nothing usable. */
+	facet_failures: number;
+	facets_analyzed: number;
 	included: number;
+	/** Set when --no-llm reused prose generated against an older corpus state. */
+	reused_stale_sections: boolean;
 };
 
 type TemporalData = {
@@ -417,6 +428,7 @@ type TemporalData = {
 async function ensureDirs(): Promise<void> {
 	await mkdir(META_DIR, { recursive: true });
 	await mkdir(FACETS_DIR, { recursive: true });
+	await mkdir(SECTIONS_DIR, { recursive: true });
 }
 
 async function loadCachedMeta(
@@ -441,6 +453,75 @@ async function saveMeta(meta: SessionMeta): Promise<void> {
 		JSON.stringify(meta, null, 2),
 		{ encoding: "utf-8", mode: 0o600 },
 	);
+}
+
+type CachedSections = {
+	sections: Record<string, unknown>;
+	synthesis: Record<string, string>;
+};
+
+/**
+ * The eight section prompts and the synthesis are a pure function of the
+ * shared data block, so they are cached on a hash of it. Without this a
+ * re-run with every facet cached still spent a minute and real money
+ * regenerating identical prose.
+ */
+async function loadCachedSections(key: string): Promise<CachedSections | null> {
+	try {
+		const raw = await readFile(join(SECTIONS_DIR, `${key}.json`), "utf-8");
+		const parsed = JSON.parse(raw) as CachedSections;
+		return parsed.sections ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+async function saveSections(key: string, value: CachedSections): Promise<void> {
+	await writeFile(join(SECTIONS_DIR, `${key}.json`), JSON.stringify(value, null, 2), {
+		encoding: "utf-8",
+		mode: 0o600,
+	});
+}
+
+/**
+ * Every distinct corpus state mints a new entry, and the corpus changes
+ * whenever omp runs, so this directory would grow without bound.
+ */
+async function pruneSections(keep = 5): Promise<void> {
+	try {
+		const files = await readdir(SECTIONS_DIR);
+		const stamped = await Promise.all(
+			files
+				.filter((f) => f.endsWith(".json"))
+				.map(async (f) => ({ f, m: (await stat(join(SECTIONS_DIR, f))).mtimeMs })),
+		);
+		stamped.sort((a, b) => b.m - a.m);
+		for (const { f } of stamped.slice(keep)) {
+			await unlink(join(SECTIONS_DIR, f)).catch(() => {});
+		}
+	} catch {
+		/* cache pruning is best effort */
+	}
+}
+
+/**
+ * Newest cached generation regardless of key. Only for --no-llm, where the
+ * caller has asked for no spend: reusing prose written against a slightly
+ * older corpus beats rendering none, provided the report says so.
+ */
+async function loadLatestSections(): Promise<CachedSections | null> {
+	try {
+		const files = await readdir(SECTIONS_DIR);
+		const stamped = await Promise.all(
+			files
+				.filter((f) => f.endsWith(".json"))
+				.map(async (f) => ({ f, m: (await stat(join(SECTIONS_DIR, f))).mtimeMs })),
+		);
+		const newest = stamped.sort((a, b) => b.m - a.m)[0];
+		return newest ? await loadCachedSections(newest.f.replace(/\.json$/, "")) : null;
+	} catch {
+		return null;
+	}
 }
 
 async function loadCachedFacets(
@@ -1954,20 +2035,56 @@ function aggregateData(
 
 // ─── LLM Calling ─────────────────────────────────────────────────────────────
 
-// Stage 1 stub. Every caller is behind LLM_PHASES_ENABLED, so this is
-// unreachable until Stage 2 wires it to omp's completion API. Upstream called
-// its own AI package's `complete()` with
-// ctx.modelRegistry.getApiKeyAndHeaders(ctx.model); the omp context exposes
-// the same shape (see HANDOVER.md P4), but the port takes no dependency on
-// that package name, so the call itself is deliberately not carried over yet.
+/**
+ * omp hands extensions credentials (`ctx.modelRegistry.getApiKeyAndHeaders`)
+ * but no completion client, so this shells out to omp itself instead of
+ * reimplementing a provider client.
+ *
+ * Why a subprocess: `omp -p` already speaks every provider dialect and auth
+ * scheme omp supports, including the OAuth-backed ones a fallback chain
+ * reaches on a rate limit. An in-process HTTP client would have to own
+ * anthropic-messages, openai-responses and github-copilot and would rot the
+ * first time a model role moved. The prompt goes over stdin, not argv, so
+ * transcript-sized prompts cannot hit an argument-length limit.
+ *
+ * `--no-session` keeps these calls out of the session corpus this report
+ * reads, and `--no-tools --no-extensions --no-skills` keeps them from doing
+ * anything but answering.
+ */
 async function callModel(
-	_ctx: ExtensionCommandContext,
-	_prompt: string,
-	_maxTokens?: number,
+	prompt: string,
+	opts: { model?: string; timeoutMs?: number } = {},
 ): Promise<string> {
-	throw new Error(
-		"LLM phases are not wired in Stage 1 — deterministic sections only",
+	const args = ["--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-title"];
+	if (opts.model) args.push("--model", opts.model);
+	args.push("-p");
+
+	const child = execFileCb(
+		OMP_BIN,
+		args,
+		{ maxBuffer: 32 * 1024 * 1024, timeout: opts.timeoutMs ?? MODEL_CALL_TIMEOUT_MS },
+		() => {},
 	);
+
+	const stdout: string[] = [];
+	const stderr: string[] = [];
+	child.stdout?.on("data", (c: Buffer) => stdout.push(c.toString()));
+	child.stderr?.on("data", (c: Buffer) => stderr.push(c.toString()));
+	child.stdin?.end(prompt);
+
+	const code = await new Promise<number>((resolve, reject) => {
+		child.on("error", reject);
+		child.on("close", (c) => resolve(c ?? -1));
+	});
+
+	const text = stdout.join("");
+	if (code !== 0) {
+		throw new Error(
+			`omp -p exited ${code}: ${(stderr.join("") || text).trim().slice(0, 300)}`,
+		);
+	}
+	// `omp -p` prints a progress line before the answer on a TTY-less run.
+	return text.replace(/^Working\.\.\.\s*/, "").trim();
 }
 
 function parseJsonFromResponse(text: string): unknown {
@@ -2519,11 +2636,6 @@ function generateMarkdown(
 	lines.push(`> ${agg.date_range.start} to ${agg.date_range.end} | ${agg.total_sessions} sessions | Generated ${new Date().toLocaleDateString()}`);
 	lines.push("");
 
-	if (!LLM_PHASES_ENABLED) {
-		lines.push("_Deterministic run: session scan, stats and totals only. Facet extraction, the eight section prompts and the synthesis are not wired yet (Stage 1)._");
-		lines.push("");
-	}
-
 	if (temporal.diff_headlines.length) {
 		lines.push("## \u{1F4C8} What Changed This Week");
 		for (const h of temporal.diff_headlines) lines.push(`- ${h}`);
@@ -2614,6 +2726,16 @@ function generateMarkdown(
 	lines.push(`| Below substance floor (<2 user messages or <1 min) | ${scan.excluded_not_substantive} |`);
 	lines.push(`| Outside --since window | ${scan.excluded_by_since} |`);
 	lines.push(`| **Included** | **${scan.included}** |`);
+	lines.push("");
+	lines.push(
+		`Facet coverage: ${scan.facets_analyzed} of ${scan.included} sessions analysed${scan.facet_failures ? `, ${scan.facet_failures} extraction(s) failed` : ""}. Sessions without facets still count in every deterministic number above; they are absent only from the LLM-derived sections.`,
+	);
+	if (scan.reused_stale_sections) {
+		lines.push("");
+		lines.push(
+			"_The narrative sections below were generated against an earlier corpus state and reused because this run was asked not to call a model (`--no-llm`). The numbers above are current._",
+		);
+	}
 	lines.push("");
 	lines.push(`Session set and per-session cost: \`${SESSION_SET_PATH}\``);
 	lines.push("");
@@ -3299,6 +3421,11 @@ async function runInsights(
 	const refresh = args.includes("--refresh") || args.includes("-r");
 	const noOpen = args.includes("--no-open");
 	const formatMd = args.includes("--format md") || args.includes("--md");
+	// --no-llm renders from whatever is already cached and never calls a model:
+	// the corpus changes whenever omp runs, so on a busy machine the section
+	// cache legitimately misses and a plain re-run is not free.
+	const noLlm = args.includes("--no-llm");
+	const useLlm = LLM_PHASES_ENABLED && !noLlm;
 
 	// Parse --since flag (e.g. --since 7d, --since 2w, --since 30d)
 	const sinceMatch = args.match(/--since\s+(\d+)([dw])/);
@@ -3314,7 +3441,7 @@ async function runInsights(
 
 	// Stage 1 never calls a model, so an active model is only required once the
 	// LLM phases are wired.
-	if (LLM_PHASES_ENABLED && !ctx.model) {
+	if (useLlm && !ctx.model) {
 		ctx.ui.notify("No active model — set a model first (/model)", "error");
 		return;
 	}
@@ -3322,6 +3449,13 @@ async function runInsights(
 	await ensureDirs();
 
 	const source = ompSessionSource;
+	// Fetched before the LLM phases: the facet phase needs the smol model role
+	// out of it, and the section prompts need the installed-skills list.
+	const userCtx = await gatherUserContext();
+	// The subprocess would otherwise use the configured default; pin it to the
+	// model actually active in this session so the report reflects /model.
+	const activeModel =
+		(ctx.model as { id?: string; provider?: string } | undefined)?.id ?? undefined;
 	const currentSessionId = ctx.sessionManager?.getSessionId?.() ?? "";
 
 	// ── Phase 1: Scan ────────────────────────────────────────────────────────────
@@ -3345,6 +3479,9 @@ async function runInsights(
 		excluded_unparsed: 0,
 		excluded_not_substantive: 0,
 		excluded_by_since: 0,
+		facet_failures: 0,
+		facets_analyzed: 0,
+		reused_stale_sections: false,
 		included: 0,
 	};
 	for (const ref of scanned.sessions) {
@@ -3457,7 +3594,7 @@ async function runInsights(
 		"  📊 omp Insights",
 		"  ─────────────────────────────────",
 		`  Phase 2/5 done — ${substantive.length} substantive sessions`,
-		LLM_PHASES_ENABLED
+		useLlm
 			? "  Phase 3/5: LLM facet extraction..."
 			: "  Phase 3/5: skipped (deterministic run)",
 	]);
@@ -3475,10 +3612,12 @@ async function runInsights(
 		}
 	}
 
-	// Stage 1 stub: no facet extraction, so a run spends nothing. The
-	// extraction loop below is upstream's and is enabled in Stage 2 by
-	// flipping LLM_PHASES_ENABLED (HANDOVER.md staging).
-	const needsFacets = LLM_PHASES_ENABLED
+	// Facet extraction is structured classification against a fixed JSON
+	// schema, so it runs on the smol role rather than the active model: one
+	// call per uncached session adds up, and the quality that matters shows in
+	// the section prompts and the synthesis, which use the default model.
+	const facetModel = userCtx.model_roles.smol || undefined;
+	const needsFacets = useLlm
 		? substantive
 				.filter((m) => !facetsMap.has(m.session_id))
 				.slice(0, limits.maxFacets)
@@ -3502,8 +3641,8 @@ async function runInsights(
 								chunks.push(transcript.slice(ci, ci + CHUNK));
 							const summaries = await Promise.all(
 								chunks.map((ch) =>
-									callModel(ctx, CHUNK_SUMMARIZE_PROMPT + ch, 500).catch(() =>
-										ch.slice(0, 2000),
+									callModel(CHUNK_SUMMARIZE_PROMPT + ch, { model: facetModel }).catch(
+										() => ch.slice(0, 2000),
 									),
 								),
 							);
@@ -3527,7 +3666,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "user_instructions_to_assistant": ["instruction1", "instruction2"]
 }`;
 
-						const text = await callModel(ctx, prompt, 4096);
+						const text = await callModel(prompt, { model: facetModel });
 						const parsed = parseJsonFromResponse(text) as SessionFacets | null;
 						if (parsed?.brief_summary) {
 							const facets: SessionFacets = {
@@ -3536,9 +3675,13 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 							};
 							await saveFacets(facets);
 							facetsMap.set(meta.session_id, facets);
+						} else {
+							// A reply that parsed but carried no summary is a failure too:
+							// the session silently drops out of every facet-derived chart.
+							scan.facet_failures++;
 						}
 					} catch {
-						// Skip failed extractions
+						scan.facet_failures++;
 					}
 					facetsDone++;
 					ctx.ui.setWidget("insights", [
@@ -3566,7 +3709,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		"",
 		"  📊 omp Insights",
 		"  ─────────────────────────────────",
-		LLM_PHASES_ENABLED
+		useLlm
 			? `  Phase 3/5 done — ${facetsMap.size} facets extracted`
 			: "  Phase 3/5 skipped — deterministic sections only",
 		"  Phase 4/5: Aggregating...",
@@ -3574,23 +3717,36 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 
 	// ── Phase 4: Aggregate + Insight Prompts ─────────────────────────────────────
 	const agg = aggregateData(kept, facetsMap);
+	scan.included = kept.length;
+	scan.facets_analyzed = agg.sessions_with_facets;
 	const temporal = computeTemporalData(kept, facetsMap);
-	const userCtx = await gatherUserContext();
 	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx);
 	const sectionPrompts = buildSectionPrompts(dataBlock, temporal, userCtx, agg);
 
-	// Stage 1 stub: the section prompts are built (so the shared data block is
-	// exercised) but none are sent. Stage 2 enables them.
-	const sectionKeys = LLM_PHASES_ENABLED
-		? (Object.keys(sectionPrompts) as Array<keyof typeof sectionPrompts>)
-		: [];
-	const sectionResults: Record<string, unknown> = {};
-	let sectionsDone = 0;
+	// Keyed on the prompt inputs, not the clock: the same corpus and the same
+	// model produce the same prose, so a re-run should cost nothing.
+	const sectionsKey = createHash("sha256")
+		.update(`${activeModel ?? "default"}\n${dataBlock}`)
+		.digest("hex")
+		.slice(0, 32);
+	const exactSections = refresh ? null : await loadCachedSections(sectionsKey);
+	const staleSections = exactSections || !noLlm ? null : await loadLatestSections();
+	const cachedSections = exactSections ?? staleSections;
 
+	scan.reused_stale_sections = Boolean(staleSections);
+
+	const sectionKeys =
+		useLlm && !cachedSections
+			? (Object.keys(sectionPrompts) as Array<keyof typeof sectionPrompts>)
+			: [];
+	const sectionResults: Record<string, unknown> = { ...(cachedSections?.sections ?? {}) };
+	let sectionsDone = 0;
 	await Promise.all(
 		sectionKeys.map(async (key) => {
 			try {
-				const text = await callModel(ctx, sectionPrompts[key], 8192);
+				// Sections and the synthesis run on the active model: this is where
+				// judgement quality shows up in the report.
+				const text = await callModel(sectionPrompts[key], { model: activeModel });
 				const parsed = parseJsonFromResponse(text);
 				if (parsed) sectionResults[key] = parsed;
 			} catch {
@@ -3606,8 +3762,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		}),
 	);
 
-	let synthesis: Record<string, string> = {};
-	if (LLM_PHASES_ENABLED) {
+	let synthesis: Record<string, string> = cachedSections?.synthesis ?? {};
+	if (useLlm && !cachedSections) {
 		// Synthesis (At a Glance)
 		ctx.ui.setWidget("insights", [
 			"",
@@ -3618,20 +3774,23 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 
 		try {
 			const synthText = await callModel(
-				ctx,
 				buildSynthesisPrompt(dataBlock, sectionResults),
-				8192,
+				{ model: activeModel },
 			);
 			synthesis =
 				(parseJsonFromResponse(synthText) as Record<string, string>) ?? {};
-		} catch {
-			synthesis = {
-				whats_working:
-					"Analysis complete — see sections below for detailed breakdown.",
-				whats_hindering: "See Friction Analysis section.",
-				quick_wins: "See Suggestions section.",
-				ambitious_workflows: "See On the Horizon section.",
-			};
+		} catch (err) {
+			// Upstream substituted placeholder prose here. A failed synthesis is
+			// better reported than papered over: generateMarkdown omits the
+			// Summary section when synthesis is empty.
+			ctx.ui.notify(`Synthesis failed: ${(err as Error).message}`, "warning");
+		}
+
+		// Only cache a run that actually produced sections; a wholly failed
+		// generation must not be replayed as if it were a result.
+		if (Object.keys(sectionResults).length) {
+			await saveSections(sectionsKey, { sections: sectionResults, synthesis });
+			await pruneSections();
 		}
 	}
 

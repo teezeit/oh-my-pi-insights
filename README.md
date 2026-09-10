@@ -18,12 +18,24 @@ layer, facet taxonomy, prompts and report structure are upstream's work.
 | Stage | Contents | State |
 |-------|----------|-------|
 | 1 | paths and user context, filesystem session scanner, deterministic stats, caps, `--md` report | **landed** |
-| 2 | LLM facet extraction, 8 section prompts, synthesis, HTML report | not started |
+| 2 | LLM facet extraction, 8 section prompts, synthesis, HTML report | **landed** |
 | 3 | `~/.claude/projects` source adapter | not started |
 
-Stage 1 calls no model: `LLM_PHASES_ENABLED` is `false`, `callModel` throws, and
-the facet/section/synthesis code paths (upstream's, kept intact) are skipped. A
-run costs nothing and does not need an active model.
+### How model calls work
+
+omp hands extensions credentials (`ctx.modelRegistry.getApiKeyAndHeaders`) but
+no completion client, so `callModel` shells out to `omp -p` with the prompt on
+stdin rather than reimplementing a provider client. That inherits every
+provider dialect and auth scheme omp supports, including the OAuth-backed ones
+a `retry.fallbackChains` entry reaches on a rate limit. Subprocesses run with
+`--no-session --no-tools --no-extensions --no-skills`, so they answer and
+nothing else, and never enter the corpus this report reads.
+
+Facet extraction runs on the **smol** role (structured classification, one call
+per uncached session); the section prompts and the synthesis run on the
+**active** model, where judgement quality shows.
+
+Set `OMP_INSIGHTS_OMP_BIN` if `omp` is not on `PATH`.
 
 ## Install
 
@@ -46,7 +58,8 @@ path and fails with `Cannot find module`.
 | `--md` / `--format md` | Write the Markdown export |
 | `--no-open` | Do not open the HTML report in a browser |
 | `--since <N>d` / `<N>w` | Only analyse sessions from the last N days/weeks |
-| `--refresh` / `-r` | Invalidate cached facet extractions (Stage 2) |
+| `--refresh` / `-r` | Invalidate cached facet extractions and regenerate the sections |
+| `--no-llm` | Render from caches only; never call a model |
 | `--max-sessions <N>` | Session load cap (default 2000, env `OMP_INSIGHTS_MAX_SESSIONS`) |
 | `--max-facets <N>` | Facet extraction cap (default 50, env `OMP_INSIGHTS_MAX_FACETS`) |
 | `--facet-concurrency <N>` | Facet extraction concurrency (default 50, env `OMP_INSIGHTS_FACET_CONCURRENCY`) |
@@ -103,7 +116,8 @@ Read-only against `~/.omp/agent/sessions`. Results are cached in
 | Path | Contents |
 |------|----------|
 | `session-meta/<id>.json` | Deterministic stats; invalidated when a log's size or mtime changes |
-| `facets/<id>.json` | LLM-extracted facets (Stage 2), cleared by `--refresh` |
+| `facets/<id>.json` | LLM-extracted facets, cleared by `--refresh` |
+| `sections/<hash>.json` | Generated sections and synthesis, keyed on the shared data block and active model; newest 5 kept |
 | `report.html` | Last generated HTML report |
 | `report.md` | Last Markdown export |
 | `session-set.json` | Audit manifest for the last run |
@@ -140,3 +154,16 @@ adopting one.
   coverage, partial trailing lines from a live session.
 - `test/report.test.ts` - aggregation and weekly-diff noise gates, plus a
   golden-file comparison of the rendered Markdown (`test/golden/report.md`).
+
+## Cost and caching
+
+A cold run over ~120 sessions costs one smol call per uncached session (capped
+at `--max-facets`, default 50) plus 9 calls on the active model. Measured: 8m6s
+for 44 facets plus sections and synthesis.
+
+Sections are cached on a hash of the shared data block and the active model, so
+an unchanged corpus re-renders for free. The corpus changes whenever omp runs,
+though, so on a machine that is actively using omp the key legitimately misses:
+two consecutive runs here read $2790.305 and $2790.503, because the session
+doing the measuring kept spending. Use `--no-llm` when you want a re-render
+with no spend; it reuses the newest cached generation and the report says so.

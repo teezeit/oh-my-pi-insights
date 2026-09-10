@@ -184,6 +184,8 @@ test("the markdown report matches the golden file", async () => {
 	const scan: ScanSummary = {
 		sessions_dir: "/fixture/sessions",
 		primary_logs: 4,
+		facet_failures: 1,
+		facets_analyzed: 1,
 		duplicate_logs: 1,
 		advisor_logs: 1,
 		subagent_logs: 2,
@@ -193,6 +195,7 @@ test("the markdown report matches the golden file", async () => {
 		excluded_not_substantive: 1,
 		excluded_by_since: 0,
 		included: 2,
+		reused_stale_sections: false,
 	};
 
 	const userCtx: UserContext = {
