@@ -1,135 +1,211 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com> -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
-![Pi Insights header showing weekly changes and navigation](assets/main.png)
+# omp Insights
 
-# Pi Insights
+Personal usage analytics for the **omp** coding harness. Scans your session
+history, extracts deterministic stats, and generates a report covering your
+workflows, spend and friction points.
 
-Personal usage analytics for the [Pi coding agent](https://github.com/earendil-works/pi). Scans your session history, extracts deterministic stats and LLM-powered facets, then generates a self-contained HTML report covering your workflows, friction points, and suggestions for improvement.
+This is a port of [`Observal/pi-insights`](https://github.com/Observal/pi-insights)
+(AGPL-3.0-only, © Hari Srinivasan) from the Pi coding agent to omp. The initial
+commit of this repository is upstream verbatim; diff against it to read the
+port. Upstream is itself a rewrite of a Claude Code command; the temporal
+layer, facet taxonomy, prompts and report structure are upstream's work.
 
-Built by the [Observal](https://github.com/BlazeUp-AI/Observal) team while developing our agent observability platform. We needed to understand how we actually use Pi across hundreds of sessions, what patterns emerge, and where we waste time or money. This extension is the result.
+## Port status
+
+| Stage | Contents | State |
+|-------|----------|-------|
+| 1 | paths and user context, filesystem session scanner, deterministic stats, caps, `--md` report | **landed** |
+| 2 | LLM facet extraction, 8 section prompts, synthesis, HTML report | **landed** |
+| 3 | `~/.claude/projects` source adapter | **landed** |
+
+### How model calls work
+
+omp hands extensions credentials (`ctx.modelRegistry.getApiKeyAndHeaders`) but
+no completion client, so `callModel` shells out to `omp -p` with the prompt on
+stdin rather than reimplementing a provider client. That inherits every
+provider dialect and auth scheme omp supports, including the OAuth-backed ones
+a `retry.fallbackChains` entry reaches on a rate limit. Subprocesses run with
+`--no-session --no-tools --no-extensions --no-skills`, so they answer and
+nothing else, and never enter the corpus this report reads.
+
+Facet extraction runs on the **smol** role (structured classification, one call
+per uncached session); the section prompts and the synthesis run on the
+**active** model, where judgement quality shows.
+
+Set `OMP_INSIGHTS_OMP_BIN` if `omp` is not on `PATH`.
 
 ## Install
 
-**From npm** (recommended):
-
 ```bash
-pi install npm:@observal/pi-insights
+omp -e ./index.ts        # try it from a checkout, no install
+omp plugin link .        # link the checkout as a plugin
+omp install @teezeit/omp-insights   # once published
 ```
 
-**From source:**
+`omp plugin doctor` verifies the install; `omp plugin list` shows the
+resolved path. Not yet published to npm, so the third form does not work yet.
 
-```bash
-git clone https://github.com/BlazeUp-AI/pi-insights.git
-pi install ./pi-insights
-```
-
-**Try without installing:**
-
-```bash
-pi -e npm:@observal/pi-insights
-```
+`omp -e npm:<pkg>` does not work for an uninstalled package: it resolves as a
+path and fails with `Cannot find module`.
 
 ## Usage
 
-Run the command inside any Pi session:
-
 ```
-/pi-insights
+/insights --md --no-open
 ```
-
-The report opens in your browser automatically.
-
-### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--refresh` / `-r` | Invalidate all cached LLM facet extractions and re-run them |
-| `--no-open` | Generate the report without opening it in the browser |
-| `--since <N>d` | Only analyze sessions from the last N days (e.g. `--since 7d`) |
-| `--md` | Output a Markdown report instead of opening the HTML version |
+| `--md` / `--format md` | Write the Markdown export |
+| `--no-open` | Do not open the HTML report in a browser |
+| `--since <N>d` / `<N>w` | Only analyse sessions from the last N days/weeks |
+| `--refresh` / `-r` | Invalidate cached facet extractions and regenerate the sections |
+| `--no-llm` | Render from caches only; never call a model |
+| `--source claude` | Read `~/.claude/projects` instead of omp's sessions |
+| `--max-sessions <N>` | Session load cap (default 2000, env `OMP_INSIGHTS_MAX_SESSIONS`) |
+| `--max-facets <N>` | Facet extraction cap (default 50, env `OMP_INSIGHTS_MAX_FACETS`) |
+| `--facet-concurrency <N>` | Facet extraction concurrency (default 50, env `OMP_INSIGHTS_FACET_CONCURRENCY`) |
 
-### Examples
+## What omp gives it that Pi did not
 
-```bash
-# Normal run (uses caches, fast on re-runs)
-/pi-insights
+- **Cost is recorded, not estimated.** Assistant messages carry
+  `message.usage.cost.total` and out-of-band calls are `model_usage` records.
+  Upstream's price table and token-derived cost are gone.
+- **Tool failures are a boolean.** `toolResult.isError` replaces upstream's
+  regex bucketing over tool output; the category comes from the tool name.
+- **Nested logs are real sessions.** `__advisor.jsonl` and per-subagent logs
+  live in a sidecar directory beside their parent's log and hold their own
+  spend. They are attributed to the parent, reported as
+  `cost_primary`/`cost_advisor`/`cost_subagent`, and never counted as
+  top-level sessions.
+- **Behavioural signals with no Pi equivalent**: `steering` (interruptions),
+  `thinking_level_change` and `model_change` (mid-session escalation),
+  `compaction`, `ttft`/`duration` (latency), `cacheRead`/`cacheWrite`.
+- **`xd://` writes are tool-device calls**, not file writes, so MCP and device
+  usage is visible instead of hidden inside a `write` count.
 
-# Force re-extraction of all session facets
-/pi-insights --refresh
+## Verifying the numbers
 
-# Generate without auto-opening
-/pi-insights --no-open
+Every run writes an audit manifest next to the report:
 
-# Only analyze the last 7 days
-/pi-insights --since 7d
-
-# Export as Markdown (for Slack, docs, etc.)
-/pi-insights --md
+```
+~/.omp/agent/usage-data/session-set.json
 ```
 
-## What the Report Shows
+It lists the exact session set, per-session cost split by class, each sidecar
+path, and a `size:mtime` signature per log. `tools/verify-cost.sh` re-sums
+`usage.cost.total` with `jq` over those same files (including
+`__advisor.jsonl`), checks no log changed since the run, and compares:
 
-### Session stats at a glance
+```bash
+$ ./tools/verify-cost.sh
+{
+  "sessions_checked": 114,
+  "logs_changed_since_run": 0,
+  "jq":     { "primary": 2459.844615600002, "advisor": 20.02110515, "subagent": 215.55632425000005, "total": 2695.422045000002 },
+  "report": { "primary": 2459.844615600002, "advisor": 20.02110515, "subagent": 215.55632425000002, "total": 2695.422045 },
+  "advisor_sidecars_summed": 16,
+  "subagent_sidecars_summed": 175,
+  "match": true
+}
+```
 
-Tokens, cost, lines changed, commits, tool errors, parallel sessions, and more.
+## Data layout
 
-![Stats grid showing sessions, messages, tokens, cost, lines, commits](assets/stats.png)
-
-### Context-aware suggestions with copyable prompts
-
-Suggests features, skills, and config additions tailored to your actual workflow. References your real projects and tools.
-
-![Features to try section with lifecycle hooks and skills suggestions](assets/features.png)
-
-### "Stop Doing" section
-
-Tells you what patterns are costing you time or money, with concrete alternatives.
-
-![Consider Stopping section with three anti-patterns and green alternatives](assets/bad_patterns.png)
-
-### Model spend analysis
-
-Identifies overspend (Opus on simple tasks) and underspend (Sonnet failing on complex work), with a recommendation and estimated savings.
-
-![Model efficiency showing overspend, underspend, and recommendation](assets/save_money.png)
-
-## What Makes This Different
-
-Most Pi insight extensions dump flat aggregates into an LLM prompt and get the same generic report every time. This one is temporal-aware:
-
-- **Week-over-week diffs**: see what actually changed, not a static portrait
-- **Decay-weighted charts**: recent sessions have more influence on friction/satisfaction/outcome charts (10-day half-life)
-- **Trajectory detection**: are your costs/errors improving, worsening, or stable?
-- **Anomaly detection**: spikes in cost or errors are surfaced with context
-- **Resolved vs ongoing friction**: only surfaces problems you still have, not ones you fixed
-- **Context-aware suggestions**: reads your existing AGENTS.md, installed skills, extensions, and packages. Will not suggest what you already have.
-- **Negative suggestions**: tells you what to stop doing, not just what to add
-
-## How It Works
-
-The pipeline runs in five phases:
-
-1. **Scan** all Pi session log files
-2. **Extract stats** deterministically from each session (tool counts, tokens, languages, git activity, response times)
-3. **LLM facet extraction** per session to classify goals, outcomes, satisfaction, and friction
-4. **Aggregate with decay weighting**, compute diffs, detect anomalies and transitions, gather user context
-5. **Generate insights** using 8 parallel LLM prompts (with temporal and user context injected) plus a synthesis prompt, then **render** a self-contained HTML report
-
-Results are cached in `~/.pi/agent/usage-data/`:
+Read-only against `~/.omp/agent/sessions`. Results are cached in
+`~/.omp/agent/usage-data/`:
 
 | Path | Contents |
 |------|----------|
-| `session-meta/<id>.json` | Deterministic stats, cached permanently |
-| `facets/<id>.json` | LLM-extracted facets, cached permanently (clear with `--refresh`) |
-| `report.html` | Last generated report |
-| `report.md` | Last markdown export (when using `--md`) |
+| `session-meta/<id>.json` | Deterministic stats; invalidated when a log's size or mtime changes |
+| `facets/<id>.json` | LLM-extracted facets, cleared by `--refresh` |
+| `sections/<hash>.json` | Generated sections and synthesis, keyed on the shared data block and active model; newest 5 kept |
+| `report.html` | Last generated HTML report |
+| `report.md` | Last Markdown export |
+| `session-set.json` | Audit manifest for the last run |
 
 ## Requirements
 
-- [Pi](https://github.com/earendil-works/pi) v0.74.0 or later
-- An active model configured in Pi (used for both facet extraction and insight generation)
+- omp 18.x (developed against `omp/18.1.14`, verified on `omp/18.8.0`)
+- No runtime dependencies beyond node builtins
 
 ## License
 
-AGPL-3.0-only
+AGPL-3.0-only, as upstream.
+
+## Tests
+
+```bash
+npm test                    # node --test, no dependencies
+npm run test:update-golden   # after an intentional report-layout change
+```
+
+26 tests, ~0.4s. Node >= 22.6 (native TypeScript type-stripping); upstream ships
+no test suite, builder or linter config, so this adds a runner rather than
+adopting one.
+
+- `test/config.test.ts` - the hand-rolled `config.yml` YAML subset reader and
+  flag/env/default limit resolution.
+- `test/stats.test.ts` - cost from both `message.usage` and `model_usage`,
+  `isError` counting, `xd://` device classification, hashline-patch line
+  accounting, steering/escalation signals, and the
+  `total_cost == primary + advisor + subagent` identity the jq cross-check
+  reconciles against the logs.
+- `test/scanner.test.ts` - a temp fixture tree: sidecar classification and
+  recursion, `.log` spill ignored, duplicate-session-id dedupe, signature
+  coverage, partial trailing lines from a live session.
+- `test/report.test.ts` - aggregation and weekly-diff noise gates, plus a
+  golden-file comparison of the rendered Markdown (`test/golden/report.md`).
+
+## Cost and caching
+
+A cold run over ~120 sessions costs one smol call per uncached session (capped
+at `--max-facets`, default 50) plus 9 calls on the active model. Measured: 8m6s
+for 44 facets plus sections and synthesis.
+
+Sections are cached on a hash of the shared data block and the active model, so
+an unchanged corpus re-renders for free. The corpus changes whenever omp runs,
+though, so on a machine that is actively using omp the key legitimately misses:
+two consecutive runs here read $2790.305 and $2790.503, because the session
+doing the measuring kept spending. Use `--no-llm` when you want a re-render
+with no spend; it reuses the newest cached generation and the report says so.
+
+## Sources
+
+`SessionSource` owns listing, parsing and transcript formatting, so a harness
+adapter is an implementation of one interface rather than a fork of the
+pipeline. Corpora are never merged: a single total across two harnesses would
+hide which one the spend came from.
+
+| | omp (default) | `--source claude` |
+|---|---|---|
+| Layout | `sessions/<slug>/<ts>_<id>.jsonl` + sidecar dir | `projects/<slug>/<uuid>.jsonl`, flat |
+| Cost | `usage.cost.total` per call, always present | `cost-state` records, **only some sessions** |
+| Subagents | separate sidecar logs, cost split out | inline `isSidechain` turns, cost not separable |
+| Tool errors | `toolResult.isError` + `toolName` | `tool_result.is_error`, tool resolved via `tool_use_id` |
+| Interruptions, escalation, latency | `steering`, `thinking_level_change`, `model_change`, `ttft` | not recorded |
+
+Claude Code traps the adapter handles, all verified against the real corpus:
+
+- **Cost is partial.** 19 of 24 local logs carry no `cost-state`. Those
+  sessions report `cost_recorded: false`, contribute $0, and the report says
+  the spend figure is a lower bound. Deriving cost from tokens and a price
+  table is the exact workaround this port exists to delete, so it is not done.
+- **Responses repeat.** One API response can be logged as several assistant
+  entries sharing a `requestId`; usage is deduplicated by it. Where a
+  `cost-state` exists it supersedes the per-message sum entirely, since it is
+  the harness's own accounting.
+- **`tool_result` names an id, not a tool**, so the adapter remembers
+  `tool_use_id -> tool name` from the calling turn to categorise failures.
+- **Sidechain and meta turns are not the human typing** and never count as
+  user messages, response times or hour-of-day.
+
+The meta and sections caches are namespaced per source, so the two corpora
+cannot contaminate each other's cached stats or prose.
+
+Measured on the local Claude corpus: 24 logs, 7 substantive, **$6.123361**,
+matching an independent `jq` sum over `cost-state.totalCostUSD` for the same
+files exactly.

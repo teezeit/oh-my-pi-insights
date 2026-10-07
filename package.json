@@ -1,41 +1,48 @@
 {
-  "name": "@observal/pi-insights",
-  "version": "1.2.3",
+  "name": "@teezeit/omp-insights",
+  "version": "0.1.0",
   "type": "module",
-  "description": "Pi Insights extension — generates a personal usage insights report from your Pi session history",
+  "description": "omp Insights extension \u2014 generates a personal usage insights report from your omp session history",
   "author": "Hari Srinivasan <harisrini21@gmail.com>",
+  "contributors": [
+    "Tobias Hoelzer (omp port)"
+  ],
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/BlazeUp-AI/pi-insights.git"
+    "url": "git+https://github.com/teezeit/oh-my-pi-insights.git"
   },
-  "homepage": "https://github.com/BlazeUp-AI/pi-insights",
+  "homepage": "https://github.com/teezeit/oh-my-pi-insights#readme",
   "bugs": {
-    "url": "https://github.com/BlazeUp-AI/pi-insights/issues"
+    "url": "https://github.com/teezeit/oh-my-pi-insights/issues"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types 'test/*.test.ts'",
+    "test:update-golden": "UPDATE_GOLDEN=1 node --test --experimental-strip-types test/report.test.ts",
+    "typecheck": "tsc --noEmit --strict --target es2022 --module esnext --moduleResolution bundler --allowImportingTsExtensions --skipLibCheck --types node index.ts test/*.ts",
+    "verify:cost": "./tools/verify-cost.sh"
   },
   "keywords": [
-    "pi-package",
-    "pi-extension",
+    "omp-extension",
     "insights",
     "usage-analytics",
     "ai-agent",
     "coding-agent"
   ],
-  "pi": {
+  "omp": {
     "extensions": [
       "./"
     ]
   },
   "files": [
     "index.ts",
-    "README.md"
+    "README.md",
+    "tools/verify-cost.sh"
   ],
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.74.0"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.74.0",
-    "@earendil-works/pi-agent-core": ">=0.74.0",
-    "@earendil-works/pi-ai": ">=0.74.0"
+  "publishConfig": {
+    "access": "public"
   }
 }

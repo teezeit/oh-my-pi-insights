@@ -1,52 +1,129 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Tobias Hoelzer (omp port)
 // SPDX-License-Identifier: AGPL-3.0-only
+//
+// Modified from Observal/pi-insights: ported from the Pi coding agent to the
+// omp harness. See README.md "Port status" and the repository history.
 
 /**
- * /insights — Pi Usage Insights
+ * /insights — omp Usage Insights
  *
- * Scans all Pi session logs, extracts deterministic stats, runs LLM
+ * Scans all omp session logs, extracts deterministic stats, runs LLM
  * facet extraction per session (cached), fires 7 parallel insight prompts
  * + 1 synthesis, and writes a self-contained HTML report.
+ *
+ * Ported from Observal/pi-insights (AGPL-3.0-only) to the omp harness.
  *
  * Usage:
  *   /insights             — run with caches (fast on re-runs)
  *   /insights --refresh   — invalidate all LLM facet caches, re-extract
+ *   /insights --md        — write the Markdown export instead of HTML
  *   /insights --no-open   — don't open the report in the browser
+ *   /insights --since 7d  — restrict the corpus to the last 7 days
  *
- * Data dir: ~/.pi/agent/usage-data/
+ * Data dir: ~/.omp/agent/usage-data/
  *   session-meta/<id>.json   deterministic stats, cached permanently
  *   facets/<id>.json         LLM-extracted facets, cached permanently
  *   report.html              last generated report
+ *   session-set.json         audit manifest of the last run's session set
  */
 
-import { complete } from "@earendil-works/pi-ai";
-import type {
-	ExtensionAPI,
-	ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { execFile as execFileCb } from "node:child_process";
-import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { extname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCb);
 
+// ─── Host API (structural) ────────────────────────────────────────────────────
+
+// Why: no package-specific type import here. Pi and omp expose the same
+// extension API but publish their types under different package names, so the
+// host is typed structurally — same rationale as the note at the top of
+// ~/.omp/agent/extensions/orca-agent-status.ts.
+
+type ExtensionUI = {
+	notify(message: string, level?: "info" | "success" | "warning" | "error"): void;
+	setStatus(key: string, text: string): void;
+	setWidget(key: string, lines?: string[]): void;
+};
+
+type ExtensionCommandContext = {
+	ui: ExtensionUI;
+	cwd?: string;
+	model?: unknown;
+	modelRegistry?: {
+		getApiKeyAndHeaders(model: unknown): Promise<{
+			ok: boolean;
+			error?: string;
+			apiKey?: string;
+			headers?: Record<string, string>;
+		}>;
+	};
+	sessionManager?: { getSessionId?(): string | null | undefined };
+};
+
+type ExtensionAPI = {
+	registerCommand(
+		name: string,
+		spec: {
+			description: string;
+			handler(
+				args: string | undefined,
+				ctx: ExtensionCommandContext,
+			): Promise<void> | void;
+		},
+	): void;
+};
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DATA_DIR = join(homedir(), ".pi", "agent", "usage-data");
+const AGENT_DIR = join(homedir(), ".omp", "agent");
+const SESSIONS_DIR = join(AGENT_DIR, "sessions");
+const DATA_DIR = join(AGENT_DIR, "usage-data");
 const FACETS_DIR = join(DATA_DIR, "facets");
 const META_DIR = join(DATA_DIR, "session-meta");
+const SECTIONS_DIR = join(DATA_DIR, "sections");
 const REPORT_PATH = join(DATA_DIR, "report.html");
 const REPORT_MD_PATH = join(DATA_DIR, "report.md");
+const SESSION_SET_PATH = join(DATA_DIR, "session-set.json");
 
-const MAX_SESSIONS_TO_LOAD = 200;
-const MAX_FACET_EXTRACTIONS = 50;
-const FACET_CONCURRENCY = 50;
+// Why: the corpus is already ~400 sessions, so upstream's 200 load cap would
+// silently truncate it. Loading is cached per session and costs no tokens, so
+// the default is raised past the corpus size; facet extraction stays capped
+// because that phase spends money. All three are flag- and env-overridable
+// (--max-sessions / --max-facets / --facet-concurrency,
+// OMP_INSIGHTS_MAX_SESSIONS / _MAX_FACETS / _FACET_CONCURRENCY).
+const DEFAULT_MAX_SESSIONS_TO_LOAD = 2000;
+const DEFAULT_MAX_FACET_EXTRACTIONS = 50;
+const DEFAULT_FACET_CONCURRENCY = 50;
 const META_BATCH_SIZE = 50;
 const LOAD_BATCH_SIZE = 10;
 const OVERLAP_WINDOW_MS = 30 * 60_000;
+
+// Stage 2: the LLM phases are wired. Facet extraction, the section prompts and
+// the synthesis run through `omp -p` subprocesses (see callModel).
+const LLM_PHASES_ENABLED = true;
+
+// The omp binary this extension shells out to for model calls. Overridable so
+// a non-PATH install still works.
+const OMP_BIN = process.env.OMP_INSIGHTS_OMP_BIN || "omp";
+const MODEL_CALL_TIMEOUT_MS = 300_000;
+
+/** `--<flag> N` on the command line, else `$ENV`, else the default. */
+function resolveLimit(
+	args: string,
+	flag: string,
+	envVar: string,
+	fallback: number,
+): number {
+	const match = args.match(new RegExp(`--${flag}[\\s=](\\d+)`));
+	if (match) return Number(match[1]);
+	const env = Number(process.env[envVar]);
+	return Number.isFinite(env) && env > 0 ? env : fallback;
+}
 
 const EXTENSION_TO_LANGUAGE: Record<string, string> = {
 	".ts": "TypeScript",
@@ -184,6 +261,38 @@ type SessionMeta = {
 	files_modified: number;
 	message_hours: number[];
 	user_message_timestamps: string[];
+	// ── omp additions ──
+	// Why: omp writes explicit per-call cost, and advisor/subagent sidecars are
+	// separate logs with their own spend. total_cost is the parent-attributed
+	// sum of all three buckets; the buckets are kept so the report can show
+	// where the money actually went (HANDOVER.md "nested logs").
+	cost_primary: number;
+	cost_advisor: number;
+	cost_subagent: number;
+	cache_read_tokens: number;
+	cache_write_tokens: number;
+	utility_cost: number;
+	sidecar_counts: { advisor: number; subagent: number };
+	sidecar_tool_calls: number;
+	sidecar_tool_errors: number;
+	thinking_escalations: number;
+	model_switches: number;
+	compactions: number;
+	steering_messages: number;
+	// Why: the meta cache is keyed by session id, but a session's logs keep
+	// growing (and its advisor sidecar keeps appending) while it is open.
+	// Stale cached numbers would silently diverge from the logs, so the size
+	// and mtime of the primary log plus every sidecar are recorded and any
+	// change invalidates the entry.
+	log_signature: string;
+	/**
+	 * False when the source kept no cost for this session. omp always records
+	 * it; Claude Code only writes a cost-state record for some sessions, and
+	 * a missing one must read as unavailable, never as $0.
+	 */
+	cost_recorded: boolean;
+	median_ttft_ms: number;
+	median_response_ms: number;
 	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number }>;
 };
 
@@ -245,11 +354,26 @@ type AggregatedData = {
 	total_files_modified: number;
 	days_active: number;
 	message_hours: number[];
-	multi_clauding: {
+	concurrent_sessions: {
 		overlap_events: number;
 		sessions_involved: number;
 		user_messages_during: number;
 	};
+	// ── omp additions ──
+	total_cost_primary: number;
+	total_cost_advisor: number;
+	total_cost_subagent: number;
+	total_utility_cost: number;
+	total_cache_read_tokens: number;
+	total_cache_write_tokens: number;
+	advisor_logs: number;
+	subagent_logs: number;
+	sessions_with_sidecars: number;
+	total_thinking_escalations: number;
+	total_model_switches: number;
+	total_compactions: number;
+	total_steering: number;
+	median_ttft_ms: number;
 	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number; sessions: number; tier?: string }>;
 	model_efficiency: Array<{
 		model: string;
@@ -268,9 +392,36 @@ type AggregatedData = {
 type UserContext = {
 	existing_agents_md_rules: string[];
 	installed_skills: string[];
+	installed_managed_skills: string[];
 	installed_extensions: string[];
-	installed_packages: string[];
+	installed_hooks: string[];
+	mcp_servers: string[];
+	model_roles: Record<string, string>;
+	fallback_chains: Record<string, string[]>;
 	default_model: string;
+};
+
+/** What the scan itself saw — reported so the numbers can be audited. */
+type ScanSummary = {
+	sessions_dir: string;
+	source: string;
+	/** Sessions the source kept no cost for; excluded from the totals, not zeroed. */
+	cost_unavailable: number;
+	primary_logs: number;
+	duplicate_logs: number;
+	advisor_logs: number;
+	subagent_logs: number;
+	excluded_meta: number;
+	excluded_current: number;
+	excluded_unparsed: number;
+	excluded_not_substantive: number;
+	excluded_by_since: number;
+	/** Sessions whose facet extraction failed or returned nothing usable. */
+	facet_failures: number;
+	facets_analyzed: number;
+	included: number;
+	/** Set when --no-llm reused prose generated against an older corpus state. */
+	reused_stale_sections: boolean;
 };
 
 type TemporalData = {
@@ -290,23 +441,105 @@ type TemporalData = {
 async function ensureDirs(): Promise<void> {
 	await mkdir(META_DIR, { recursive: true });
 	await mkdir(FACETS_DIR, { recursive: true });
+	await mkdir(SECTIONS_DIR, { recursive: true });
 }
 
-async function loadCachedMeta(sessionId: string): Promise<SessionMeta | null> {
+async function loadCachedMeta(
+	sourceName: string,
+	sessionId: string,
+	signature: string,
+): Promise<SessionMeta | null> {
 	try {
-		const raw = await readFile(join(META_DIR, `${sessionId}.json`), "utf-8");
-		return JSON.parse(raw) as SessionMeta;
+		const raw = await readFile(join(META_DIR, `${sourceName}-${sessionId}.json`), "utf-8");
+		const meta = JSON.parse(raw) as SessionMeta;
+		// A log that has grown since the entry was written must be re-read, or
+		// the report's totals stop matching the logs they claim to summarise.
+		if (meta.log_signature !== signature) return null;
+		return meta;
 	} catch {
 		return null;
 	}
 }
 
-async function saveMeta(meta: SessionMeta): Promise<void> {
+async function saveMeta(sourceName: string, meta: SessionMeta): Promise<void> {
 	await writeFile(
-		join(META_DIR, `${meta.session_id}.json`),
+		join(META_DIR, `${sourceName}-${meta.session_id}.json`),
 		JSON.stringify(meta, null, 2),
 		{ encoding: "utf-8", mode: 0o600 },
 	);
+}
+
+type CachedSections = {
+	sections: Record<string, unknown>;
+	synthesis: Record<string, string>;
+};
+
+/**
+ * The eight section prompts and the synthesis are a pure function of the
+ * shared data block, so they are cached on a hash of it. Without this a
+ * re-run with every facet cached still spent a minute and real money
+ * regenerating identical prose.
+ */
+async function loadCachedSections(key: string): Promise<CachedSections | null> {
+	try {
+		const raw = await readFile(join(SECTIONS_DIR, `${key}.json`), "utf-8");
+		const parsed = JSON.parse(raw) as CachedSections;
+		return parsed.sections ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+async function saveSections(key: string, value: CachedSections): Promise<void> {
+	await writeFile(join(SECTIONS_DIR, `${key}.json`), JSON.stringify(value, null, 2), {
+		encoding: "utf-8",
+		mode: 0o600,
+	});
+}
+
+/**
+ * Every distinct corpus state mints a new entry, and the corpus changes
+ * whenever omp runs, so this directory would grow without bound.
+ */
+async function pruneSections(sourceName: string, keep = 5): Promise<void> {
+	try {
+		const files = (await readdir(SECTIONS_DIR)).filter((f) =>
+			f.startsWith(`${sourceName}-`),
+		);
+		const stamped = await Promise.all(
+			files
+				.filter((f) => f.endsWith(".json"))
+				.map(async (f) => ({ f, m: (await stat(join(SECTIONS_DIR, f))).mtimeMs })),
+		);
+		stamped.sort((a, b) => b.m - a.m);
+		for (const { f } of stamped.slice(keep)) {
+			await unlink(join(SECTIONS_DIR, f)).catch(() => {});
+		}
+	} catch {
+		/* cache pruning is best effort */
+	}
+}
+
+/**
+ * Newest cached generation regardless of key. Only for --no-llm, where the
+ * caller has asked for no spend: reusing prose written against a slightly
+ * older corpus beats rendering none, provided the report says so.
+ */
+async function loadLatestSections(sourceName: string): Promise<CachedSections | null> {
+	try {
+		const files = (await readdir(SECTIONS_DIR)).filter((f) =>
+			f.startsWith(`${sourceName}-`),
+		);
+		const stamped = await Promise.all(
+			files
+				.filter((f) => f.endsWith(".json"))
+				.map(async (f) => ({ f, m: (await stat(join(SECTIONS_DIR, f))).mtimeMs })),
+		);
+		const newest = stamped.sort((a, b) => b.m - a.m)[0];
+		return newest ? await loadCachedSections(newest.f.replace(/\.json$/, "")) : null;
+	} catch {
+		return null;
+	}
 }
 
 async function loadCachedFacets(
@@ -340,35 +573,170 @@ async function deleteCachedFacets(sessionId: string): Promise<void> {
 	}
 }
 
-async function gatherUserContext(): Promise<UserContext> {
-	const agentDir = join(homedir(), ".pi", "agent");
-	const ctx: UserContext = { existing_agents_md_rules: [], installed_skills: [], installed_extensions: [], installed_packages: [], default_model: "" };
+type YamlNode = { [k: string]: string | string[] | YamlNode };
 
+function unquoteYaml(v: string): string {
+	const t = v.trim().replace(/\s+#.*$/, "").trim();
+	if (
+		(t.startsWith('"') && t.endsWith('"')) ||
+		(t.startsWith("'") && t.endsWith("'"))
+	)
+		return t.slice(1, -1);
+	return t;
+}
+
+/**
+ * Minimal YAML-subset reader for ~/.omp/agent/config.yml: indented mappings,
+ * `- ` scalar sequences, optionally quoted scalars.
+ *
+ * Why not a real YAML parser: the port takes no new runtime dependencies
+ * (node builtins only), and the only consumers here are `modelRoles` and
+ * `retry.fallbackChains` — both plain string maps and string lists.
+ */
+function parseSimpleYaml(text: string): YamlNode {
+	const root: YamlNode = {};
+	const stack: Array<{ indent: number; node: YamlNode }> = [
+		{ indent: -1, node: root },
+	];
+	let lastKey: { node: YamlNode; key: string } | null = null;
+
+	for (const raw of text.split("\n")) {
+		const trimmed = raw.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		const indent = raw.search(/\S/);
+
+		if (trimmed.startsWith("- ")) {
+			if (!lastKey) continue;
+			const existing = lastKey.node[lastKey.key];
+			const item = unquoteYaml(trimmed.slice(2));
+			if (Array.isArray(existing)) existing.push(item);
+			else lastKey.node[lastKey.key] = [item];
+			continue;
+		}
+
+		const colon = trimmed.indexOf(":");
+		if (colon < 0) continue;
+		const key = unquoteYaml(trimmed.slice(0, colon));
+		const value = trimmed.slice(colon + 1).trim();
+
+		while (stack.length > 1 && indent <= stack[stack.length - 1]!.indent)
+			stack.pop();
+		const parent = stack[stack.length - 1]!.node;
+
+		if (!value) {
+			const child: YamlNode = {};
+			parent[key] = child;
+			stack.push({ indent, node: child });
+		} else {
+			parent[key] = unquoteYaml(value);
+		}
+		lastKey = { node: parent, key };
+	}
+	return root;
+}
+
+function yamlMap(node: YamlNode | undefined, key: string): YamlNode | undefined {
+	const v = node?.[key];
+	return v && !Array.isArray(v) && typeof v === "object" ? v : undefined;
+}
+
+async function listDirNames(
+	dir: string,
+	kind: "dirs" | "files",
+	exts: string[] = [],
+): Promise<string[]> {
 	try {
-		const agentsMd = await readFile(join(agentDir, "AGENTS.md"), "utf-8");
-		for (const line of agentsMd.split("\n")) {
-			const t = line.trim();
-			if (t.length > 20 && t.length < 200 && /\b(always|never|do not|don't|must|require|forbid)\b/i.test(t)) {
-				ctx.existing_agents_md_rules.push(t.slice(0, 150));
+		const entries = await readdir(dir, { withFileTypes: true });
+		return entries
+			.filter((e) => (kind === "dirs" ? e.isDirectory() : !e.isDirectory()))
+			.map((e) => e.name)
+			.filter((n) => !n.startsWith("."))
+			.filter((n) => !exts.length || exts.some((x) => n.endsWith(x)))
+			.map((n) => (exts.length ? n.replace(/\.[^.]+$/, "") : n))
+			.sort();
+	} catch {
+		return [];
+	}
+}
+
+async function gatherUserContext(): Promise<UserContext> {
+	const ctx: UserContext = {
+		existing_agents_md_rules: [],
+		installed_skills: [],
+		installed_managed_skills: [],
+		installed_extensions: [],
+		installed_hooks: [],
+		mcp_servers: [],
+		model_roles: {},
+		fallback_chains: {},
+		default_model: "",
+	};
+
+	// Global instructions. omp has no ~/.omp/agent/AGENTS.md; the user-level
+	// identity file is ~/.claude/CLAUDE.md, and AGENTS.md files are per project.
+	for (const file of [
+		join(homedir(), ".claude", "CLAUDE.md"),
+		join(AGENT_DIR, "AGENTS.md"),
+	]) {
+		try {
+			const text = await readFile(file, "utf-8");
+			for (const line of text.split("\n")) {
+				const t = line.trim();
+				if (t.length > 20 && t.length < 200 && /\b(always|never|do not|don't|must|require|forbid)\b/i.test(t)) {
+					ctx.existing_agents_md_rules.push(t.slice(0, 150));
+				}
+			}
+		} catch {}
+	}
+	ctx.existing_agents_md_rules = ctx.existing_agents_md_rules.slice(0, 20);
+
+	// config.yml is YAML, not settings.json. The default model is a model role,
+	// and retry.fallbackChains is the routing the report must not re-suggest.
+	try {
+		const cfg = parseSimpleYaml(await readFile(join(AGENT_DIR, "config.yml"), "utf-8"));
+		const roles = yamlMap(cfg, "modelRoles");
+		if (roles) {
+			for (const [role, model] of Object.entries(roles)) {
+				if (typeof model === "string") ctx.model_roles[role] = model;
+			}
+			// Roles may alias another role with "@name" (e.g. tiny: "@smol").
+			for (const [role, model] of Object.entries(ctx.model_roles)) {
+				if (model.startsWith("@")) {
+					const target = ctx.model_roles[model.slice(1)];
+					if (target) ctx.model_roles[role] = target;
+				}
+			}
+			ctx.default_model = ctx.model_roles.default ?? "";
+		}
+		const chains = yamlMap(yamlMap(cfg, "retry"), "fallbackChains");
+		if (chains) {
+			for (const [role, list] of Object.entries(chains)) {
+				if (Array.isArray(list)) ctx.fallback_chains[role] = list;
 			}
 		}
-		ctx.existing_agents_md_rules = ctx.existing_agents_md_rules.slice(0, 20);
+	} catch {}
+
+	// Both skill dirs matter: a suggestion recommending an already-installed
+	// skill is a bug, and most skills live under managed-skills/.
+	ctx.installed_skills = await listDirNames(join(AGENT_DIR, "skills"), "dirs");
+	ctx.installed_managed_skills = await listDirNames(join(AGENT_DIR, "managed-skills"), "dirs");
+	ctx.installed_extensions = await listDirNames(join(AGENT_DIR, "extensions"), "files", [".ts", ".js"]);
+
+	try {
+		const events = await readdir(join(AGENT_DIR, "hooks"), { withFileTypes: true });
+		for (const event of events) {
+			if (!event.isDirectory()) continue;
+			const hooks = await listDirNames(join(AGENT_DIR, "hooks", event.name), "files");
+			for (const h of hooks) ctx.installed_hooks.push(`${event.name}/${h}`);
+		}
 	} catch {}
 
 	try {
-		const settings = JSON.parse(await readFile(join(agentDir, "settings.json"), "utf-8"));
-		ctx.default_model = settings.defaultModel || "";
-		ctx.installed_packages = (settings.packages || []).map((p: string) => p.replace(/.*\//, ""));
-	} catch {}
-
-	try {
-		const entries = await readdir(join(agentDir, "skills"), { withFileTypes: true });
-		ctx.installed_skills = entries.filter((e: { isDirectory(): boolean; name: string }) => e.isDirectory()).map((e: { name: string }) => e.name);
-	} catch {}
-
-	try {
-		const entries = await readdir(join(agentDir, "extensions"));
-		ctx.installed_extensions = entries.filter((f: string) => f.endsWith(".ts") || f.endsWith(".js")).map((f: string) => f.replace(/\.[^.]+$/, ""));
+		const mcp = JSON.parse(await readFile(join(AGENT_DIR, "mcp.json"), "utf-8")) as {
+			mcpServers?: Record<string, unknown>;
+			servers?: Record<string, unknown>;
+		};
+		ctx.mcp_servers = Object.keys(mcp.mcpServers ?? mcp.servers ?? {}).sort();
 	} catch {}
 
 	return ctx;
@@ -396,7 +764,7 @@ function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, Sessio
 		const models: Record<string, number> = {};
 		let cost = 0, errors = 0;
 		for (const m of sessions) { cost += m.total_cost; errors += m.tool_errors; for (const [model, s] of Object.entries(m.model_usage)) models[model] = (models[model] || 0) + s.message_count; }
-		return { sessions: sessions.length, avg_cost: cost / sessions.length, errors_per_session: errors / sessions.length, primary_model: Object.entries(models).sort((a, b) => b[1] - a[1])[0]?.[0]?.replace(/.*\./, "") || "unknown" };
+		return { sessions: sessions.length, avg_cost: cost / sessions.length, errors_per_session: errors / sessions.length, primary_model: Object.entries(models).sort((a, b) => b[1] - a[1])[0]?.[0]?.replace(/.*\//, "") || "unknown" };
 	}
 
 	const tw = periodSummary(thisWeekSessions);
@@ -452,7 +820,7 @@ function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, Sessio
 			const afterErrors = after.reduce((s, m) => s + m.tool_errors, 0) / after.length;
 			major_transition = {
 				when: sorted[i]!.start_time.slice(0, 10),
-				what: `Shifted from ${beforeModel.replace(/.*\./, "")} to ${afterModel.replace(/.*\./, "")}`,
+				what: `Shifted from ${beforeModel.replace(/.*\//, "")} to ${afterModel.replace(/.*\//, "")}`,
 				impact: `Cost ${afterCost > beforeCost ? "up" : "down"} ${Math.abs(Math.round((afterCost - beforeCost) / (beforeCost || 1) * 100))}%, errors ${afterErrors > beforeErrors ? "up" : "down"} ${Math.abs(Math.round((afterErrors - beforeErrors) / (beforeErrors || 1) * 100))}%`,
 			};
 			break;
@@ -478,6 +846,594 @@ function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, Sessio
 	const staleness_pct = flatCost > 0 ? Math.abs((recentCost - flatCost) / flatCost * 100) : 0;
 
 	return { diff_headlines, this_week: tw, last_week: lw, trajectory, anomalies: anomalies.slice(0, 5), major_transition, resolved_friction: resolved_friction.slice(0, 5), ongoing_friction: ongoing_friction.slice(0, 8), staleness_pct };
+}
+
+// ─── Session Sources ──────────────────────────────────────────────────────────
+
+// Why an interface: Stage 3 adds a ~/.claude/projects adapter. Everything
+// above this boundary works on SessionRef/AnyEntry and knows nothing about
+// omp's on-disk layout.
+
+type SidecarKind = "advisor" | "subagent";
+
+/**
+ * A nested transcript that belongs to a parent session: the advisor log, or a
+ * subagent's own log. These are separate sessions with their own spend, so
+ * they must never surface as top-level sessions but must be counted.
+ */
+type SidecarRef = {
+	kind: SidecarKind;
+	name: string;
+	path: string;
+	size: number;
+	mtime_ms: number;
+};
+
+type SessionRef = {
+	id: string;
+	path: string;
+	project_path: string;
+	size: number;
+	created: Date;
+	modified: Date;
+	sidecars: SidecarRef[];
+	/** size:mtime of the primary log and every sidecar; keys the meta cache. */
+	signature: string;
+};
+
+type SessionScan = {
+	sessions: SessionRef[];
+	/** Logs dropped because another copy carried the same session id. */
+	duplicate_logs: number;
+};
+
+type SessionSource = {
+	readonly name: string;
+	/** Root this source scans; reported so the corpus section is truthful. */
+	readonly root: string;
+	/** Top-level sessions only; nested logs hang off their parent. */
+	listSessions(): Promise<SessionScan>;
+	readEntries(path: string): Promise<AnyEntry[]>;
+	/** True when this log is the insights pipeline talking to itself. */
+	isMetaSession(entries: AnyEntry[]): boolean;
+	/**
+	 * Fold a log and its sidecars into one SessionMeta. Owned by the source
+	 * because record schemas differ per harness; everything above this
+	 * boundary only ever sees SessionMeta.
+	 */
+	buildMeta(
+		ref: SessionRef,
+		entries: AnyEntry[],
+		sidecars: Array<{ kind: SidecarKind; usage: SidecarUsage }>,
+	): SessionMeta;
+	readSidecar(entries: AnyEntry[]): SidecarUsage;
+	formatTranscript(entries: AnyEntry[], meta: SessionMeta): string;
+};
+
+async function readJsonl(path: string): Promise<AnyEntry[]> {
+	const raw = await readFile(path, "utf-8");
+	const out: AnyEntry[] = [];
+	for (const line of raw.split("\n")) {
+		// Why the brace check: a live session's tail can be a partial write, and
+		// the first record is padded — both are cheaper to skip than to parse.
+		if (!line.startsWith("{")) continue;
+		try {
+			out.push(JSON.parse(line) as AnyEntry);
+		} catch {
+			/* truncated or mid-write line */
+		}
+	}
+	return out;
+}
+
+/** The subset of node's Dirent this scanner needs. */
+type DirEntry = { name: string; isDirectory(): boolean };
+
+/** Collect every *.jsonl under a session's sidecar directory, recursively. */
+async function collectSidecars(
+	dir: string,
+	prefix: string,
+	out: SidecarRef[],
+): Promise<void> {
+	let entries: DirEntry[] = [];
+	try {
+		entries = await readdir(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		const path = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			await collectSidecars(path, `${prefix}${entry.name}/`, out);
+			continue;
+		}
+		// *.bash.log / *.read.log / *.eval.log are tool-output spill, not
+		// transcripts. Only .jsonl files carry messages and cost.
+		if (!entry.name.endsWith(".jsonl")) continue;
+		const info = await stat(path).catch(() => null);
+		if (!info) continue;
+		out.push({
+			kind: entry.name === "__advisor.jsonl" ? "advisor" : "subagent",
+			name: `${prefix}${entry.name.replace(/\.jsonl$/, "")}`,
+			path,
+			size: info.size,
+			mtime_ms: info.mtimeMs,
+		});
+	}
+}
+
+/**
+ * ~/.omp/agent/sessions/<slugified-cwd>/<ISO-ts>_<session-id>.jsonl, with an
+ * optional sibling directory of the same basename holding __advisor.jsonl,
+ * subagent logs and tool-output spill.
+ *
+ * Filesystem-only by design: no omp internals, so the scan keeps working
+ * across harness versions.
+ */
+// Why a factory: the sessions directory is injectable so the scanner can be
+// exercised against a fixture tree instead of the user's real corpus.
+function createOmpSessionSource(sessionsDir: string = SESSIONS_DIR): SessionSource {
+	return {
+		name: "omp",
+		root: sessionsDir,
+		readEntries: readJsonl,
+		isMetaSession,
+		buildMeta: buildSessionMeta,
+		readSidecar: extractSidecarUsage,
+		formatTranscript,
+		async listSessions(): Promise<SessionScan> {
+			const sessions: SessionRef[] = [];
+			let projects: DirEntry[] = [];
+			try {
+				projects = await readdir(sessionsDir, { withFileTypes: true });
+			} catch {
+				return { sessions, duplicate_logs: 0 };
+			}
+
+			for (const project of projects) {
+				if (!project.isDirectory()) continue;
+				const projectDir = join(sessionsDir, project.name);
+				let entries: DirEntry[] = [];
+				try {
+					entries = await readdir(projectDir, { withFileTypes: true });
+				} catch {
+					continue;
+				}
+				const sidecarDirs = new Set(
+					entries.filter((e) => e.isDirectory()).map((e) => e.name),
+				);
+
+				for (const entry of entries) {
+					if (entry.isDirectory() || !entry.name.endsWith(".jsonl")) continue;
+					const base = entry.name.replace(/\.jsonl$/, "");
+					const path = join(projectDir, entry.name);
+					const info = await stat(path).catch(() => null);
+					if (!info) continue;
+
+					const sidecars: SidecarRef[] = [];
+					if (sidecarDirs.has(base))
+						await collectSidecars(join(projectDir, base), "", sidecars);
+
+					// <ISO-ts>_<session-id>: the id is authoritative from the session
+					// record, but the filename gives it before parsing so the meta
+					// cache can be consulted without reading the log.
+					const sep = base.indexOf("_");
+					sessions.push({
+						id: sep >= 0 ? base.slice(sep + 1) : base,
+						path,
+						project_path: "",
+						size: info.size,
+						created: info.birthtime.getTime() ? info.birthtime : info.mtime,
+						modified: info.mtime,
+						sidecars,
+						signature: [
+							`${info.size}:${info.mtimeMs}`,
+							...sidecars.map((s) => `${s.name}=${s.size}:${s.mtime_ms}`),
+						].join("|"),
+					});
+				}
+			}
+
+			// The same session can exist twice on disk under two slugified-cwd
+			// directories (a copied or relocated log keeps its session record id).
+			// Counting it twice would double-count its spend, so the largest copy
+			// wins — it is the most complete one.
+			const byId = new Map<string, SessionRef>();
+			for (const ref of sessions) {
+				const seen = byId.get(ref.id);
+				if (!seen || ref.size > seen.size) byId.set(ref.id, ref);
+			}
+			return {
+				sessions: [...byId.values()],
+				duplicate_logs: sessions.length - byId.size,
+			};
+		},
+	};
+}
+
+const ompSessionSource = createOmpSessionSource();
+
+// ─── Claude Code Source ───────────────────────────────────────────────────────
+
+// ~/.claude/projects/<slugified-cwd>/<session-uuid>.jsonl — one flat log per
+// session, no sidecar directories: subagent turns are inline entries flagged
+// `isSidechain`.
+//
+// Differences that matter, all verified against the real corpus:
+// - Cost lives in periodic `cost-state` records (`totalCostUSD` plus per-model
+//   `costUSD`), not on each message. The last one wins. Only some sessions
+//   carry any, and a session without one has NO recorded cost — it is reported
+//   as unavailable rather than silently counted as $0, and never estimated
+//   from tokens, which is the workaround this port exists to avoid.
+// - One API response can be logged as several assistant entries sharing a
+//   `requestId`, so usage is deduplicated by it before summing.
+// - Tool results are `tool_result` blocks on user messages with `is_error`.
+
+const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
+
+type ClaudeCostState = {
+	totalCostUSD?: number;
+	totalLinesAdded?: number;
+	totalLinesRemoved?: number;
+	modelUsage?: Record<
+		string,
+		{
+			inputTokens?: number;
+			outputTokens?: number;
+			cacheReadInputTokens?: number;
+			cacheCreationInputTokens?: number;
+			costUSD?: number;
+		}
+	>;
+};
+
+function claudeText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return (content as ContentBlock[])
+		.filter((b) => b.type === "text" && typeof b.text === "string")
+		.map((b) => b.text as string)
+		.join(" ");
+}
+
+function extractClaudeStats(entries: AnyEntry[]) {
+	const toolCounts: Record<string, number> = {};
+	const languages: Record<string, number> = {};
+	const toolErrorCategories: Record<string, number> = {};
+	const filesModified = new Set<string>();
+	const userResponseTimes: number[] = [];
+	const messageHours: number[] = [];
+	const userMessageTimestamps: string[] = [];
+	const modelUsage: ModelUsageMap = {};
+	const seenRequestIds = new Set<string>();
+	const seenToolUseIds = new Set<string>();
+	// tool_result blocks name only the tool_use_id, so the tool itself has to
+	// be remembered from the assistant turn that called it.
+	const toolNameById = new Map<string, string>();
+
+	let sessionId = "";
+	let projectPath = "";
+	let firstTs = 0;
+	let lastTs = 0;
+	let costState: ClaudeCostState | null = null;
+	let gitCommits = 0;
+	let gitPushes = 0;
+	let toolErrors = 0;
+	let usesSubagent = false;
+	let usesMcp = false;
+	let linesAdded = 0;
+	let linesRemoved = 0;
+	let userMessageCount = 0;
+	let assistantMessageCount = 0;
+	let firstPrompt = "";
+	let lastAssistantTs: number | null = null;
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+
+	for (const entry of entries) {
+		if (typeof entry.sessionId === "string" && !sessionId) sessionId = entry.sessionId;
+		if (typeof entry.cwd === "string" && !projectPath) projectPath = entry.cwd;
+
+		const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+		if (!Number.isNaN(ts)) {
+			if (!firstTs) firstTs = ts;
+			if (ts > lastTs) lastTs = ts;
+		}
+
+		if (entry.type === "cost-state") {
+			costState = entry as ClaudeCostState;
+			continue;
+		}
+
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg) continue;
+
+		if (entry.type === "assistant") {
+			assistantMessageCount++;
+			if (!Number.isNaN(ts)) lastAssistantTs = ts;
+
+			// Retries and multi-part logging repeat a response; count each once.
+			const requestId = typeof entry.requestId === "string" ? entry.requestId : "";
+			const counted = requestId && seenRequestIds.has(requestId);
+			if (requestId) seenRequestIds.add(requestId);
+
+			const u = (msg.usage ?? {}) as Record<string, number>;
+			if (!counted) {
+				totals.input += u.input_tokens ?? 0;
+				totals.output += u.output_tokens ?? 0;
+				totals.cacheRead += u.cache_read_input_tokens ?? 0;
+				totals.cacheWrite += u.cache_creation_input_tokens ?? 0;
+			}
+
+			for (const block of (Array.isArray(msg.content) ? msg.content : []) as ContentBlock[]) {
+				if (block.type !== "tool_use") continue;
+				const toolId = (block.id as string) ?? Math.random().toString(36);
+				if (seenToolUseIds.has(toolId)) continue;
+				seenToolUseIds.add(toolId);
+
+				const toolName = (block.name as string) ?? "";
+				toolCounts[toolName] = (toolCounts[toolName] ?? 0) + 1;
+				toolNameById.set(toolId, toolName);
+				if (toolName === "Task") usesSubagent = true;
+				if (toolName.startsWith("mcp__")) usesMcp = true;
+
+				const args = (block.input as Record<string, unknown>) ?? {};
+				const filePath =
+					(typeof args.file_path === "string" && args.file_path) ||
+					(typeof args.path === "string" && args.path) ||
+					"";
+				if (filePath && /^(Read|Write|Edit|NotebookEdit)$/.test(toolName)) {
+					const lang = getLanguageFromPath(filePath);
+					if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
+				}
+				if (filePath && /^(Write|Edit|NotebookEdit)$/.test(toolName)) filesModified.add(filePath);
+				if (toolName === "Write") linesAdded += countNewlines((args.content as string) ?? "") + 1;
+				if (toolName === "Edit") {
+					linesAdded += countNewlines((args.new_string as string) ?? "") + 1;
+					linesRemoved += countNewlines((args.old_string as string) ?? "") + 1;
+				}
+				if (toolName === "Bash") {
+					const cmd = (args.command as string) ?? "";
+					if (cmd.includes("git commit")) gitCommits++;
+					if (cmd.includes("git push")) gitPushes++;
+				}
+			}
+			continue;
+		}
+
+		if (entry.type !== "user") continue;
+
+		const blocks = (Array.isArray(msg.content) ? msg.content : []) as ContentBlock[];
+		const results = blocks.filter((b) => b.type === "tool_result");
+		if (results.length) {
+			for (const result of results) {
+				if (result.is_error !== true) continue;
+				toolErrors++;
+				const cat = toolErrorCategory(
+					toolNameById.get(result.tool_use_id as string) ?? "",
+				);
+				toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
+			}
+			continue;
+		}
+
+		// Sidechain turns are subagent prompts and meta entries are injected
+		// notices; neither is the human typing.
+		if (entry.isSidechain === true) {
+			usesSubagent = true;
+			continue;
+		}
+		if (entry.isMeta === true) continue;
+
+		const text = claudeText(msg.content);
+		if (!text.trim()) continue;
+		userMessageCount++;
+		if (!firstPrompt) firstPrompt = text.trim().slice(0, 300);
+		if (!Number.isNaN(ts)) {
+			messageHours.push(new Date(ts).getHours());
+			userMessageTimestamps.push(new Date(ts).toISOString());
+			if (lastAssistantTs !== null) {
+				const gapSec = (ts - lastAssistantTs) / 1000;
+				if (gapSec > 2 && gapSec < 3600) userResponseTimes.push(gapSec);
+			}
+		}
+	}
+
+	// Cost is only ever read, never derived. A session with no cost-state has
+	// no recorded cost, and says so rather than reporting zero as fact.
+	const costAvailable = typeof costState?.totalCostUSD === "number";
+	if (costAvailable) totals.cost = costState?.totalCostUSD ?? 0;
+	const perModel = Object.entries(costState?.modelUsage ?? {});
+	if (perModel.length) {
+		// cost-state is the harness's own accounting and already covers retries,
+		// so it supersedes the per-message sum rather than being added to it.
+		totals.input = 0;
+		totals.output = 0;
+		totals.cacheRead = 0;
+		totals.cacheWrite = 0;
+	}
+	for (const [model, usage] of perModel) {
+		modelUsage[model] = {
+			input_tokens: usage.inputTokens ?? 0,
+			output_tokens: usage.outputTokens ?? 0,
+			cost: usage.costUSD ?? 0,
+			message_count: 0,
+		};
+		totals.input += usage.inputTokens ?? 0;
+		totals.output += usage.outputTokens ?? 0;
+		totals.cacheRead += usage.cacheReadInputTokens ?? 0;
+		totals.cacheWrite += usage.cacheCreationInputTokens ?? 0;
+	}
+	if (typeof costState?.totalLinesAdded === "number" && costState.totalLinesAdded > 0)
+		linesAdded = costState.totalLinesAdded;
+	if (typeof costState?.totalLinesRemoved === "number" && costState.totalLinesRemoved > 0)
+		linesRemoved = costState.totalLinesRemoved;
+
+	return {
+		sessionId,
+		projectPath,
+		firstTs,
+		lastTs,
+		costAvailable,
+		totals,
+		modelUsage,
+		toolCounts,
+		languages,
+		toolErrorCategories,
+		filesModified: filesModified.size,
+		userResponseTimes,
+		messageHours,
+		userMessageTimestamps,
+		gitCommits,
+		gitPushes,
+		toolErrors,
+		usesSubagent,
+		usesMcp,
+		linesAdded,
+		linesRemoved,
+		userMessageCount,
+		assistantMessageCount,
+		firstPrompt,
+	};
+}
+
+function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMeta {
+	const stats = extractClaudeStats(entries);
+	const startTime = new Date(stats.firstTs || ref.created.getTime()).toISOString();
+	const endMs = stats.lastTs || ref.modified.getTime();
+
+	return {
+		session_id: stats.sessionId || ref.id,
+		session_path: ref.path,
+		project_path: stats.projectPath || ref.project_path,
+		start_time: startTime,
+		duration_minutes: Math.max(
+			0,
+			Math.round((endMs - new Date(startTime).getTime()) / 1000 / 60),
+		),
+		user_message_count: stats.userMessageCount,
+		assistant_message_count: stats.assistantMessageCount,
+		tool_counts: stats.toolCounts,
+		languages: stats.languages,
+		git_commits: stats.gitCommits,
+		git_pushes: stats.gitPushes,
+		input_tokens: stats.totals.input,
+		output_tokens: stats.totals.output,
+		total_cost: stats.totals.cost,
+		first_prompt: stats.firstPrompt,
+		user_interruptions: 0,
+		user_response_times: stats.userResponseTimes,
+		tool_errors: stats.toolErrors,
+		tool_error_categories: stats.toolErrorCategories,
+		uses_subagent: stats.usesSubagent,
+		uses_mcp: stats.usesMcp,
+		lines_added: stats.linesAdded,
+		lines_removed: stats.linesRemoved,
+		files_modified: stats.filesModified,
+		message_hours: stats.messageHours,
+		user_message_timestamps: stats.userMessageTimestamps,
+		// Claude Code reports one aggregate cost per session, so subagent spend
+		// cannot be split out of it without estimating. It stays in primary.
+		cost_primary: stats.totals.cost,
+		cost_advisor: 0,
+		cost_subagent: 0,
+		cache_read_tokens: stats.totals.cacheRead,
+		cache_write_tokens: stats.totals.cacheWrite,
+		utility_cost: 0,
+		sidecar_counts: { advisor: 0, subagent: 0 },
+		sidecar_tool_calls: 0,
+		sidecar_tool_errors: 0,
+		thinking_escalations: 0,
+		model_switches: 0,
+		compactions: 0,
+		steering_messages: 0,
+		log_signature: ref.signature,
+		median_ttft_ms: 0,
+		median_response_ms: 0,
+		cost_recorded: stats.costAvailable,
+		model_usage: stats.modelUsage,
+	};
+}
+
+function createClaudeSessionSource(projectsDir: string = CLAUDE_PROJECTS_DIR): SessionSource {
+	return {
+		name: "claude-code",
+		root: projectsDir,
+		readEntries: readJsonl,
+		isMetaSession,
+		readSidecar: extractSidecarUsage,
+		buildMeta: (ref, entries) => buildClaudeMeta(ref, entries),
+		formatTranscript(entries, meta) {
+			const lines: string[] = [
+				`Session: ${meta.session_id.slice(0, 8)}`,
+				`Date: ${meta.start_time}`,
+				`Project: ${meta.project_path}`,
+				`Duration: ${meta.duration_minutes} min`,
+				"",
+			];
+			for (const entry of entries) {
+				const msg = entry.message as AnyMessage | undefined;
+				if (!msg) continue;
+				if (entry.type === "user" && entry.isSidechain !== true && entry.isMeta !== true) {
+					const text = claudeText(msg.content).slice(0, 500);
+					if (text.trim()) lines.push(`[User]: ${text}`);
+				} else if (entry.type === "assistant") {
+					for (const block of (Array.isArray(msg.content) ? msg.content : []) as ContentBlock[]) {
+						if (block.type === "text" && block.text)
+							lines.push(`[Assistant]: ${(block.text as string).slice(0, 300)}`);
+						else if (block.type === "tool_use" && block.name)
+							lines.push(`[Tool: ${block.name as string}]`);
+					}
+				}
+			}
+			return lines.join("\n");
+		},
+		async listSessions(): Promise<SessionScan> {
+			const sessions: SessionRef[] = [];
+			let projects: DirEntry[] = [];
+			try {
+				projects = await readdir(projectsDir, { withFileTypes: true });
+			} catch {
+				return { sessions, duplicate_logs: 0 };
+			}
+
+			for (const project of projects) {
+				if (!project.isDirectory()) continue;
+				const projectDir = join(projectsDir, project.name);
+				let entries: DirEntry[] = [];
+				try {
+					entries = await readdir(projectDir, { withFileTypes: true });
+				} catch {
+					continue;
+				}
+				for (const entry of entries) {
+					if (entry.isDirectory() || !entry.name.endsWith(".jsonl")) continue;
+					const path = join(projectDir, entry.name);
+					const info = await stat(path).catch(() => null);
+					if (!info) continue;
+					sessions.push({
+						id: entry.name.replace(/\.jsonl$/, ""),
+						path,
+						project_path: "",
+						size: info.size,
+						created: info.birthtime.getTime() ? info.birthtime : info.mtime,
+						modified: info.mtime,
+						sidecars: [],
+						signature: `${info.size}:${info.mtimeMs}`,
+					});
+				}
+			}
+
+			const byId = new Map<string, SessionRef>();
+			for (const ref of sessions) {
+				const seen = byId.get(ref.id);
+				if (!seen || ref.size > seen.size) byId.set(ref.id, ref);
+			}
+			return {
+				sessions: [...byId.values()],
+				duplicate_logs: sessions.length - byId.size,
+			};
+		},
+	};
 }
 
 // ─── Session Parsing ──────────────────────────────────────────────────────────
@@ -506,6 +1462,10 @@ function extractTextFromContent(content: unknown): string {
 }
 
 function isHumanMessage(msg: AnyMessage): boolean {
+	// omp attributes every user-role message; anything not attributed to the
+	// human (tool follow-ups, injected notices) is not human activity.
+	if (typeof msg.attribution === "string" && msg.attribution !== "user")
+		return false;
 	const content = msg.content;
 	if (typeof content === "string" && (content as string).trim()) return true;
 	if (Array.isArray(content)) {
@@ -546,7 +1506,143 @@ function isMetaSession(entries: AnyEntry[]): boolean {
 	return false;
 }
 
-function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
+type UsageRecord = {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+};
+
+type ModelUsageMap = Record<
+	string,
+	{ input_tokens: number; output_tokens: number; cost: number; message_count: number }
+>;
+
+/**
+ * omp prices every model call itself: assistant messages carry
+ * `message.usage`, and out-of-band calls (titles, auto-thinking, advisor
+ * prompts) are `model_usage` records. Both hold `usage.cost.total` in USD, so
+ * this port reads the recorded cost instead of re-deriving it from token
+ * counts and a price table the way upstream had to.
+ */
+function readUsage(usage: unknown): UsageRecord {
+	const u = (usage ?? {}) as Record<string, unknown>;
+	const cost = (u.cost ?? {}) as Record<string, unknown>;
+	return {
+		input: typeof u.input === "number" ? u.input : 0,
+		output: typeof u.output === "number" ? u.output : 0,
+		cacheRead: typeof u.cacheRead === "number" ? u.cacheRead : 0,
+		cacheWrite: typeof u.cacheWrite === "number" ? u.cacheWrite : 0,
+		cost: typeof cost.total === "number" ? cost.total : 0,
+	};
+}
+
+function addUsage(target: UsageRecord, add: UsageRecord): void {
+	target.input += add.input;
+	target.output += add.output;
+	target.cacheRead += add.cacheRead;
+	target.cacheWrite += add.cacheWrite;
+	target.cost += add.cost;
+}
+
+function accumulateModel(
+	map: ModelUsageMap,
+	model: string,
+	usage: UsageRecord,
+): void {
+	const slot = (map[model] ??= {
+		input_tokens: 0,
+		output_tokens: 0,
+		cost: 0,
+		message_count: 0,
+	});
+	slot.input_tokens += usage.input;
+	slot.output_tokens += usage.output;
+	slot.cost += usage.cost;
+	slot.message_count++;
+}
+
+const TOOL_ERROR_FAMILY: Record<string, string> = {
+	bash: "Shell Failed",
+	read: "Read Failed",
+	write: "Write Failed",
+	edit: "Edit Failed",
+	glob: "Glob Failed",
+	grep: "Grep Failed",
+	task: "Subagent Failed",
+	eval: "Eval Failed",
+	hub: "Hub Failed",
+	todo: "Todo Failed",
+	ask: "Ask Failed",
+	learn: "Learn Failed",
+	web_search: "Web Search Failed",
+	manage_skill: "Skill Write Failed",
+};
+
+/**
+ * omp sets `toolResult.isError`, so the error count is exact and upstream's
+ * regex bucketing over tool output is deleted rather than ported. The category
+ * stays coarse and is derived from the tool that failed.
+ */
+function toolErrorCategory(toolName: string): string {
+	if (!toolName) return "Unknown Tool";
+	if (toolName.startsWith("mcp__"))
+		return `MCP: ${toolName.slice(5).split("_")[0]}`;
+	return TOOL_ERROR_FAMILY[toolName] ?? `${displayLabel(toolName)} Failed`;
+}
+
+type SidecarUsage = {
+	totals: UsageRecord;
+	utility_cost: number;
+	model_usage: ModelUsageMap;
+	tool_calls: number;
+	tool_errors: number;
+};
+
+/**
+ * Sidecar logs (advisor, subagents) are separate sessions with their own
+ * spend. Only that spend and their tool volume are folded into the parent:
+ * their "user" messages are prompts omp wrote, so counting them as human
+ * activity would corrupt message counts, response times and hour-of-day.
+ */
+function extractSidecarUsage(entries: AnyEntry[]): SidecarUsage {
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const modelUsage: ModelUsageMap = {};
+	let utilityCost = 0;
+	let toolCalls = 0;
+	let toolErrors = 0;
+
+	for (const entry of entries) {
+		if (entry.type === "model_usage") {
+			const usage = readUsage(entry.usage);
+			addUsage(totals, usage);
+			utilityCost += usage.cost;
+			accumulateModel(modelUsage, typeof entry.model === "string" ? entry.model : "unknown", usage);
+			continue;
+		}
+		if (entry.type !== "message") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg) continue;
+
+		if (msg.role === "assistant") {
+			const usage = readUsage(msg.usage);
+			addUsage(totals, usage);
+			accumulateModel(modelUsage, typeof msg.model === "string" ? msg.model : "unknown", usage);
+			if (Array.isArray(msg.content)) {
+				for (const block of msg.content as ContentBlock[]) {
+					if (block.type === "toolCall") toolCalls++;
+				}
+			}
+		} else if (msg.role === "toolResult" && msg.isError === true) {
+			toolErrors++;
+		}
+	}
+
+	return { totals, utility_cost: utilityCost, model_usage: modelUsage, tool_calls: toolCalls, tool_errors: toolErrors };
+}
+
+function extractSessionStats(entries: AnyEntry[]) {
 	const toolCounts: Record<string, number> = {};
 	const languages: Record<string, number> = {};
 	const toolErrorCategories: Record<string, number> = {};
@@ -554,13 +1650,19 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 	const userResponseTimes: number[] = [];
 	const messageHours: number[] = [];
 	const userMessageTimestamps: string[] = [];
+	const ttfts: number[] = [];
+	const responseDurations: number[] = [];
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const modelUsage: ModelUsageMap = {};
 
+	let sessionId = "";
+	let sessionStart = "";
+	let projectPath = "";
+	let lastEntryTs = 0;
+	let utilityCost = 0;
 	let gitCommits = 0;
 	let gitPushes = 0;
-	let inputTokens = 0;
-	let outputTokens = 0;
-	let totalCost = 0;
-	let userInterruptions = 0;
+	let steeringMessages = 0;
 	let toolErrors = 0;
 	let usesSubagent = false;
 	let usesMcp = false;
@@ -568,48 +1670,73 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 	let linesRemoved = 0;
 	let userMessageCount = 0;
 	let assistantMessageCount = 0;
+	let thinkingEscalations = 0;
+	let modelSwitches = 0;
+	let compactions = 0;
 	let firstPrompt = "";
-
-	const modelUsage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number }> = {};
-
 	let lastAssistantTs: number | null = null;
 
 	// Deduplicate tool call IDs to avoid double-counting branched entries
 	const seenToolCallIds = new Set<string>();
 
 	for (const entry of entries) {
+		const entryTs =
+			typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+		if (!Number.isNaN(entryTs) && entryTs > lastEntryTs) lastEntryTs = entryTs;
+
+		if (entry.type === "session") {
+			// The session record is authoritative for id, start time and project.
+			if (typeof entry.id === "string") sessionId = entry.id;
+			if (typeof entry.timestamp === "string") sessionStart = entry.timestamp;
+			if (typeof entry.cwd === "string") projectPath = entry.cwd;
+			continue;
+		}
+		// Mid-session escalation: a behavioural signal Pi had no equivalent for.
+		if (entry.type === "thinking_level_change") {
+			thinkingEscalations++;
+			continue;
+		}
+		if (entry.type === "model_change") {
+			modelSwitches++;
+			continue;
+		}
+		if (entry.type === "compaction") {
+			compactions++;
+			continue;
+		}
+		if (entry.type === "model_usage") {
+			const usage = readUsage(entry.usage);
+			addUsage(totals, usage);
+			utilityCost += usage.cost;
+			accumulateModel(modelUsage, typeof entry.model === "string" ? entry.model : "unknown", usage);
+			continue;
+		}
 		if (entry.type !== "message") continue;
+
 		const msg = entry.message as AnyMessage | undefined;
 		if (!msg) continue;
 
-		const msgTs = typeof msg.timestamp === "number" ? msg.timestamp : null;
+		// Assistant/user messages carry epoch-ms timestamps; fall back to the
+		// envelope's ISO timestamp for records that do not.
+		const msgTs =
+			typeof msg.timestamp === "number"
+				? msg.timestamp
+				: Number.isNaN(entryTs)
+					? null
+					: entryTs;
 
 		// ── assistant message ──
 		if (msg.role === "assistant") {
 			assistantMessageCount++;
 			if (msgTs) lastAssistantTs = msgTs;
 
-			// Model tracking
-			const modelName = (msg.model as string) ?? "unknown";
+			const usage = readUsage(msg.usage);
+			addUsage(totals, usage);
+			accumulateModel(modelUsage, typeof msg.model === "string" ? msg.model : "unknown", usage);
 
-			// Tokens + cost
-			const usage = msg.usage as Record<string, unknown> | undefined;
-			if (usage) {
-				const msgInput = (usage.input as number) ?? 0;
-				const msgOutput = (usage.output as number) ?? 0;
-				const cost = usage.cost as Record<string, number> | undefined;
-				const msgCost = cost?.total ?? 0;
-
-				inputTokens += msgInput;
-				outputTokens += msgOutput;
-				if (msgCost) totalCost += msgCost;
-
-				if (!modelUsage[modelName]) modelUsage[modelName] = { input_tokens: 0, output_tokens: 0, cost: 0, message_count: 0 };
-				modelUsage[modelName]!.input_tokens += msgInput;
-				modelUsage[modelName]!.output_tokens += msgOutput;
-				modelUsage[modelName]!.cost += msgCost;
-				modelUsage[modelName]!.message_count++;
-			}
+			if (typeof msg.ttft === "number" && msg.ttft > 0) ttfts.push(msg.ttft);
+			if (typeof msg.duration === "number" && msg.duration > 0)
+				responseDurations.push(msg.duration);
 
 			// Tool calls inside content
 			const content = msg.content;
@@ -622,40 +1749,58 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 					if (seenToolCallIds.has(toolId)) continue;
 					seenToolCallIds.add(toolId);
 
-					toolCounts[toolName] = (toolCounts[toolName] ?? 0) + 1;
+					const args = (block.arguments as Record<string, unknown>) ?? {};
+					const filePath = typeof args.path === "string" ? args.path : "";
 
-					if (toolName === "subagent") usesSubagent = true;
+					// omp routes MCP servers and tool devices through a write to
+					// `xd://<device>`. Counting those as file writes would both
+					// inflate write volume and hide MCP/device usage entirely.
+					const device = filePath.startsWith("xd://")
+						? filePath.slice(5).split(/[/?:]/)[0]!
+						: "";
+					if (toolName === "write" && device) {
+						toolCounts[`xd://${device}`] = (toolCounts[`xd://${device}`] ?? 0) + 1;
+						if (device.startsWith("mcp__")) usesMcp = true;
+						continue;
+					}
+
+					toolCounts[toolName] = (toolCounts[toolName] ?? 0) + 1;
+					if (toolName === "task") usesSubagent = true;
 					if (toolName.startsWith("mcp__")) usesMcp = true;
 
-					const args = (block.arguments as Record<string, unknown>) ?? {};
-					const filePath =
-						(args.path as string) ?? (args.file_path as string) ?? "";
-
-					if (filePath) {
-						const lang = getLanguageFromPath(filePath);
+					if (toolName === "read" || toolName === "write") {
+						// Strip any read selector (`file.ts:10-20`) before the extension lookup.
+						const clean = filePath.replace(/:[^/\\]*$/, "");
+						const lang = getLanguageFromPath(clean);
 						if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
 					}
 
 					if (toolName === "write" && filePath) {
 						filesModified.add(filePath);
-						const content_ = (args.content as string) ?? "";
-						linesAdded += countNewlines(content_) + 1;
+						linesAdded += countNewlines((args.content as string) ?? "") + 1;
 					}
 
-					if (toolName === "edit" && filePath) {
-						filesModified.add(filePath);
-						const edits =
-							(args.edits as Array<{
-								oldText?: string;
-								newText?: string;
-								old_string?: string;
-								new_string?: string;
-							}>) ?? [];
-						for (const e of edits) {
-							const oldText = e.oldText ?? e.old_string ?? "";
-							const newText = e.newText ?? e.new_string ?? "";
-							linesAdded += countNewlines(newText) + 1;
-							linesRemoved += countNewlines(oldText) + 1;
+					if (toolName === "edit") {
+						// omp's edit tool takes one hashline patch in `input`: sections
+						// are `[path#TAG]`, `+` rows are the new content, and
+						// `PUT a.=b` / `CUT a.=b` name the original lines replaced.
+						const patch = (args.input as string) ?? "";
+						for (const line of patch.split("\n")) {
+							const section = line.match(/^\[([^\]]+)#[0-9A-Fa-f]{4}\]$/);
+							if (section) {
+								const path = section[1]!;
+								filesModified.add(path);
+								const lang = getLanguageFromPath(path);
+								if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
+								continue;
+							}
+							const range = line.match(/^(?:PUT|CUT)\s+(\d+)\.=(\d+)/);
+							if (range) {
+								linesRemoved += Number(range[2]) - Number(range[1]) + 1;
+								continue;
+							}
+							if (line.startsWith("+")) linesAdded++;
+							else if (line.startsWith("-") && !line.startsWith("---")) linesRemoved++;
 						}
 					}
 
@@ -675,7 +1820,9 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 
 			if (!firstPrompt && text.trim()) firstPrompt = text.trim().slice(0, 300);
 
-			if (text.includes("[Request interrupted by user")) userInterruptions++;
+			// omp flags interruptions structurally: `steering` is set when the
+			// user typed while the agent was still working.
+			if (msg.steering) steeringMessages++;
 
 			if (msgTs) {
 				const d = new Date(msgTs);
@@ -690,41 +1837,18 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 		}
 
 		// ── tool result ──
-		if (msg.role === "toolResult") {
-			const isError = (msg.isError as boolean) === true;
-			if (isError) {
-				toolErrors++;
-				const resultText = extractTextFromContent(msg.content).toLowerCase();
-				let cat = "Other";
-				if (resultText.includes("exit code")) cat = "Command Failed";
-				else if (
-					resultText.includes("rejected") ||
-					resultText.includes("doesn't want")
-				)
-					cat = "User Rejected";
-				else if (
-					resultText.includes("string to replace not found") ||
-					resultText.includes("no changes")
-				)
-					cat = "Edit Failed";
-				else if (resultText.includes("modified since read"))
-					cat = "File Changed";
-				else if (
-					resultText.includes("exceeds maximum") ||
-					resultText.includes("too large")
-				)
-					cat = "File Too Large";
-				else if (
-					resultText.includes("file not found") ||
-					resultText.includes("does not exist")
-				)
-					cat = "File Not Found";
-				toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
-			}
+		if (msg.role === "toolResult" && msg.isError === true) {
+			toolErrors++;
+			const cat = toolErrorCategory((msg.toolName as string) ?? "");
+			toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
 		}
 	}
 
 	return {
+		sessionId,
+		sessionStart,
+		projectPath,
+		lastEntryTs,
 		toolCounts,
 		languages,
 		toolErrorCategories,
@@ -732,12 +1856,13 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 		userResponseTimes,
 		messageHours,
 		userMessageTimestamps,
+		ttfts,
+		responseDurations,
 		gitCommits,
 		gitPushes,
-		inputTokens,
-		outputTokens,
-		totalCost,
-		userInterruptions,
+		totals,
+		utilityCost,
+		steeringMessages,
 		toolErrors,
 		usesSubagent,
 		usesMcp,
@@ -745,29 +1870,67 @@ function extractSessionStats(entries: AnyEntry[], sessionPath: string) {
 		linesRemoved,
 		userMessageCount,
 		assistantMessageCount,
+		thinkingEscalations,
+		modelSwitches,
+		compactions,
 		firstPrompt,
 		modelUsage,
 	};
 }
 
+/**
+ * Fold a session and its sidecars into one SessionMeta. Cost is attributed to
+ * the parent and broken out per class, so a run's total can be reconciled
+ * against the logs while still showing where the money went.
+ */
 function buildSessionMeta(
-	info: {
-		id: string;
-		path: string;
-		cwd: string;
-		created: Date;
-		modified: Date;
-	},
+	ref: SessionRef,
 	entries: AnyEntry[],
+	sidecars: Array<{ kind: SidecarKind; usage: SidecarUsage }>,
 ): SessionMeta {
-	const stats = extractSessionStats(entries, info.path);
+	const stats = extractSessionStats(entries);
+
+	const startTime = stats.sessionStart || ref.created.toISOString();
+	const endMs = stats.lastEntryTs || ref.modified.getTime();
+	const totals: UsageRecord = { ...stats.totals };
+	const modelUsage: ModelUsageMap = stats.modelUsage;
+
+	let costAdvisor = 0;
+	let costSubagent = 0;
+	let utilityCost = stats.utilityCost;
+	let sidecarToolCalls = 0;
+	let sidecarToolErrors = 0;
+	const sidecarCounts = { advisor: 0, subagent: 0 };
+
+	for (const sidecar of sidecars) {
+		sidecarCounts[sidecar.kind]++;
+		addUsage(totals, sidecar.usage.totals);
+		utilityCost += sidecar.usage.utility_cost;
+		sidecarToolCalls += sidecar.usage.tool_calls;
+		sidecarToolErrors += sidecar.usage.tool_errors;
+		if (sidecar.kind === "advisor") costAdvisor += sidecar.usage.totals.cost;
+		else costSubagent += sidecar.usage.totals.cost;
+		for (const [model, usage] of Object.entries(sidecar.usage.model_usage)) {
+			accumulateModel(modelUsage, model, {
+				input: usage.input_tokens,
+				output: usage.output_tokens,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: usage.cost,
+			});
+			// accumulateModel counts one message; restore the real count.
+			modelUsage[model]!.message_count += usage.message_count - 1;
+		}
+	}
+
 	return {
-		session_id: info.id,
-		session_path: info.path,
-		project_path: info.cwd,
-		start_time: info.created.toISOString(),
-		duration_minutes: Math.round(
-			(info.modified.getTime() - info.created.getTime()) / 1000 / 60,
+		session_id: stats.sessionId || ref.id,
+		session_path: ref.path,
+		project_path: stats.projectPath || ref.project_path,
+		start_time: startTime,
+		duration_minutes: Math.max(
+			0,
+			Math.round((endMs - new Date(startTime).getTime()) / 1000 / 60),
 		),
 		user_message_count: stats.userMessageCount,
 		assistant_message_count: stats.assistantMessageCount,
@@ -775,22 +1938,39 @@ function buildSessionMeta(
 		languages: stats.languages,
 		git_commits: stats.gitCommits,
 		git_pushes: stats.gitPushes,
-		input_tokens: stats.inputTokens,
-		output_tokens: stats.outputTokens,
-		total_cost: stats.totalCost,
+		input_tokens: totals.input,
+		output_tokens: totals.output,
+		total_cost: totals.cost,
 		first_prompt: stats.firstPrompt,
-		user_interruptions: stats.userInterruptions,
+		user_interruptions: stats.steeringMessages,
 		user_response_times: stats.userResponseTimes,
 		tool_errors: stats.toolErrors,
 		tool_error_categories: stats.toolErrorCategories,
-		uses_subagent: stats.usesSubagent,
+		uses_subagent: stats.usesSubagent || sidecarCounts.subagent > 0,
 		uses_mcp: stats.usesMcp,
 		lines_added: stats.linesAdded,
 		lines_removed: stats.linesRemoved,
 		files_modified: stats.filesModified,
 		message_hours: stats.messageHours,
 		user_message_timestamps: stats.userMessageTimestamps,
-		model_usage: stats.modelUsage,
+		cost_primary: stats.totals.cost,
+		cost_advisor: costAdvisor,
+		cost_subagent: costSubagent,
+		cache_read_tokens: totals.cacheRead,
+		cache_write_tokens: totals.cacheWrite,
+		utility_cost: utilityCost,
+		sidecar_counts: sidecarCounts,
+		sidecar_tool_calls: sidecarToolCalls,
+		sidecar_tool_errors: sidecarToolErrors,
+		thinking_escalations: stats.thinkingEscalations,
+		model_switches: stats.modelSwitches,
+		compactions: stats.compactions,
+		steering_messages: stats.steeringMessages,
+		log_signature: ref.signature,
+		cost_recorded: true,
+		median_ttft_ms: median(stats.ttfts),
+		median_response_ms: median(stats.responseDurations),
+		model_usage: modelUsage,
 	};
 }
 
@@ -830,7 +2010,8 @@ function formatTranscript(entries: AnyEntry[], meta: SessionMeta): string {
 
 // ─── Parallel Session Detection ───────────────────────────────────────────────
 
-function detectMultiClauding(
+/** Sessions whose user messages interleave inside a 30-minute window. */
+function detectConcurrentSessions(
 	sessions: Array<{ session_id: string; user_message_timestamps: string[] }>,
 ) {
 	const all: Array<{ ts: number; sid: string }> = [];
@@ -954,11 +2135,25 @@ function aggregateData(
 		total_files_modified: 0,
 		days_active: 0,
 		message_hours: [],
-		multi_clauding: {
+		concurrent_sessions: {
 			overlap_events: 0,
 			sessions_involved: 0,
 			user_messages_during: 0,
 		},
+		total_cost_primary: 0,
+		total_cost_advisor: 0,
+		total_cost_subagent: 0,
+		total_utility_cost: 0,
+		total_cache_read_tokens: 0,
+		total_cache_write_tokens: 0,
+		advisor_logs: 0,
+		subagent_logs: 0,
+		sessions_with_sidecars: 0,
+		total_thinking_escalations: 0,
+		total_model_switches: 0,
+		total_compactions: 0,
+		total_steering: 0,
+		median_ttft_ms: 0,
 		model_usage: {},
 		model_efficiency: [],
 		estimated_waste: 0,
@@ -1006,6 +2201,20 @@ function aggregateData(
 		agg.message_hours.push(...meta.message_hours);
 		if (meta.uses_subagent) agg.sessions_using_subagent++;
 		if (meta.uses_mcp) agg.sessions_using_mcp++;
+		agg.total_cost_primary += meta.cost_primary;
+		agg.total_cost_advisor += meta.cost_advisor;
+		agg.total_cost_subagent += meta.cost_subagent;
+		agg.total_utility_cost += meta.utility_cost;
+		agg.total_cache_read_tokens += meta.cache_read_tokens;
+		agg.total_cache_write_tokens += meta.cache_write_tokens;
+		agg.advisor_logs += meta.sidecar_counts.advisor;
+		agg.subagent_logs += meta.sidecar_counts.subagent;
+		if (meta.sidecar_counts.advisor + meta.sidecar_counts.subagent > 0)
+			agg.sessions_with_sidecars++;
+		agg.total_thinking_escalations += meta.thinking_escalations;
+		agg.total_model_switches += meta.model_switches;
+		agg.total_compactions += meta.compactions;
+		agg.total_steering += meta.steering_messages;
 
 		// Aggregate per-model usage
 		for (const [model, usage] of Object.entries(meta.model_usage ?? {})) {
@@ -1078,7 +2287,11 @@ function aggregateData(
 	agg.friction_details = agg.friction_details.slice(0, 20);
 	agg.user_instructions = agg.user_instructions.slice(0, 15);
 
-	agg.multi_clauding = detectMultiClauding(
+	agg.median_ttft_ms = median(
+		metas.map((m) => m.median_ttft_ms).filter((v) => v > 0),
+	);
+
+	agg.concurrent_sessions = detectConcurrentSessions(
 		metas.map((m) => ({
 			session_id: m.session_id,
 			user_message_timestamps: m.user_message_timestamps,
@@ -1245,36 +2458,56 @@ function aggregateData(
 
 // ─── LLM Calling ─────────────────────────────────────────────────────────────
 
+/**
+ * omp hands extensions credentials (`ctx.modelRegistry.getApiKeyAndHeaders`)
+ * but no completion client, so this shells out to omp itself instead of
+ * reimplementing a provider client.
+ *
+ * Why a subprocess: `omp -p` already speaks every provider dialect and auth
+ * scheme omp supports, including the OAuth-backed ones a fallback chain
+ * reaches on a rate limit. An in-process HTTP client would have to own
+ * anthropic-messages, openai-responses and github-copilot and would rot the
+ * first time a model role moved. The prompt goes over stdin, not argv, so
+ * transcript-sized prompts cannot hit an argument-length limit.
+ *
+ * `--no-session` keeps these calls out of the session corpus this report
+ * reads, and `--no-tools --no-extensions --no-skills` keeps them from doing
+ * anything but answering.
+ */
 async function callModel(
-	ctx: ExtensionCommandContext,
 	prompt: string,
-	_maxTokens?: number,
+	opts: { model?: string; timeoutMs?: number } = {},
 ): Promise<string> {
-	const model = ctx.model;
-	if (!model) throw new Error("No active model");
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model as never);
-	if (!auth.ok) throw new Error(auth.error);
-	const apiKey = auth.apiKey ?? "";
-	const headers = auth.headers;
+	const args = ["--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-title"];
+	if (opts.model) args.push("--model", opts.model);
+	args.push("-p");
 
-	const response = await complete(
-		model as never,
-		{
-			messages: [
-				{
-					role: "user",
-					content: [{ type: "text", text: prompt }],
-					timestamp: Date.now(),
-				},
-			],
-		},
-		{ apiKey, headers },
+	const child = execFileCb(
+		OMP_BIN,
+		args,
+		{ maxBuffer: 32 * 1024 * 1024, timeout: opts.timeoutMs ?? MODEL_CALL_TIMEOUT_MS },
+		() => {},
 	);
 
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("");
+	const stdout: string[] = [];
+	const stderr: string[] = [];
+	child.stdout?.on("data", (c: Buffer) => stdout.push(c.toString()));
+	child.stderr?.on("data", (c: Buffer) => stderr.push(c.toString()));
+	child.stdin?.end(prompt);
+
+	const code = await new Promise<number>((resolve, reject) => {
+		child.on("error", reject);
+		child.on("close", (c) => resolve(c ?? -1));
+	});
+
+	const text = stdout.join("");
+	if (code !== 0) {
+		throw new Error(
+			`omp -p exited ${code}: ${(stderr.join("") || text).trim().slice(0, 300)}`,
+		);
+	}
+	// `omp -p` prints a progress line before the answer on a TTY-less run.
+	return text.replace(/^Working\.\.\.\s*/, "").trim();
 }
 
 function parseJsonFromResponse(text: string): unknown {
@@ -1350,7 +2583,16 @@ function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData, userC
 				lines_added: agg.total_lines_added,
 				lines_removed: agg.total_lines_removed,
 				files_modified: agg.total_files_modified,
-				multi_clauding: agg.multi_clauding,
+				concurrent_sessions: agg.concurrent_sessions,
+				cost_primary_usd: agg.total_cost_primary.toFixed(2),
+				cost_advisor_usd: agg.total_cost_advisor.toFixed(2),
+				cost_subagent_usd: agg.total_cost_subagent.toFixed(2),
+				cache_read_tokens: agg.total_cache_read_tokens,
+				cache_write_tokens: agg.total_cache_write_tokens,
+				thinking_escalations: agg.total_thinking_escalations,
+				model_switches: agg.total_model_switches,
+				compactions: agg.total_compactions,
+				steering_messages: agg.total_steering,
 				subagent_sessions: agg.sessions_using_subagent,
 				mcp_sessions: agg.sessions_using_mcp,
 				model_usage: agg.model_usage,
@@ -1370,28 +2612,57 @@ ${agg.friction_details.map((d) => `- ${d}`).join("\n")}
 
 USER INSTRUCTIONS TO ASSISTANT:
 ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
-		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "What changed this week: " + temporal.diff_headlines.join("; ") : "No significant weekly changes."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nPackages: ${userCtx.installed_packages.join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
+		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "What changed this week: " + temporal.diff_headlines.join("; ") : "No significant weekly changes."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
 	);
 }
 
-const PI_FEATURES_REFERENCE = `## PI FEATURES REFERENCE:
-1. Extensions — TypeScript modules in ~/.pi/agent/extensions/ that register custom tools, commands, shortcuts, and react to lifecycle events
-   - Good for: automating repetitive actions, gating dangerous operations, custom UI, external integrations
+// Why this list is load-bearing: the model can only suggest features it is
+// told exist, so a wrong or Pi-shaped list is the main way the report turns
+// into useless advice. Keep it aligned with omp's real surface.
+const OMP_FEATURES_REFERENCE = `## OMP FEATURES REFERENCE:
+1. Skills — SKILL.md procedures in ~/.omp/agent/skills/ (user-authored) and
+   ~/.omp/agent/managed-skills/ (agent-authored via the manage_skill tool);
+   surfaced automatically by name/description match, read with skill://<name>
+   - Good for: repeatable procedures, debugging recipes, project workflows
+   - Rule: never suggest a skill whose name already appears in the installed list
 
-2. Skills — Markdown prompt templates in ~/.pi/agent/skills/ invoked with /skill:name
-   - Good for: repeatable workflows like code review, commit message generation, debugging guides
+2. Memory (learn tool) — durable project/user facts recorded to long-term
+   memory, summarised at memory://root
+   - Good for: conventions, non-obvious fixes, user preferences that must survive sessions
 
-3. Subagents (via pi-subagents extension) — spawn focused agents for parallel/exploratory work
-   - Good for: large codebase exploration, parallel tasks, multi-step investigations
+3. Hooks — executables under ~/.omp/agent/hooks/<event>/ (e.g. pre/) that run
+   on tool lifecycle events and can block or annotate a call
+   - Good for: format/type gates, permission gates, injecting scoped instructions
 
-4. Lifecycle hooks (via extensions) — react to tool_call, tool_result, before_agent_start events
-   - Good for: auto-formatting, type checks, permission gates, auto-commit checkpoints
+4. Extensions — TypeScript modules in ~/.omp/agent/extensions/ that register
+   commands, tools and widgets (this report is one)
+   - Good for: custom commands, external integrations, bespoke UI
 
-5. AGENTS.md / SYSTEM.md — project-specific context files loaded automatically
-   - Good for: team conventions, architecture notes, coding standards the assistant always follows
+5. Subagents (task tool) — background agents with their own context, batched in
+   one tasks[] array; typed agents (scout for read-only research, reviewer,
+   sonic for mechanical edits); coordinate over hub messaging
+   - Good for: parallel independent slices, unknown-code mapping, review passes
 
-6. Settings (settings.json) — default model, packages, custom providers
-   - Good for: standardizing across projects, pinning a model, enabling packages`;
+6. xd:// tool devices — schema-driven tools invoked by writing JSON args
+   (ast_edit for codemods, lsp for symbol-aware refactors, debug for DAP,
+   github for gh ops, plus every mounted MCP tool)
+   - Good for: structural rewrites, reference-safe renames, breakpoint debugging
+
+7. MCP servers — configured in ~/.omp/agent/mcp.json, mounted as xd:// devices
+   - Good for: Jira/Confluence, Outline, Sentry, Metabase, Postgres and similar
+
+8. Model roles and fallback chains — ~/.omp/agent/config.yml modelRoles
+   (default, plan, task, smol, tiny, advisor) and retry.fallbackChains
+   - Good for: routing cheap work to smol/tiny, pinning a stronger default,
+     surviving provider rate limits
+
+9. Advisor — a second model reviewing the main loop, logged to a per-session
+   __advisor.jsonl sidecar with its own cost
+   - Good for: catching wrong turns early; costs real money, so worth toggling
+
+10. AGENTS.md — per-repo instruction files, plus scoped
+   .agent/instructions/*.instructions.md with applyTo globs
+   - Good for: team conventions and per-path rules the agent always follows`;
 
 function buildSectionPrompts(data: string, temporal: TemporalData, userCtx: UserContext, agg: AggregatedData) {
 	return {
@@ -1476,13 +2747,13 @@ Max 2 resolved, 3 ongoing.
 DATA:
 ${data}`,
 
-		suggestions: `Analyze this usage data and suggest improvements for working with Pi.
+		suggestions: `Analyze this usage data and suggest improvements for working with omp.
 
-${PI_FEATURES_REFERENCE}
+${OMP_FEATURES_REFERENCE}
 
 CRITICAL: The user's existing setup is in the data below. DO NOT suggest:
 - Rules already in their AGENTS.md
-- Skills/extensions/packages they already have installed
+- Skills (including managed skills), extensions, hooks or MCP servers they already have installed
 - Fixes for "resolved friction" (listed in TEMPORAL CONTEXT)
 FOCUS on ongoing friction. Include at least one NEGATIVE suggestion (something to stop/remove).
 Tailor copyable prompts to their actual model (${userCtx.default_model || "unknown"}) and projects.
@@ -1493,12 +2764,12 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
     {
       "addition": "a specific rule NOT already in their AGENTS.md",
       "why": "1 sentence referencing actual ongoing friction",
-      "where": "AGENTS.md | settings.json | ~/.pi/agent/extensions/ | ~/.pi/agent/skills/"
+      "where": "AGENTS.md | ~/.omp/agent/config.yml | ~/.omp/agent/extensions/ | ~/.omp/agent/managed-skills/ | ~/.omp/agent/hooks/"
     }
   ],
   "features_to_try": [
     {
-      "feature": "feature name from PI FEATURES REFERENCE",
+      "feature": "feature name from OMP FEATURES REFERENCE",
       "one_liner": "what it does",
       "why_for_you": "why this helps YOUR ongoing friction patterns",
       "example": "actual command or config referencing their real projects"
@@ -1561,7 +2832,7 @@ ${data}`,
 			const modelLines = Object.entries(agg.model_usage).sort((a, b) => b[1].cost - a[1].cost).map(([m, u]) => {
 				const totalTok = u.input_tokens + u.output_tokens;
 				const cpt = totalTok > 0 ? (u.cost / totalTok * 1000).toFixed(4) : "0";
-				return `- ${m.replace(/.*\./, "")}: ${u.sessions} sessions, $${u.cost.toFixed(2)} total, ${u.message_count} msgs, tier=${u.tier || "mid"}, $/1k-tok=${cpt}`;
+				return `- ${m.replace(/.*\//, "")}: ${u.sessions} sessions, $${u.cost.toFixed(2)} total, ${u.message_count} msgs, tier=${u.tier || "mid"}, $/1k-tok=${cpt}`;
 			}).join("\n");
 			return `Analyze this model usage data and identify efficiency issues.
 
@@ -1780,9 +3051,11 @@ function generateMarkdown(
 	sections: Record<string, unknown>,
 	synthesis: Record<string, string>,
 	temporal: TemporalData,
+	scan: ScanSummary,
+	userCtx: UserContext,
 ): string {
 	const lines: string[] = [];
-	lines.push("# Pi Insights");
+	lines.push(scan.source === "omp" ? "# omp Insights" : `# Insights (${scan.source})`);
 	lines.push(`> ${agg.date_range.start} to ${agg.date_range.end} | ${agg.total_sessions} sessions | Generated ${new Date().toLocaleDateString()}`);
 	lines.push("");
 
@@ -1793,24 +3066,120 @@ function generateMarkdown(
 		lines.push("");
 	}
 
-	lines.push("## \u26A1 Summary");
-	if (synthesis.whats_working) lines.push(`**What's working:** ${synthesis.whats_working}`);
-	if (synthesis.whats_hindering) lines.push(`\n**What's hindering you:** ${synthesis.whats_hindering}`);
-	if (synthesis.quick_wins) lines.push(`\n**Quick wins:** ${synthesis.quick_wins}`);
-	if (synthesis.ambitious_workflows) lines.push(`\n**Ambitious workflows:** ${synthesis.ambitious_workflows}`);
-	lines.push("");
+	if (synthesis.whats_working || synthesis.whats_hindering || synthesis.quick_wins || synthesis.ambitious_workflows) {
+		lines.push("## \u26A1 Summary");
+		if (synthesis.whats_working) lines.push(`**What's working:** ${synthesis.whats_working}`);
+		if (synthesis.whats_hindering) lines.push(`\n**What's hindering you:** ${synthesis.whats_hindering}`);
+		if (synthesis.quick_wins) lines.push(`\n**Quick wins:** ${synthesis.quick_wins}`);
+		if (synthesis.ambitious_workflows) lines.push(`\n**Ambitious workflows:** ${synthesis.ambitious_workflows}`);
+		lines.push("");
+	}
 
 	lines.push("## \u{1F4CA} By the Numbers");
 	lines.push(`| Metric | Value |`);
 	lines.push(`|--------|-------|`);
 	lines.push(`| Sessions | ${agg.total_sessions} (${agg.days_active} active days) |`);
-	lines.push(`| Messages | ${agg.total_messages} |`);
+	lines.push(`| User Messages | ${agg.total_messages} |`);
 	lines.push(`| Total Cost | $${agg.total_cost.toFixed(2)} |`);
 	lines.push(`| Tokens In | ${fmtTokens(agg.total_input_tokens)} |`);
 	lines.push(`| Tokens Out | ${fmtTokens(agg.total_output_tokens)} |`);
+	lines.push(`| Cache Read | ${fmtTokens(agg.total_cache_read_tokens)} |`);
+	lines.push(`| Cache Write | ${fmtTokens(agg.total_cache_write_tokens)} |`);
 	lines.push(`| Lines Added | ${agg.total_lines_added} |`);
+	lines.push(`| Lines Removed | ${agg.total_lines_removed} |`);
+	lines.push(`| Files Touched | ${agg.total_files_modified} |`);
 	lines.push(`| Git Commits | ${agg.git_commits} |`);
+	lines.push(`| Git Pushes | ${agg.git_pushes} |`);
 	lines.push(`| Tool Errors | ${agg.total_tool_errors} |`);
+	lines.push(`| Steering / Interruptions | ${agg.total_steering} |`);
+	lines.push(`| Thinking Escalations | ${agg.total_thinking_escalations} |`);
+	lines.push(`| Model Switches | ${agg.total_model_switches} |`);
+	lines.push(`| Compactions | ${agg.total_compactions} |`);
+	lines.push(`| Median TTFT | ${(agg.median_ttft_ms / 1000).toFixed(1)}s |`);
+	lines.push(`| Median Reply Wait | ${agg.median_response_time.toFixed(0)}s |`);
+	lines.push(`| Parallel Sessions | ${agg.concurrent_sessions.overlap_events} overlap events across ${agg.concurrent_sessions.sessions_involved} sessions |`);
+	lines.push("");
+
+	// Cost attribution. Advisor and subagent logs are separate sessions with
+	// their own spend; omitting them undercounts badly, so they are folded
+	// into the total and shown separately.
+	lines.push("## \u{1F4B0} Where the Money Went");
+	lines.push(`| Bucket | Cost | Share |`);
+	lines.push(`|--------|------|-------|`);
+	const share = (v: number) => (agg.total_cost > 0 ? `${((v / agg.total_cost) * 100).toFixed(1)}%` : "0%");
+	lines.push(`| Primary sessions | $${agg.total_cost_primary.toFixed(2)} | ${share(agg.total_cost_primary)} |`);
+	lines.push(`| Advisor sidecars (${agg.advisor_logs} ${agg.advisor_logs === 1 ? "log" : "logs"}) | $${agg.total_cost_advisor.toFixed(2)} | ${share(agg.total_cost_advisor)} |`);
+	lines.push(`| Subagent sidecars (${agg.subagent_logs} ${agg.subagent_logs === 1 ? "log" : "logs"}) | $${agg.total_cost_subagent.toFixed(2)} | ${share(agg.total_cost_subagent)} |`);
+	lines.push(`| **Total** | **$${agg.total_cost.toFixed(2)}** | 100% |`);
+	lines.push("");
+	lines.push(`Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that total: $${agg.total_utility_cost.toFixed(2)}. ${agg.sessions_with_sidecars} of ${agg.total_sessions} sessions had at least one sidecar.`);
+	lines.push("");
+
+	lines.push("## \u{1F527} Tools");
+	lines.push(`| Tool | Calls |`);
+	lines.push(`|------|-------|`);
+	for (const [tool, count] of top8(agg.tool_counts)) lines.push(`| ${tool} | ${count} |`);
+	lines.push("");
+	if (Object.keys(agg.tool_error_categories).length) {
+		lines.push("**Failures by tool** (from `toolResult.isError`, not text matching):");
+		for (const [cat, count] of top8(agg.tool_error_categories)) lines.push(`- ${cat}: ${count}`);
+		lines.push("");
+	}
+
+	if (Object.keys(agg.languages).length) {
+		lines.push("## \u{1F4C1} Languages and Projects");
+		lines.push(`Languages: ${top8(agg.languages).map(([l, c]) => `${l} (${c})`).join(", ")}`);
+		lines.push("");
+		lines.push(`| Project | Sessions |`);
+		lines.push(`|---------|----------|`);
+		for (const [project, count] of top8(agg.projects)) lines.push(`| ${project} | ${count} |`);
+		lines.push("");
+	}
+
+	// Provenance: what the scan actually looked at, so the numbers above can
+	// be reconciled against the logs rather than trusted.
+	lines.push("## \u{1F50D} Corpus");
+	lines.push(`Scanned \`${scan.sessions_dir}\`: ${scan.primary_logs} distinct sessions, ${scan.advisor_logs} advisor sidecars, ${scan.subagent_logs} subagent sidecars${scan.duplicate_logs ? `, ${scan.duplicate_logs} duplicate log(s) dropped` : ""}.`);
+	lines.push("");
+	lines.push(`| Excluded | Sessions |`);
+	lines.push(`|----------|----------|`);
+	lines.push(`| Current session | ${scan.excluded_current} |`);
+	lines.push(`| Insights meta-sessions | ${scan.excluded_meta} |`);
+	lines.push(`| Unparseable | ${scan.excluded_unparsed} |`);
+	lines.push(`| Below substance floor (<2 user messages or <1 min) | ${scan.excluded_not_substantive} |`);
+	lines.push(`| Outside --since window | ${scan.excluded_by_since} |`);
+	lines.push(`| **Included** | **${scan.included}** |`);
+	lines.push("");
+	lines.push(
+		`Facet coverage: ${scan.facets_analyzed} of ${scan.included} sessions analysed${scan.facet_failures ? `, ${scan.facet_failures} extraction(s) failed` : ""}. Sessions without facets still count in every deterministic number above; they are absent only from the LLM-derived sections.`,
+	);
+	if (scan.cost_unavailable) {
+		lines.push("");
+		lines.push(
+			`_${scan.cost_unavailable} of ${scan.included} sessions carry no recorded cost in the \`${scan.source}\` logs. They contribute $0 to the totals above because this report never estimates cost from token counts; treat the spend figures as a lower bound._`,
+		);
+	}
+	if (scan.reused_stale_sections) {
+		lines.push("");
+		lines.push(
+			"_The narrative sections below were generated against an earlier corpus state and reused because this run was asked not to call a model (`--no-llm`). The numbers above are current._",
+		);
+	}
+	lines.push("");
+	lines.push(`Session set and per-session cost: \`${SESSION_SET_PATH}\``);
+	lines.push("");
+
+	lines.push("## \u2699\uFE0F Your Setup");
+	lines.push(`- Default model: \`${userCtx.default_model || "not set"}\``);
+	if (Object.keys(userCtx.model_roles).length)
+		lines.push(`- Model roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => `${r}=\`${m}\``).join(", ")}`);
+	if (Object.keys(userCtx.fallback_chains).length)
+		lines.push(`- Fallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => `${r}: ${c.join(" \u2192 ")}`).join("; ")}`);
+	lines.push(`- Skills: ${userCtx.installed_skills.length} user + ${userCtx.installed_managed_skills.length} managed`);
+	lines.push(`- Extensions: ${userCtx.installed_extensions.length ? userCtx.installed_extensions.join(", ") : "none"}`);
+	lines.push(`- Hooks: ${userCtx.installed_hooks.length ? userCtx.installed_hooks.join(", ") : "none"}`);
+	lines.push(`- MCP servers: ${userCtx.mcp_servers.length ? userCtx.mcp_servers.join(", ") : "none"}`);
+	lines.push(`- Global instruction rules read: ${userCtx.existing_agents_md_rules.length}`);
 	lines.push("");
 
 	const areas = (sections.project_areas as { areas?: Array<{ name: string; session_count: number; description: string }> })?.areas ?? [];
@@ -1884,10 +3253,15 @@ function generateMarkdown(
 	}
 
 	lines.push("## \u{1F4B8} Model Spend");
-	lines.push(`| Model | Cost | Messages |`);
+	// Claude Code's cost-state carries no per-model message count, so the
+	// column reports tokens where counts are unavailable rather than "0".
+	const haveMessageCounts = Object.values(agg.model_usage).some((u) => u.message_count > 0);
+	lines.push(`| Model | Cost | ${haveMessageCounts ? "Messages" : "Tokens"} |`);
 	lines.push(`|-------|------|----------|`);
 	for (const [model, usage] of Object.entries(agg.model_usage).sort((a, b) => b[1].cost - a[1].cost).slice(0, 8)) {
-		lines.push(`| ${model.replace(/.*\./, "")} | $${usage.cost.toFixed(2)} | ${usage.message_count} |`);
+		lines.push(
+			`| ${model.replace(/.*\//, "")} | $${usage.cost.toFixed(2)} | ${haveMessageCounts ? usage.message_count : fmtTokens(usage.input_tokens + usage.output_tokens)} |`,
+		);
 	}
 	if (agg.estimated_waste > 0) lines.push(`\n**Estimated waste from model mismatch:** $${agg.estimated_waste.toFixed(2)}`);
 	lines.push("");
@@ -2153,7 +3527,7 @@ ${temporal.diff_headlines.length ? `
     ${statCard("Interruptions", String(agg.total_interruptions), "")}
     ${agg.sessions_using_subagent ? statCard("Subagent Sessions", String(agg.sessions_using_subagent), "") : ""}
     ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "") : ""}
-    ${agg.multi_clauding.overlap_events ? statCard("Parallel Sessions", String(agg.multi_clauding.overlap_events), "overlap events") : ""}
+    ${agg.concurrent_sessions.overlap_events ? statCard("Parallel Sessions", String(agg.concurrent_sessions.overlap_events), "overlap events") : ""}
   </div>
 
   <div class="charts-grid">
@@ -2481,39 +3855,98 @@ async function runInsights(
 	const refresh = args.includes("--refresh") || args.includes("-r");
 	const noOpen = args.includes("--no-open");
 	const formatMd = args.includes("--format md") || args.includes("--md");
+	// --no-llm renders from whatever is already cached and never calls a model:
+	// the corpus changes whenever omp runs, so on a busy machine the section
+	// cache legitimately misses and a plain re-run is not free.
+	const noLlm = args.includes("--no-llm");
+	const useLlm = LLM_PHASES_ENABLED && !noLlm;
 
-	// Parse --since flag (e.g. --since 7d, --since 14d, --since 30d)
-	const sinceMatch = args.match(/--since\s+(\d+)d/);
-	const sinceDays = sinceMatch ? parseInt(sinceMatch[1]!, 10) : 0;
+	// Parse --since flag (e.g. --since 7d, --since 2w, --since 30d)
+	const sinceMatch = args.match(/--since\s+(\d+)([dw])/);
+	const sinceDays = sinceMatch
+		? Number(sinceMatch[1]) * (sinceMatch[2] === "w" ? 7 : 1)
+		: 0;
 
-	if (!ctx.model) {
+	const limits = {
+		maxSessions: resolveLimit(args, "max-sessions", "OMP_INSIGHTS_MAX_SESSIONS", DEFAULT_MAX_SESSIONS_TO_LOAD),
+		maxFacets: resolveLimit(args, "max-facets", "OMP_INSIGHTS_MAX_FACETS", DEFAULT_MAX_FACET_EXTRACTIONS),
+		facetConcurrency: resolveLimit(args, "facet-concurrency", "OMP_INSIGHTS_FACET_CONCURRENCY", DEFAULT_FACET_CONCURRENCY),
+	};
+
+	// Stage 1 never calls a model, so an active model is only required once the
+	// LLM phases are wired.
+	if (useLlm && !ctx.model) {
 		ctx.ui.notify("No active model — set a model first (/model)", "error");
 		return;
 	}
 
 	await ensureDirs();
 
-	const currentSessionId = ctx.sessionManager.getSessionId() ?? "";
+	// --source claude reads ~/.claude/projects instead of omp's sessions. The
+	// two corpora are not merged: their records carry different signals, and a
+	// single total across both would hide which harness it came from.
+	const source: SessionSource = args.includes("--source claude")
+		? createClaudeSessionSource()
+		: ompSessionSource;
+	// Fetched before the LLM phases: the facet phase needs the smol model role
+	// out of it, and the section prompts need the installed-skills list.
+	const userCtx = await gatherUserContext();
+	// The subprocess would otherwise use the configured default; pin it to the
+	// model actually active in this session so the report reflects /model.
+	const activeModel =
+		(ctx.model as { id?: string; provider?: string } | undefined)?.id ?? undefined;
+	const currentSessionId = ctx.sessionManager?.getSessionId?.() ?? "";
 
 	// ── Phase 1: Scan ────────────────────────────────────────────────────────────
 	ctx.ui.setStatus("insights", "🔍 Scanning sessions...");
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
 		"  Phase 1/5: Scanning session files...",
 	]);
 
-	let allInfos = await SessionManager.listAll();
+	const scanned = await source.listSessions();
+	const scan: ScanSummary = {
+		sessions_dir: source.root,
+		primary_logs: scanned.sessions.length,
+		duplicate_logs: scanned.duplicate_logs,
+		advisor_logs: 0,
+		subagent_logs: 0,
+		excluded_meta: 0,
+		excluded_current: 0,
+		excluded_unparsed: 0,
+		excluded_not_substantive: 0,
+		excluded_by_since: 0,
+		facet_failures: 0,
+		facets_analyzed: 0,
+		reused_stale_sections: false,
+		included: 0,
+		source: source.name,
+		cost_unavailable: 0,
+	};
+	for (const ref of scanned.sessions) {
+		for (const sidecar of ref.sidecars) {
+			if (sidecar.kind === "advisor") scan.advisor_logs++;
+			else scan.subagent_logs++;
+		}
+	}
 
-	// Filter current session and meta-sessions by ID
-	allInfos = allInfos.filter((info) => info.id !== currentSessionId);
+	// The session running this command is excluded by id: its own transcript
+	// would otherwise be summarised mid-write.
+	const allRefs = scanned.sessions.filter((ref) => {
+		if (ref.id === currentSessionId) {
+			scan.excluded_current++;
+			return false;
+		}
+		return true;
+	});
 
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
-		`  Phase 1/5 done — found ${allInfos.length} sessions`,
+		`  Phase 1/5 done — ${allRefs.length} sessions, ${scan.advisor_logs} advisor + ${scan.subagent_logs} subagent logs`,
 		"  Phase 2/5: Extracting session stats...",
 	]);
 
@@ -2522,10 +3955,10 @@ async function runInsights(
 
 	// Load cached metas first (batch)
 	const cachedMetaIds = new Set<string>();
-	for (let i = 0; i < allInfos.length; i += META_BATCH_SIZE) {
-		const batch = allInfos.slice(i, i + META_BATCH_SIZE);
+	for (let i = 0; i < allRefs.length; i += META_BATCH_SIZE) {
+		const batch = allRefs.slice(i, i + META_BATCH_SIZE);
 		const results = await Promise.all(
-			batch.map((info) => loadCachedMeta(info.id)),
+			batch.map((ref) => loadCachedMeta(source.name, ref.id, ref.signature)),
 		);
 		for (let j = 0; j < batch.length; j++) {
 			const cached = results[j];
@@ -2536,62 +3969,75 @@ async function runInsights(
 		}
 	}
 
-	// Parse uncached sessions (up to MAX_SESSIONS_TO_LOAD)
-	const uncached = allInfos.filter((info) => !cachedMetaIds.has(info.id));
-	const toLoad = uncached.slice(0, MAX_SESSIONS_TO_LOAD);
+	// Parse uncached sessions (up to the load cap)
+	const uncached = allRefs.filter((ref) => !cachedMetaIds.has(ref.id));
+	const toLoad = uncached.slice(0, limits.maxSessions);
 
 	let loadedCount = 0;
 	for (let i = 0; i < toLoad.length; i += LOAD_BATCH_SIZE) {
 		const batch = toLoad.slice(i, i + LOAD_BATCH_SIZE);
 		await Promise.all(
-			batch.map(async (info) => {
+			batch.map(async (ref) => {
 				try {
-					const sm = await SessionManager.open(info.path);
-					const entries = sm.getEntries() as unknown as AnyEntry[];
+					const entries = await source.readEntries(ref.path);
 
-					if (isMetaSession(entries)) return;
+					if (source.isMetaSession(entries)) {
+						scan.excluded_meta++;
+						return;
+					}
 
-					const meta = buildSessionMeta(
-						{
-							id: info.id,
-							path: info.path,
-							cwd: info.cwd,
-							created: info.created,
-							modified: info.modified,
-						},
-						entries,
+					// Sidecars are read here and folded into the parent: advisor and
+					// subagent spend is real money that belongs to this session.
+					const sidecars = await Promise.all(
+						ref.sidecars.map(async (sidecar) => ({
+							kind: sidecar.kind,
+							usage: source.readSidecar(await source.readEntries(sidecar.path)),
+						})),
 					);
-					await saveMeta(meta);
+
+					const meta = source.buildMeta(ref, entries, sidecars);
+					await saveMeta(source.name, meta);
 					metas.push(meta);
 				} catch {
 					// Skip sessions that fail to load
+					scan.excluded_unparsed++;
 				}
 				loadedCount++;
 			}),
 		);
 		ctx.ui.setWidget("insights", [
 			"",
-			"  📊 Pi Insights",
+			"  📊 omp Insights",
 			"  ─────────────────────────────────",
 			`  Phase 2/5: Loaded ${cachedMetaIds.size} cached, ${loadedCount}/${toLoad.length} new`,
 		]);
 	}
 
 	// Filter substantive sessions (≥2 user messages, ≥1 min)
-	const substantive = metas.filter(
-		(m) => m.user_message_count >= 2 && m.duration_minutes >= 1,
-	).filter((m) => {
-		if (!sinceDays) return true;
-		const age = Date.now() - new Date(m.start_time).getTime();
-		return age < sinceDays * 86400000;
+	const substantive = metas.filter((m) => {
+		if (m.user_message_count < 2 || m.duration_minutes < 1) {
+			scan.excluded_not_substantive++;
+			return false;
+		}
+		if (sinceDays) {
+			const age = Date.now() - new Date(m.start_time).getTime();
+			if (age >= sinceDays * 86400000) {
+				scan.excluded_by_since++;
+				return false;
+			}
+		}
+		return true;
 	});
+	scan.included = substantive.length;
 
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
 		`  Phase 2/5 done — ${substantive.length} substantive sessions`,
-		"  Phase 3/5: LLM facet extraction...",
+		useLlm
+			? "  Phase 3/5: LLM facet extraction..."
+			: "  Phase 3/5: skipped (deterministic run)",
 	]);
 
 	// ── Phase 3: Facet Extraction ─────────────────────────────────────────────────
@@ -2607,21 +4053,26 @@ async function runInsights(
 		}
 	}
 
-	// Extract new facets
-	const needsFacets = substantive
-		.filter((m) => !facetsMap.has(m.session_id))
-		.slice(0, MAX_FACET_EXTRACTIONS);
+	// Facet extraction is structured classification against a fixed JSON
+	// schema, so it runs on the smol role rather than the active model: one
+	// call per uncached session adds up, and the quality that matters shows in
+	// the section prompts and the synthesis, which use the default model.
+	const facetModel = userCtx.model_roles.smol || undefined;
+	const needsFacets = useLlm
+		? substantive
+				.filter((m) => !facetsMap.has(m.session_id))
+				.slice(0, limits.maxFacets)
+		: [];
 
 	if (needsFacets.length > 0) {
 		let facetsDone = 0;
-		for (let i = 0; i < needsFacets.length; i += FACET_CONCURRENCY) {
-			const batch = needsFacets.slice(i, i + FACET_CONCURRENCY);
+		for (let i = 0; i < needsFacets.length; i += limits.facetConcurrency) {
+			const batch = needsFacets.slice(i, i + limits.facetConcurrency);
 			await Promise.all(
 				batch.map(async (meta) => {
 					try {
-						const sm = await SessionManager.open(meta.session_path);
-						const entries = sm.getEntries() as unknown as AnyEntry[];
-						let transcript = formatTranscript(entries, meta);
+						const entries = await source.readEntries(meta.session_path);
+						let transcript = source.formatTranscript(entries, meta);
 
 						// Summarize long transcripts
 						if (transcript.length > 30_000) {
@@ -2631,8 +4082,8 @@ async function runInsights(
 								chunks.push(transcript.slice(ci, ci + CHUNK));
 							const summaries = await Promise.all(
 								chunks.map((ch) =>
-									callModel(ctx, CHUNK_SUMMARIZE_PROMPT + ch, 500).catch(() =>
-										ch.slice(0, 2000),
+									callModel(CHUNK_SUMMARIZE_PROMPT + ch, { model: facetModel }).catch(
+										() => ch.slice(0, 2000),
 									),
 								),
 							);
@@ -2656,7 +4107,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "user_instructions_to_assistant": ["instruction1", "instruction2"]
 }`;
 
-						const text = await callModel(ctx, prompt, 4096);
+						const text = await callModel(prompt, { model: facetModel });
 						const parsed = parseJsonFromResponse(text) as SessionFacets | null;
 						if (parsed?.brief_summary) {
 							const facets: SessionFacets = {
@@ -2665,14 +4116,18 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 							};
 							await saveFacets(facets);
 							facetsMap.set(meta.session_id, facets);
+						} else {
+							// A reply that parsed but carried no summary is a failure too:
+							// the session silently drops out of every facet-derived chart.
+							scan.facet_failures++;
 						}
 					} catch {
-						// Skip failed extractions
+						scan.facet_failures++;
 					}
 					facetsDone++;
 					ctx.ui.setWidget("insights", [
 						"",
-						"  📊 Pi Insights",
+						"  📊 omp Insights",
 						"  ─────────────────────────────────",
 						`  Phase 3/5: Facets ${facetsDone}/${needsFacets.length}...`,
 					]);
@@ -2693,29 +4148,50 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
-		`  Phase 3/5 done — ${facetsMap.size} facets extracted`,
-		"  Phase 4/5: Generating insights...",
+		useLlm
+			? `  Phase 3/5 done — ${facetsMap.size} facets extracted`
+			: "  Phase 3/5 skipped — deterministic sections only",
+		"  Phase 4/5: Aggregating...",
 	]);
 
 	// ── Phase 4: Aggregate + Insight Prompts ─────────────────────────────────────
 	const agg = aggregateData(kept, facetsMap);
+	scan.included = kept.length;
+	scan.facets_analyzed = agg.sessions_with_facets;
+	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
 	const temporal = computeTemporalData(kept, facetsMap);
-	const userCtx = await gatherUserContext();
 	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx);
 	const sectionPrompts = buildSectionPrompts(dataBlock, temporal, userCtx, agg);
 
-	const sectionKeys = Object.keys(sectionPrompts) as Array<
-		keyof typeof sectionPrompts
-	>;
-	const sectionResults: Record<string, unknown> = {};
-	let sectionsDone = 0;
+	// Keyed on the prompt inputs, not the clock: the same corpus and the same
+	// model produce the same prose, so a re-run should cost nothing.
+	// The source is part of the key: an omp report's prose must never be
+	// reused for a Claude Code corpus, which --no-llm would otherwise do.
+	const sectionsKey = `${source.name}-${createHash("sha256")
+		.update(`${activeModel ?? "default"}\n${dataBlock}`)
+		.digest("hex")
+		.slice(0, 32)}`;
+	const exactSections = refresh ? null : await loadCachedSections(sectionsKey);
+	const staleSections =
+		exactSections || !noLlm ? null : await loadLatestSections(source.name);
+	const cachedSections = exactSections ?? staleSections;
 
+	scan.reused_stale_sections = Boolean(staleSections);
+
+	const sectionKeys =
+		useLlm && !cachedSections
+			? (Object.keys(sectionPrompts) as Array<keyof typeof sectionPrompts>)
+			: [];
+	const sectionResults: Record<string, unknown> = { ...(cachedSections?.sections ?? {}) };
+	let sectionsDone = 0;
 	await Promise.all(
 		sectionKeys.map(async (key) => {
 			try {
-				const text = await callModel(ctx, sectionPrompts[key], 8192);
+				// Sections and the synthesis run on the active model: this is where
+				// judgement quality shows up in the report.
+				const text = await callModel(sectionPrompts[key], { model: activeModel });
 				const parsed = parseJsonFromResponse(text);
 				if (parsed) sectionResults[key] = parsed;
 			} catch {
@@ -2724,53 +4200,98 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 			sectionsDone++;
 			ctx.ui.setWidget("insights", [
 				"",
-				"  📊 Pi Insights",
+				"  📊 omp Insights",
 				"  ─────────────────────────────────",
 				`  Phase 4/5: Insights ${sectionsDone}/${sectionKeys.length}...`,
 			]);
 		}),
 	);
 
-	// Synthesis (At a Glance)
-	ctx.ui.setWidget("insights", [
-		"",
-		"  📊 Pi Insights",
-		"  ─────────────────────────────────",
-		"  Phase 4/5: Synthesis...",
-	]);
+	let synthesis: Record<string, string> = cachedSections?.synthesis ?? {};
+	if (useLlm && !cachedSections) {
+		// Synthesis (At a Glance)
+		ctx.ui.setWidget("insights", [
+			"",
+			"  📊 omp Insights",
+			"  ─────────────────────────────────",
+			"  Phase 4/5: Synthesis...",
+		]);
 
-	let synthesis: Record<string, string> = {};
-	try {
-		const synthText = await callModel(
-			ctx,
-			buildSynthesisPrompt(dataBlock, sectionResults),
-			8192,
-		);
-		synthesis =
-			(parseJsonFromResponse(synthText) as Record<string, string>) ?? {};
-	} catch {
-		synthesis = {
-			whats_working:
-				"Analysis complete — see sections below for detailed breakdown.",
-			whats_hindering: "See Friction Analysis section.",
-			quick_wins: "See Suggestions section.",
-			ambitious_workflows: "See On the Horizon section.",
-		};
+		try {
+			const synthText = await callModel(
+				buildSynthesisPrompt(dataBlock, sectionResults),
+				{ model: activeModel },
+			);
+			synthesis =
+				(parseJsonFromResponse(synthText) as Record<string, string>) ?? {};
+		} catch (err) {
+			// Upstream substituted placeholder prose here. A failed synthesis is
+			// better reported than papered over: generateMarkdown omits the
+			// Summary section when synthesis is empty.
+			ctx.ui.notify(`Synthesis failed: ${(err as Error).message}`, "warning");
+		}
+
+		// Only cache a run that actually produced sections; a wholly failed
+		// generation must not be replayed as if it were a result.
+		if (Object.keys(sectionResults).length) {
+			await saveSections(sectionsKey, { sections: sectionResults, synthesis });
+			await pruneSections(source.name);
+		}
 	}
 
 	// ── Phase 5: Render HTML ──────────────────────────────────────────────────────
 	ctx.ui.setWidget("insights", [
 		"",
-		"  📊 Pi Insights",
+		"  📊 omp Insights",
 		"  ─────────────────────────────────",
 		"  Phase 5/5: Rendering report...",
 	]);
+
+	// Audit manifest: the exact session set behind the numbers, so a report's
+	// total cost can be reconciled against the logs with jq (acceptance
+	// criterion 2 in HANDOVER.md) instead of being taken on trust.
+	await writeFile(
+		SESSION_SET_PATH,
+		JSON.stringify(
+			{
+				generated_at: new Date().toISOString(),
+				source: source.name,
+				sessions_dir: source.root,
+				since_days: sinceDays || null,
+				scan,
+				totals: {
+					sessions: agg.total_sessions,
+					cost: agg.total_cost,
+					cost_primary: agg.total_cost_primary,
+					cost_advisor: agg.total_cost_advisor,
+					cost_subagent: agg.total_cost_subagent,
+					input_tokens: agg.total_input_tokens,
+					output_tokens: agg.total_output_tokens,
+				},
+				sessions: kept.map((m) => ({
+					session_id: m.session_id,
+					path: m.session_path,
+					log_signature: m.log_signature,
+					start_time: m.start_time,
+					cost: m.total_cost,
+					cost_primary: m.cost_primary,
+					cost_advisor: m.cost_advisor,
+					cost_subagent: m.cost_subagent,
+					sidecars:
+						scanned.sessions.find((r) => r.id === m.session_id)?.sidecars.map((s) => s.path) ?? [],
+				})),
+			},
+			null,
+			2,
+		),
+		{ encoding: "utf-8", mode: 0o600 },
+	);
 
 	const html = generateHTML(agg, sectionResults, synthesis, temporal);
 	await writeFile(REPORT_PATH, html, { encoding: "utf-8" });
 
 	if (formatMd) {
-		const md = generateMarkdown(agg, sectionResults, synthesis, temporal);
+		const md = generateMarkdown(agg, sectionResults, synthesis, temporal, scan, userCtx);
 		await writeFile(REPORT_MD_PATH, md, { encoding: "utf-8" });
 		ctx.ui.setStatus("insights", "");
 		ctx.ui.setWidget("insights", undefined);
@@ -2794,9 +4315,9 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 // ─── Extension Entry ──────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-	pi.registerCommand("pi-insights", {
+	pi.registerCommand("insights", {
 		description:
-			"Generate a personal usage insights report from your Pi session history",
+			"Generate a personal usage insights report from your omp session history",
 		handler: async (args, ctx) => {
 			try {
 				await runInsights(args ?? "", ctx);
@@ -2808,3 +4329,35 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 }
+
+// ─── Test Seam ────────────────────────────────────────────────────────────────
+
+// Why: the port stays a single file until Stage 2 lands (see HANDOVER.md
+// constraints), so the unit-testable internals are re-exported here rather
+// than split into modules. Not part of the extension's public surface.
+export {
+	createClaudeSessionSource,
+	aggregateData,
+	buildSessionMeta,
+	computeTemporalData,
+	createOmpSessionSource,
+	detectConcurrentSessions,
+	extractSessionStats,
+	extractSidecarUsage,
+	gatherUserContext,
+	generateMarkdown,
+	isMetaSession,
+	parseSimpleYaml,
+	readUsage,
+	resolveLimit,
+	toolErrorCategory,
+};
+export type {
+	AggregatedData,
+	ScanSummary,
+	SessionMeta,
+	SessionRef,
+	SessionSource,
+	TemporalData,
+	UserContext,
+};
