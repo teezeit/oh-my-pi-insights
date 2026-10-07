@@ -56,7 +56,7 @@ upstream verbatim; every entry below is a diff against it.
   `files_modified`) aggregated into a most-re-edited-files table.
 - Caching for generated sections and synthesis, keyed on the shared data block
   and active model; `--no-llm` renders from cache with no spend and labels the
-  reuse; `--max-sessions` / `--max-facets` / `--facet-concurrency` flags and
+  reuse; `--max-sessions` / `--max-facets` / `--model-concurrency` flags and
   `OMP_INSIGHTS_*` environment overrides.
 - Test suite (33 tests, `node --test`, no dependencies) and CI.
 
@@ -94,6 +94,13 @@ upstream verbatim; every entry below is a diff against it.
 
 ### Fixed
 
+- **Memory blowup from unbounded `omp -p` fan-out.** Facets ran 50 sessions
+  at once, each long transcript fired every chunk summary in parallel, and
+  all 8 sections ran together. Every call is a full omp process (~450 MB), so
+  a corpus with long sessions spawned hundreds and froze the machine. One
+  shared limiter now caps live model subprocesses across all phases;
+  `--facet-concurrency` is replaced by `--model-concurrency` (default 4, env
+  `OMP_INSIGHTS_MODEL_CONCURRENCY`).
 - A session present twice on disk under two slugified-cwd directories was
   counted twice, double-counting its spend and making session counts
   non-deterministic between runs. Deduplicated by session id.

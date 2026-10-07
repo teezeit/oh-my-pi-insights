@@ -93,7 +93,7 @@ No build step, no linter, no formatter. TypeScript runs directly via Node type s
 - Zero runtime dependencies; only `node:fs/promises`, `node:crypto`, `node:child_process`, `node:os`, `node:path`, `node:util`.
 - Naming: `camelCase` functions, `SCREAMING_SNAKE` constants, `PascalCase` types. `SessionMeta` fields are `snake_case` (serialized to JSON caches and prompts); keep that.
 - Error handling: cache reads return `null` on failure; per-line parse errors `continue`; session load failures bump `ScanSummary` counters and skip. LLM failures drop that facet/section, never abort the run. Only `callModel` throws.
-- Async: `Promise.all` over fixed batches (`META_BATCH_SIZE=50`, `LOAD_BATCH_SIZE=10`, `--facet-concurrency`). No streams or generators.
+- Async: `Promise.all` over fixed batches (`META_BATCH_SIZE=50`, `LOAD_BATCH_SIZE=10`). Every `callModel` goes through the run's shared `createLimiter` gate (`--model-concurrency`, default 4): each call is a ~450 MB `omp -p` process, and unbounded fan-out once froze the machine. No streams or generators.
 - State: pure functions over immutable `SessionMeta[]` and `Map<sessionId, SessionFacets>`; no classes, no module-level mutable state. Dependency injection is by parameter (`createOmpSessionSource(sessionsDir)`), which is how tests point at temp dirs.
 - Limits resolve CLI flag > `OMP_INSIGHTS_*` env > default via `resolveLimit`.
 - Comments explaining non-obvious decisions start with `// Why:`.

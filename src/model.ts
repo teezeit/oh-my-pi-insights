@@ -67,6 +67,38 @@ export async function callModel(
 	return text.replace(/^Working\.\.\.\s*/, "").trim();
 }
 
+/**
+ * Caps how many tasks run at once across every caller sharing the returned
+ * function, nested ones included.
+ *
+ * Why: each callModel is a full `omp -p` process (~450 MB RSS). Facet batches
+ * times per-session transcript chunks times parallel sections once spawned
+ * hundreds of them and exhausted RAM. Batching only the outer loop cannot
+ * bound the nested fan-out; one shared gate around the spawn can.
+ */
+export function createLimiter(max: number): <T>(task: () => Promise<T>) => Promise<T> {
+	let active = 0;
+	const waiting: Array<() => void> = [];
+	return async (task) => {
+		if (active >= max) {
+			// The releasing task hands its slot over without decrementing, so a
+			// newcomer cannot slip in between release and this waiter resuming.
+			// Why the executor form: typecheck targets es2022, which lacks
+			// Promise.withResolvers.
+			await new Promise<void>((resolve) => waiting.push(resolve));
+		} else {
+			active++;
+		}
+		try {
+			return await task();
+		} finally {
+			const next = waiting.shift();
+			if (next) next();
+			else active--;
+		}
+	};
+}
+
 export function parseJsonFromResponse(text: string): unknown {
 	const match = text.match(/\{[\s\S]*\}/);
 	if (!match) return null;

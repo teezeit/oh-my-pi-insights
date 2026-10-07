@@ -71,7 +71,7 @@ path and fails with `Cannot find module`.
 | `--source claude` | Read `~/.claude/projects` instead of omp's sessions |
 | `--max-sessions <N>` | Session load cap (default 2000, env `OMP_INSIGHTS_MAX_SESSIONS`) |
 | `--max-facets <N>` | Facet extraction cap (default 50, env `OMP_INSIGHTS_MAX_FACETS`) |
-| `--facet-concurrency <N>` | Facet extraction concurrency (default 50, env `OMP_INSIGHTS_FACET_CONCURRENCY`) |
+| `--model-concurrency <N>` | Max concurrent `omp -p` model subprocesses across all LLM phases, ~450 MB each (default 4, env `OMP_INSIGHTS_MODEL_CONCURRENCY`) |
 
 ## What omp gives it that Pi did not
 

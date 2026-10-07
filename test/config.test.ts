@@ -3,7 +3,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseSimpleYaml, resolveLimit } from "../index.ts";
+import { setImmediate as nextTick } from "node:timers/promises";
+import { createLimiter, parseSimpleYaml, resolveLimit } from "../index.ts";
 
 // parseSimpleYaml is hand-rolled because the port takes no new dependencies.
 // The shapes below are the ones ~/.omp/agent/config.yml actually contains.
@@ -87,4 +88,34 @@ test("resolveLimit prefers the flag, then the env var, then the default", () => 
 	} finally {
 		delete process.env.OMP_INSIGHTS_TEST_LIMIT;
 	}
+});
+
+// Why: every model call is a full `omp -p` process (~450 MB RSS). Nested
+// fan-out (facet batch x transcript chunks) once spawned hundreds at once and
+// exhausted RAM, so the limiter must cap in-flight work across nested callers.
+test("createLimiter caps in-flight tasks, including nested fan-out", async () => {
+	const limit = createLimiter(3);
+	let inFlight = 0;
+	let peak = 0;
+	const task = () =>
+		limit(async () => {
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			await nextTick();
+			inFlight--;
+			return 1;
+		});
+	// 10 outer jobs, each fanning out to 5 chunk calls then one final call.
+	const results = await Promise.all(
+		Array.from({ length: 10 }, async () => {
+			const chunks = await Promise.all(Array.from({ length: 5 }, task));
+			return chunks.length + (await task());
+		}),
+	);
+	assert.equal(peak, 3);
+	assert.deepEqual(results, Array(10).fill(6));
+
+	// A rejected task must release its slot, or the run deadlocks.
+	await assert.rejects(limit(() => Promise.reject(new Error("boom"))));
+	assert.equal(await limit(async () => "after"), "after");
 });

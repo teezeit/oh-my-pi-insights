@@ -61,7 +61,7 @@ import {
 	CHUNK_SUMMARIZE_PROMPT,
 	FACET_EXTRACT_PROMPT,
 } from "./src/prompts.ts";
-import { callModel, parseJsonFromResponse } from "./src/model.ts";
+import { callModel, createLimiter, parseJsonFromResponse } from "./src/model.ts";
 import { generateMarkdown } from "./src/render/md.ts";
 import { generateHTML } from "./src/render/html.ts";
 import {
@@ -131,11 +131,14 @@ type ExtensionAPI = {
 // silently truncate it. Loading is cached per session and costs no tokens, so
 // the default is raised past the corpus size; facet extraction stays capped
 // because that phase spends money. All three are flag- and env-overridable
-// (--max-sessions / --max-facets / --facet-concurrency,
-// OMP_INSIGHTS_MAX_SESSIONS / _MAX_FACETS / _FACET_CONCURRENCY).
+// (--max-sessions / --max-facets / --model-concurrency,
+// OMP_INSIGHTS_MAX_SESSIONS / _MAX_FACETS / _MODEL_CONCURRENCY).
 const DEFAULT_MAX_SESSIONS_TO_LOAD = 2000;
 const DEFAULT_MAX_FACET_EXTRACTIONS = 50;
-const DEFAULT_FACET_CONCURRENCY = 50;
+// Why: caps live `omp -p` subprocesses across every LLM phase. Each is a full
+// omp process (~450 MB RSS); upstream's 50 assumed in-process HTTP calls and,
+// multiplied by transcript chunks, spawned enough processes to freeze a Mac.
+const DEFAULT_MODEL_CONCURRENCY = 4;
 const META_BATCH_SIZE = 50;
 const LOAD_BATCH_SIZE = 10;
 // Stage 2: the LLM phases are wired. Facet extraction, the section prompts and
@@ -179,8 +182,10 @@ async function runInsights(
 	const limits = {
 		maxSessions: resolveLimit(args, "max-sessions", "OMP_INSIGHTS_MAX_SESSIONS", DEFAULT_MAX_SESSIONS_TO_LOAD),
 		maxFacets: resolveLimit(args, "max-facets", "OMP_INSIGHTS_MAX_FACETS", DEFAULT_MAX_FACET_EXTRACTIONS),
-		facetConcurrency: resolveLimit(args, "facet-concurrency", "OMP_INSIGHTS_FACET_CONCURRENCY", DEFAULT_FACET_CONCURRENCY),
+		modelConcurrency: resolveLimit(args, "model-concurrency", "OMP_INSIGHTS_MODEL_CONCURRENCY", DEFAULT_MODEL_CONCURRENCY),
 	};
+	// One gate shared by facets, chunk summaries, sections and synthesis.
+	const limitModel = createLimiter(limits.modelConcurrency);
 
 	// Stage 1 never calls a model, so an active model is only required once the
 	// LLM phases are wired.
@@ -375,8 +380,8 @@ async function runInsights(
 
 	if (needsFacets.length > 0) {
 		let facetsDone = 0;
-		for (let i = 0; i < needsFacets.length; i += limits.facetConcurrency) {
-			const batch = needsFacets.slice(i, i + limits.facetConcurrency);
+		for (let i = 0; i < needsFacets.length; i += limits.modelConcurrency) {
+			const batch = needsFacets.slice(i, i + limits.modelConcurrency);
 			await Promise.all(
 				batch.map(async (meta) => {
 					try {
@@ -391,7 +396,7 @@ async function runInsights(
 								chunks.push(transcript.slice(ci, ci + CHUNK));
 							const summaries = await Promise.all(
 								chunks.map((ch) =>
-									callModel(CHUNK_SUMMARIZE_PROMPT + ch, { model: facetModel }).catch(
+									limitModel(() => callModel(CHUNK_SUMMARIZE_PROMPT + ch, { model: facetModel })).catch(
 										() => ch.slice(0, 2000),
 									),
 								),
@@ -428,7 +433,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "abort_labels": [{"ts": "exact ts string from ABORT EVENTS above", "label": "user_rephrased|agent_wrong_direction|agent_too_slow|abandoned"}]
 }`;
 
-						const text = await callModel(prompt, { model: facetModel });
+						const text = await limitModel(() => callModel(prompt, { model: facetModel }));
 						const parsed = parseJsonFromResponse(text) as SessionFacets | null;
 						if (parsed?.brief_summary) {
 							const facets: SessionFacets = {
@@ -512,7 +517,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 			try {
 				// Sections and the synthesis run on the active model: this is where
 				// judgement quality shows up in the report.
-				const text = await callModel(sectionPrompts[key], { model: activeModel });
+				const text = await limitModel(() => callModel(sectionPrompts[key], { model: activeModel }));
 				const parsed = parseJsonFromResponse(text);
 				if (parsed) sectionResults[key] = parsed;
 			} catch {
@@ -539,9 +544,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		]);
 
 		try {
-			const synthText = await callModel(
-				buildSynthesisPrompt(dataBlock, sectionResults),
-				{ model: activeModel },
+			const synthText = await limitModel(() =>
+				callModel(buildSynthesisPrompt(dataBlock, sectionResults), { model: activeModel }),
 			);
 			synthesis =
 				(parseJsonFromResponse(synthText) as Record<string, string>) ?? {};
@@ -658,6 +662,7 @@ export default function (pi: ExtensionAPI) {
 // tests. Not part of the extension's public surface.
 export {
 	createClaudeSessionSource,
+	createLimiter,
 	aggregateData,
 	buildSessionMeta,
 	computeTemporalData,
