@@ -183,6 +183,8 @@ test("the markdown report matches the golden file", async () => {
 
 	const scan: ScanSummary = {
 		sessions_dir: "/fixture/sessions",
+		source: "omp",
+		cost_unavailable: 0,
 		primary_logs: 4,
 		facet_failures: 1,
 		facets_analyzed: 1,

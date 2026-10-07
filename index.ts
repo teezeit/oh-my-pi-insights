@@ -281,6 +281,12 @@ type SessionMeta = {
 	// and mtime of the primary log plus every sidecar are recorded and any
 	// change invalidates the entry.
 	log_signature: string;
+	/**
+	 * False when the source kept no cost for this session. omp always records
+	 * it; Claude Code only writes a cost-state record for some sessions, and
+	 * a missing one must read as unavailable, never as $0.
+	 */
+	cost_recorded: boolean;
 	median_ttft_ms: number;
 	median_response_ms: number;
 	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number }>;
@@ -394,6 +400,9 @@ type UserContext = {
 /** What the scan itself saw — reported so the numbers can be audited. */
 type ScanSummary = {
 	sessions_dir: string;
+	source: string;
+	/** Sessions the source kept no cost for; excluded from the totals, not zeroed. */
+	cost_unavailable: number;
 	primary_logs: number;
 	duplicate_logs: number;
 	advisor_logs: number;
@@ -432,11 +441,12 @@ async function ensureDirs(): Promise<void> {
 }
 
 async function loadCachedMeta(
+	sourceName: string,
 	sessionId: string,
 	signature: string,
 ): Promise<SessionMeta | null> {
 	try {
-		const raw = await readFile(join(META_DIR, `${sessionId}.json`), "utf-8");
+		const raw = await readFile(join(META_DIR, `${sourceName}-${sessionId}.json`), "utf-8");
 		const meta = JSON.parse(raw) as SessionMeta;
 		// A log that has grown since the entry was written must be re-read, or
 		// the report's totals stop matching the logs they claim to summarise.
@@ -447,9 +457,9 @@ async function loadCachedMeta(
 	}
 }
 
-async function saveMeta(meta: SessionMeta): Promise<void> {
+async function saveMeta(sourceName: string, meta: SessionMeta): Promise<void> {
 	await writeFile(
-		join(META_DIR, `${meta.session_id}.json`),
+		join(META_DIR, `${sourceName}-${meta.session_id}.json`),
 		JSON.stringify(meta, null, 2),
 		{ encoding: "utf-8", mode: 0o600 },
 	);
@@ -487,9 +497,11 @@ async function saveSections(key: string, value: CachedSections): Promise<void> {
  * Every distinct corpus state mints a new entry, and the corpus changes
  * whenever omp runs, so this directory would grow without bound.
  */
-async function pruneSections(keep = 5): Promise<void> {
+async function pruneSections(sourceName: string, keep = 5): Promise<void> {
 	try {
-		const files = await readdir(SECTIONS_DIR);
+		const files = (await readdir(SECTIONS_DIR)).filter((f) =>
+			f.startsWith(`${sourceName}-`),
+		);
 		const stamped = await Promise.all(
 			files
 				.filter((f) => f.endsWith(".json"))
@@ -509,9 +521,11 @@ async function pruneSections(keep = 5): Promise<void> {
  * caller has asked for no spend: reusing prose written against a slightly
  * older corpus beats rendering none, provided the report says so.
  */
-async function loadLatestSections(): Promise<CachedSections | null> {
+async function loadLatestSections(sourceName: string): Promise<CachedSections | null> {
 	try {
-		const files = await readdir(SECTIONS_DIR);
+		const files = (await readdir(SECTIONS_DIR)).filter((f) =>
+			f.startsWith(`${sourceName}-`),
+		);
 		const stamped = await Promise.all(
 			files
 				.filter((f) => f.endsWith(".json"))
@@ -871,9 +885,25 @@ type SessionScan = {
 
 type SessionSource = {
 	readonly name: string;
+	/** Root this source scans; reported so the corpus section is truthful. */
+	readonly root: string;
 	/** Top-level sessions only; nested logs hang off their parent. */
 	listSessions(): Promise<SessionScan>;
 	readEntries(path: string): Promise<AnyEntry[]>;
+	/** True when this log is the insights pipeline talking to itself. */
+	isMetaSession(entries: AnyEntry[]): boolean;
+	/**
+	 * Fold a log and its sidecars into one SessionMeta. Owned by the source
+	 * because record schemas differ per harness; everything above this
+	 * boundary only ever sees SessionMeta.
+	 */
+	buildMeta(
+		ref: SessionRef,
+		entries: AnyEntry[],
+		sidecars: Array<{ kind: SidecarKind; usage: SidecarUsage }>,
+	): SessionMeta;
+	readSidecar(entries: AnyEntry[]): SidecarUsage;
+	formatTranscript(entries: AnyEntry[], meta: SessionMeta): string;
 };
 
 async function readJsonl(path: string): Promise<AnyEntry[]> {
@@ -941,7 +971,12 @@ async function collectSidecars(
 function createOmpSessionSource(sessionsDir: string = SESSIONS_DIR): SessionSource {
 	return {
 		name: "omp",
+		root: sessionsDir,
 		readEntries: readJsonl,
+		isMetaSession,
+		buildMeta: buildSessionMeta,
+		readSidecar: extractSidecarUsage,
+		formatTranscript,
 		async listSessions(): Promise<SessionScan> {
 			const sessions: SessionRef[] = [];
 			let projects: DirEntry[] = [];
@@ -1013,6 +1048,389 @@ function createOmpSessionSource(sessionsDir: string = SESSIONS_DIR): SessionSour
 }
 
 const ompSessionSource = createOmpSessionSource();
+
+// ─── Claude Code Source ───────────────────────────────────────────────────────
+
+// ~/.claude/projects/<slugified-cwd>/<session-uuid>.jsonl — one flat log per
+// session, no sidecar directories: subagent turns are inline entries flagged
+// `isSidechain`.
+//
+// Differences that matter, all verified against the real corpus:
+// - Cost lives in periodic `cost-state` records (`totalCostUSD` plus per-model
+//   `costUSD`), not on each message. The last one wins. Only some sessions
+//   carry any, and a session without one has NO recorded cost — it is reported
+//   as unavailable rather than silently counted as $0, and never estimated
+//   from tokens, which is the workaround this port exists to avoid.
+// - One API response can be logged as several assistant entries sharing a
+//   `requestId`, so usage is deduplicated by it before summing.
+// - Tool results are `tool_result` blocks on user messages with `is_error`.
+
+const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
+
+type ClaudeCostState = {
+	totalCostUSD?: number;
+	totalLinesAdded?: number;
+	totalLinesRemoved?: number;
+	modelUsage?: Record<
+		string,
+		{
+			inputTokens?: number;
+			outputTokens?: number;
+			cacheReadInputTokens?: number;
+			cacheCreationInputTokens?: number;
+			costUSD?: number;
+		}
+	>;
+};
+
+function claudeText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return (content as ContentBlock[])
+		.filter((b) => b.type === "text" && typeof b.text === "string")
+		.map((b) => b.text as string)
+		.join(" ");
+}
+
+function extractClaudeStats(entries: AnyEntry[]) {
+	const toolCounts: Record<string, number> = {};
+	const languages: Record<string, number> = {};
+	const toolErrorCategories: Record<string, number> = {};
+	const filesModified = new Set<string>();
+	const userResponseTimes: number[] = [];
+	const messageHours: number[] = [];
+	const userMessageTimestamps: string[] = [];
+	const modelUsage: ModelUsageMap = {};
+	const seenRequestIds = new Set<string>();
+	const seenToolUseIds = new Set<string>();
+	// tool_result blocks name only the tool_use_id, so the tool itself has to
+	// be remembered from the assistant turn that called it.
+	const toolNameById = new Map<string, string>();
+
+	let sessionId = "";
+	let projectPath = "";
+	let firstTs = 0;
+	let lastTs = 0;
+	let costState: ClaudeCostState | null = null;
+	let gitCommits = 0;
+	let gitPushes = 0;
+	let toolErrors = 0;
+	let usesSubagent = false;
+	let usesMcp = false;
+	let linesAdded = 0;
+	let linesRemoved = 0;
+	let userMessageCount = 0;
+	let assistantMessageCount = 0;
+	let firstPrompt = "";
+	let lastAssistantTs: number | null = null;
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+
+	for (const entry of entries) {
+		if (typeof entry.sessionId === "string" && !sessionId) sessionId = entry.sessionId;
+		if (typeof entry.cwd === "string" && !projectPath) projectPath = entry.cwd;
+
+		const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+		if (!Number.isNaN(ts)) {
+			if (!firstTs) firstTs = ts;
+			if (ts > lastTs) lastTs = ts;
+		}
+
+		if (entry.type === "cost-state") {
+			costState = entry as ClaudeCostState;
+			continue;
+		}
+
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg) continue;
+
+		if (entry.type === "assistant") {
+			assistantMessageCount++;
+			if (!Number.isNaN(ts)) lastAssistantTs = ts;
+
+			// Retries and multi-part logging repeat a response; count each once.
+			const requestId = typeof entry.requestId === "string" ? entry.requestId : "";
+			const counted = requestId && seenRequestIds.has(requestId);
+			if (requestId) seenRequestIds.add(requestId);
+
+			const u = (msg.usage ?? {}) as Record<string, number>;
+			if (!counted) {
+				totals.input += u.input_tokens ?? 0;
+				totals.output += u.output_tokens ?? 0;
+				totals.cacheRead += u.cache_read_input_tokens ?? 0;
+				totals.cacheWrite += u.cache_creation_input_tokens ?? 0;
+			}
+
+			for (const block of (Array.isArray(msg.content) ? msg.content : []) as ContentBlock[]) {
+				if (block.type !== "tool_use") continue;
+				const toolId = (block.id as string) ?? Math.random().toString(36);
+				if (seenToolUseIds.has(toolId)) continue;
+				seenToolUseIds.add(toolId);
+
+				const toolName = (block.name as string) ?? "";
+				toolCounts[toolName] = (toolCounts[toolName] ?? 0) + 1;
+				toolNameById.set(toolId, toolName);
+				if (toolName === "Task") usesSubagent = true;
+				if (toolName.startsWith("mcp__")) usesMcp = true;
+
+				const args = (block.input as Record<string, unknown>) ?? {};
+				const filePath =
+					(typeof args.file_path === "string" && args.file_path) ||
+					(typeof args.path === "string" && args.path) ||
+					"";
+				if (filePath && /^(Read|Write|Edit|NotebookEdit)$/.test(toolName)) {
+					const lang = getLanguageFromPath(filePath);
+					if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
+				}
+				if (filePath && /^(Write|Edit|NotebookEdit)$/.test(toolName)) filesModified.add(filePath);
+				if (toolName === "Write") linesAdded += countNewlines((args.content as string) ?? "") + 1;
+				if (toolName === "Edit") {
+					linesAdded += countNewlines((args.new_string as string) ?? "") + 1;
+					linesRemoved += countNewlines((args.old_string as string) ?? "") + 1;
+				}
+				if (toolName === "Bash") {
+					const cmd = (args.command as string) ?? "";
+					if (cmd.includes("git commit")) gitCommits++;
+					if (cmd.includes("git push")) gitPushes++;
+				}
+			}
+			continue;
+		}
+
+		if (entry.type !== "user") continue;
+
+		const blocks = (Array.isArray(msg.content) ? msg.content : []) as ContentBlock[];
+		const results = blocks.filter((b) => b.type === "tool_result");
+		if (results.length) {
+			for (const result of results) {
+				if (result.is_error !== true) continue;
+				toolErrors++;
+				const cat = toolErrorCategory(
+					toolNameById.get(result.tool_use_id as string) ?? "",
+				);
+				toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
+			}
+			continue;
+		}
+
+		// Sidechain turns are subagent prompts and meta entries are injected
+		// notices; neither is the human typing.
+		if (entry.isSidechain === true) {
+			usesSubagent = true;
+			continue;
+		}
+		if (entry.isMeta === true) continue;
+
+		const text = claudeText(msg.content);
+		if (!text.trim()) continue;
+		userMessageCount++;
+		if (!firstPrompt) firstPrompt = text.trim().slice(0, 300);
+		if (!Number.isNaN(ts)) {
+			messageHours.push(new Date(ts).getHours());
+			userMessageTimestamps.push(new Date(ts).toISOString());
+			if (lastAssistantTs !== null) {
+				const gapSec = (ts - lastAssistantTs) / 1000;
+				if (gapSec > 2 && gapSec < 3600) userResponseTimes.push(gapSec);
+			}
+		}
+	}
+
+	// Cost is only ever read, never derived. A session with no cost-state has
+	// no recorded cost, and says so rather than reporting zero as fact.
+	const costAvailable = typeof costState?.totalCostUSD === "number";
+	if (costAvailable) totals.cost = costState?.totalCostUSD ?? 0;
+	const perModel = Object.entries(costState?.modelUsage ?? {});
+	if (perModel.length) {
+		// cost-state is the harness's own accounting and already covers retries,
+		// so it supersedes the per-message sum rather than being added to it.
+		totals.input = 0;
+		totals.output = 0;
+		totals.cacheRead = 0;
+		totals.cacheWrite = 0;
+	}
+	for (const [model, usage] of perModel) {
+		modelUsage[model] = {
+			input_tokens: usage.inputTokens ?? 0,
+			output_tokens: usage.outputTokens ?? 0,
+			cost: usage.costUSD ?? 0,
+			message_count: 0,
+		};
+		totals.input += usage.inputTokens ?? 0;
+		totals.output += usage.outputTokens ?? 0;
+		totals.cacheRead += usage.cacheReadInputTokens ?? 0;
+		totals.cacheWrite += usage.cacheCreationInputTokens ?? 0;
+	}
+	if (typeof costState?.totalLinesAdded === "number" && costState.totalLinesAdded > 0)
+		linesAdded = costState.totalLinesAdded;
+	if (typeof costState?.totalLinesRemoved === "number" && costState.totalLinesRemoved > 0)
+		linesRemoved = costState.totalLinesRemoved;
+
+	return {
+		sessionId,
+		projectPath,
+		firstTs,
+		lastTs,
+		costAvailable,
+		totals,
+		modelUsage,
+		toolCounts,
+		languages,
+		toolErrorCategories,
+		filesModified: filesModified.size,
+		userResponseTimes,
+		messageHours,
+		userMessageTimestamps,
+		gitCommits,
+		gitPushes,
+		toolErrors,
+		usesSubagent,
+		usesMcp,
+		linesAdded,
+		linesRemoved,
+		userMessageCount,
+		assistantMessageCount,
+		firstPrompt,
+	};
+}
+
+function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMeta {
+	const stats = extractClaudeStats(entries);
+	const startTime = new Date(stats.firstTs || ref.created.getTime()).toISOString();
+	const endMs = stats.lastTs || ref.modified.getTime();
+
+	return {
+		session_id: stats.sessionId || ref.id,
+		session_path: ref.path,
+		project_path: stats.projectPath || ref.project_path,
+		start_time: startTime,
+		duration_minutes: Math.max(
+			0,
+			Math.round((endMs - new Date(startTime).getTime()) / 1000 / 60),
+		),
+		user_message_count: stats.userMessageCount,
+		assistant_message_count: stats.assistantMessageCount,
+		tool_counts: stats.toolCounts,
+		languages: stats.languages,
+		git_commits: stats.gitCommits,
+		git_pushes: stats.gitPushes,
+		input_tokens: stats.totals.input,
+		output_tokens: stats.totals.output,
+		total_cost: stats.totals.cost,
+		first_prompt: stats.firstPrompt,
+		user_interruptions: 0,
+		user_response_times: stats.userResponseTimes,
+		tool_errors: stats.toolErrors,
+		tool_error_categories: stats.toolErrorCategories,
+		uses_subagent: stats.usesSubagent,
+		uses_mcp: stats.usesMcp,
+		lines_added: stats.linesAdded,
+		lines_removed: stats.linesRemoved,
+		files_modified: stats.filesModified,
+		message_hours: stats.messageHours,
+		user_message_timestamps: stats.userMessageTimestamps,
+		// Claude Code reports one aggregate cost per session, so subagent spend
+		// cannot be split out of it without estimating. It stays in primary.
+		cost_primary: stats.totals.cost,
+		cost_advisor: 0,
+		cost_subagent: 0,
+		cache_read_tokens: stats.totals.cacheRead,
+		cache_write_tokens: stats.totals.cacheWrite,
+		utility_cost: 0,
+		sidecar_counts: { advisor: 0, subagent: 0 },
+		sidecar_tool_calls: 0,
+		sidecar_tool_errors: 0,
+		thinking_escalations: 0,
+		model_switches: 0,
+		compactions: 0,
+		steering_messages: 0,
+		log_signature: ref.signature,
+		median_ttft_ms: 0,
+		median_response_ms: 0,
+		cost_recorded: stats.costAvailable,
+		model_usage: stats.modelUsage,
+	};
+}
+
+function createClaudeSessionSource(projectsDir: string = CLAUDE_PROJECTS_DIR): SessionSource {
+	return {
+		name: "claude-code",
+		root: projectsDir,
+		readEntries: readJsonl,
+		isMetaSession,
+		readSidecar: extractSidecarUsage,
+		buildMeta: (ref, entries) => buildClaudeMeta(ref, entries),
+		formatTranscript(entries, meta) {
+			const lines: string[] = [
+				`Session: ${meta.session_id.slice(0, 8)}`,
+				`Date: ${meta.start_time}`,
+				`Project: ${meta.project_path}`,
+				`Duration: ${meta.duration_minutes} min`,
+				"",
+			];
+			for (const entry of entries) {
+				const msg = entry.message as AnyMessage | undefined;
+				if (!msg) continue;
+				if (entry.type === "user" && entry.isSidechain !== true && entry.isMeta !== true) {
+					const text = claudeText(msg.content).slice(0, 500);
+					if (text.trim()) lines.push(`[User]: ${text}`);
+				} else if (entry.type === "assistant") {
+					for (const block of (Array.isArray(msg.content) ? msg.content : []) as ContentBlock[]) {
+						if (block.type === "text" && block.text)
+							lines.push(`[Assistant]: ${(block.text as string).slice(0, 300)}`);
+						else if (block.type === "tool_use" && block.name)
+							lines.push(`[Tool: ${block.name as string}]`);
+					}
+				}
+			}
+			return lines.join("\n");
+		},
+		async listSessions(): Promise<SessionScan> {
+			const sessions: SessionRef[] = [];
+			let projects: DirEntry[] = [];
+			try {
+				projects = await readdir(projectsDir, { withFileTypes: true });
+			} catch {
+				return { sessions, duplicate_logs: 0 };
+			}
+
+			for (const project of projects) {
+				if (!project.isDirectory()) continue;
+				const projectDir = join(projectsDir, project.name);
+				let entries: DirEntry[] = [];
+				try {
+					entries = await readdir(projectDir, { withFileTypes: true });
+				} catch {
+					continue;
+				}
+				for (const entry of entries) {
+					if (entry.isDirectory() || !entry.name.endsWith(".jsonl")) continue;
+					const path = join(projectDir, entry.name);
+					const info = await stat(path).catch(() => null);
+					if (!info) continue;
+					sessions.push({
+						id: entry.name.replace(/\.jsonl$/, ""),
+						path,
+						project_path: "",
+						size: info.size,
+						created: info.birthtime.getTime() ? info.birthtime : info.mtime,
+						modified: info.mtime,
+						sidecars: [],
+						signature: `${info.size}:${info.mtimeMs}`,
+					});
+				}
+			}
+
+			const byId = new Map<string, SessionRef>();
+			for (const ref of sessions) {
+				const seen = byId.get(ref.id);
+				if (!seen || ref.size > seen.size) byId.set(ref.id, ref);
+			}
+			return {
+				sessions: [...byId.values()],
+				duplicate_logs: sessions.length - byId.size,
+			};
+		},
+	};
+}
 
 // ─── Session Parsing ──────────────────────────────────────────────────────────
 
@@ -1545,6 +1963,7 @@ function buildSessionMeta(
 		compactions: stats.compactions,
 		steering_messages: stats.steeringMessages,
 		log_signature: ref.signature,
+		cost_recorded: true,
 		median_ttft_ms: median(stats.ttfts),
 		median_response_ms: median(stats.responseDurations),
 		model_usage: modelUsage,
@@ -2632,7 +3051,7 @@ function generateMarkdown(
 	userCtx: UserContext,
 ): string {
 	const lines: string[] = [];
-	lines.push("# omp Insights");
+	lines.push(scan.source === "omp" ? "# omp Insights" : `# Insights (${scan.source})`);
 	lines.push(`> ${agg.date_range.start} to ${agg.date_range.end} | ${agg.total_sessions} sessions | Generated ${new Date().toLocaleDateString()}`);
 	lines.push("");
 
@@ -2730,6 +3149,12 @@ function generateMarkdown(
 	lines.push(
 		`Facet coverage: ${scan.facets_analyzed} of ${scan.included} sessions analysed${scan.facet_failures ? `, ${scan.facet_failures} extraction(s) failed` : ""}. Sessions without facets still count in every deterministic number above; they are absent only from the LLM-derived sections.`,
 	);
+	if (scan.cost_unavailable) {
+		lines.push("");
+		lines.push(
+			`_${scan.cost_unavailable} of ${scan.included} sessions carry no recorded cost in the \`${scan.source}\` logs. They contribute $0 to the totals above because this report never estimates cost from token counts; treat the spend figures as a lower bound._`,
+		);
+	}
 	if (scan.reused_stale_sections) {
 		lines.push("");
 		lines.push(
@@ -2824,10 +3249,15 @@ function generateMarkdown(
 	}
 
 	lines.push("## \u{1F4B8} Model Spend");
-	lines.push(`| Model | Cost | Messages |`);
+	// Claude Code's cost-state carries no per-model message count, so the
+	// column reports tokens where counts are unavailable rather than "0".
+	const haveMessageCounts = Object.values(agg.model_usage).some((u) => u.message_count > 0);
+	lines.push(`| Model | Cost | ${haveMessageCounts ? "Messages" : "Tokens"} |`);
 	lines.push(`|-------|------|----------|`);
 	for (const [model, usage] of Object.entries(agg.model_usage).sort((a, b) => b[1].cost - a[1].cost).slice(0, 8)) {
-		lines.push(`| ${model.replace(/.*\//, "")} | $${usage.cost.toFixed(2)} | ${usage.message_count} |`);
+		lines.push(
+			`| ${model.replace(/.*\//, "")} | $${usage.cost.toFixed(2)} | ${haveMessageCounts ? usage.message_count : fmtTokens(usage.input_tokens + usage.output_tokens)} |`,
+		);
 	}
 	if (agg.estimated_waste > 0) lines.push(`\n**Estimated waste from model mismatch:** $${agg.estimated_waste.toFixed(2)}`);
 	lines.push("");
@@ -3448,7 +3878,12 @@ async function runInsights(
 
 	await ensureDirs();
 
-	const source = ompSessionSource;
+	// --source claude reads ~/.claude/projects instead of omp's sessions. The
+	// two corpora are not merged: their records carry different signals, and a
+	// single total across both would hide which harness it came from.
+	const source: SessionSource = args.includes("--source claude")
+		? createClaudeSessionSource()
+		: ompSessionSource;
 	// Fetched before the LLM phases: the facet phase needs the smol model role
 	// out of it, and the section prompts need the installed-skills list.
 	const userCtx = await gatherUserContext();
@@ -3469,7 +3904,7 @@ async function runInsights(
 
 	const scanned = await source.listSessions();
 	const scan: ScanSummary = {
-		sessions_dir: SESSIONS_DIR,
+		sessions_dir: source.root,
 		primary_logs: scanned.sessions.length,
 		duplicate_logs: scanned.duplicate_logs,
 		advisor_logs: 0,
@@ -3483,6 +3918,8 @@ async function runInsights(
 		facets_analyzed: 0,
 		reused_stale_sections: false,
 		included: 0,
+		source: source.name,
+		cost_unavailable: 0,
 	};
 	for (const ref of scanned.sessions) {
 		for (const sidecar of ref.sidecars) {
@@ -3517,7 +3954,7 @@ async function runInsights(
 	for (let i = 0; i < allRefs.length; i += META_BATCH_SIZE) {
 		const batch = allRefs.slice(i, i + META_BATCH_SIZE);
 		const results = await Promise.all(
-			batch.map((ref) => loadCachedMeta(ref.id, ref.signature)),
+			batch.map((ref) => loadCachedMeta(source.name, ref.id, ref.signature)),
 		);
 		for (let j = 0; j < batch.length; j++) {
 			const cached = results[j];
@@ -3540,7 +3977,7 @@ async function runInsights(
 				try {
 					const entries = await source.readEntries(ref.path);
 
-					if (isMetaSession(entries)) {
+					if (source.isMetaSession(entries)) {
 						scan.excluded_meta++;
 						return;
 					}
@@ -3550,12 +3987,12 @@ async function runInsights(
 					const sidecars = await Promise.all(
 						ref.sidecars.map(async (sidecar) => ({
 							kind: sidecar.kind,
-							usage: extractSidecarUsage(await source.readEntries(sidecar.path)),
+							usage: source.readSidecar(await source.readEntries(sidecar.path)),
 						})),
 					);
 
-					const meta = buildSessionMeta(ref, entries, sidecars);
-					await saveMeta(meta);
+					const meta = source.buildMeta(ref, entries, sidecars);
+					await saveMeta(source.name, meta);
 					metas.push(meta);
 				} catch {
 					// Skip sessions that fail to load
@@ -3631,7 +4068,7 @@ async function runInsights(
 				batch.map(async (meta) => {
 					try {
 						const entries = await source.readEntries(meta.session_path);
-						let transcript = formatTranscript(entries, meta);
+						let transcript = source.formatTranscript(entries, meta);
 
 						// Summarize long transcripts
 						if (transcript.length > 30_000) {
@@ -3719,18 +4156,22 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	const agg = aggregateData(kept, facetsMap);
 	scan.included = kept.length;
 	scan.facets_analyzed = agg.sessions_with_facets;
+	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
 	const temporal = computeTemporalData(kept, facetsMap);
 	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx);
 	const sectionPrompts = buildSectionPrompts(dataBlock, temporal, userCtx, agg);
 
 	// Keyed on the prompt inputs, not the clock: the same corpus and the same
 	// model produce the same prose, so a re-run should cost nothing.
-	const sectionsKey = createHash("sha256")
+	// The source is part of the key: an omp report's prose must never be
+	// reused for a Claude Code corpus, which --no-llm would otherwise do.
+	const sectionsKey = `${source.name}-${createHash("sha256")
 		.update(`${activeModel ?? "default"}\n${dataBlock}`)
 		.digest("hex")
-		.slice(0, 32);
+		.slice(0, 32)}`;
 	const exactSections = refresh ? null : await loadCachedSections(sectionsKey);
-	const staleSections = exactSections || !noLlm ? null : await loadLatestSections();
+	const staleSections =
+		exactSections || !noLlm ? null : await loadLatestSections(source.name);
 	const cachedSections = exactSections ?? staleSections;
 
 	scan.reused_stale_sections = Boolean(staleSections);
@@ -3790,7 +4231,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		// generation must not be replayed as if it were a result.
 		if (Object.keys(sectionResults).length) {
 			await saveSections(sectionsKey, { sections: sectionResults, synthesis });
-			await pruneSections();
+			await pruneSections(source.name);
 		}
 	}
 
@@ -3811,7 +4252,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 			{
 				generated_at: new Date().toISOString(),
 				source: source.name,
-				sessions_dir: SESSIONS_DIR,
+				sessions_dir: source.root,
 				since_days: sinceDays || null,
 				scan,
 				totals: {
@@ -3891,6 +4332,7 @@ export default function (pi: ExtensionAPI) {
 // constraints), so the unit-testable internals are re-exported here rather
 // than split into modules. Not part of the extension's public surface.
 export {
+	createClaudeSessionSource,
 	aggregateData,
 	buildSessionMeta,
 	computeTemporalData,
@@ -3910,6 +4352,7 @@ export type {
 	AggregatedData,
 	ScanSummary,
 	SessionMeta,
+	SessionRef,
 	SessionSource,
 	TemporalData,
 	UserContext,

@@ -19,7 +19,7 @@ layer, facet taxonomy, prompts and report structure are upstream's work.
 |-------|----------|-------|
 | 1 | paths and user context, filesystem session scanner, deterministic stats, caps, `--md` report | **landed** |
 | 2 | LLM facet extraction, 8 section prompts, synthesis, HTML report | **landed** |
-| 3 | `~/.claude/projects` source adapter | not started |
+| 3 | `~/.claude/projects` source adapter | **landed** |
 
 ### How model calls work
 
@@ -60,6 +60,7 @@ path and fails with `Cannot find module`.
 | `--since <N>d` / `<N>w` | Only analyse sessions from the last N days/weeks |
 | `--refresh` / `-r` | Invalidate cached facet extractions and regenerate the sections |
 | `--no-llm` | Render from caches only; never call a model |
+| `--source claude` | Read `~/.claude/projects` instead of omp's sessions |
 | `--max-sessions <N>` | Session load cap (default 2000, env `OMP_INSIGHTS_MAX_SESSIONS`) |
 | `--max-facets <N>` | Facet extraction cap (default 50, env `OMP_INSIGHTS_MAX_FACETS`) |
 | `--facet-concurrency <N>` | Facet extraction concurrency (default 50, env `OMP_INSIGHTS_FACET_CONCURRENCY`) |
@@ -167,3 +168,40 @@ though, so on a machine that is actively using omp the key legitimately misses:
 two consecutive runs here read $2790.305 and $2790.503, because the session
 doing the measuring kept spending. Use `--no-llm` when you want a re-render
 with no spend; it reuses the newest cached generation and the report says so.
+
+## Sources
+
+`SessionSource` owns listing, parsing and transcript formatting, so a harness
+adapter is an implementation of one interface rather than a fork of the
+pipeline. Corpora are never merged: a single total across two harnesses would
+hide which one the spend came from.
+
+| | omp (default) | `--source claude` |
+|---|---|---|
+| Layout | `sessions/<slug>/<ts>_<id>.jsonl` + sidecar dir | `projects/<slug>/<uuid>.jsonl`, flat |
+| Cost | `usage.cost.total` per call, always present | `cost-state` records, **only some sessions** |
+| Subagents | separate sidecar logs, cost split out | inline `isSidechain` turns, cost not separable |
+| Tool errors | `toolResult.isError` + `toolName` | `tool_result.is_error`, tool resolved via `tool_use_id` |
+| Interruptions, escalation, latency | `steering`, `thinking_level_change`, `model_change`, `ttft` | not recorded |
+
+Claude Code traps the adapter handles, all verified against the real corpus:
+
+- **Cost is partial.** 19 of 24 local logs carry no `cost-state`. Those
+  sessions report `cost_recorded: false`, contribute $0, and the report says
+  the spend figure is a lower bound. Deriving cost from tokens and a price
+  table is the exact workaround this port exists to delete, so it is not done.
+- **Responses repeat.** One API response can be logged as several assistant
+  entries sharing a `requestId`; usage is deduplicated by it. Where a
+  `cost-state` exists it supersedes the per-message sum entirely, since it is
+  the harness's own accounting.
+- **`tool_result` names an id, not a tool**, so the adapter remembers
+  `tool_use_id -> tool name` from the calling turn to categorise failures.
+- **Sidechain and meta turns are not the human typing** and never count as
+  user messages, response times or hour-of-day.
+
+The meta and sections caches are namespaced per source, so the two corpora
+cannot contaminate each other's cached stats or prose.
+
+Measured on the local Claude corpus: 24 logs, 7 substantive, **$6.123361**,
+matching an independent `jq` sum over `cost-state.totalCostUSD` for the same
+files exactly.
