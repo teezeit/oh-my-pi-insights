@@ -1,0 +1,90 @@
+// SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-only
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { parseSimpleYaml, resolveLimit } from "../index.ts";
+
+// parseSimpleYaml is hand-rolled because the port takes no new dependencies.
+// The shapes below are the ones ~/.omp/agent/config.yml actually contains.
+
+test("reads nested mappings and scalar sequences", () => {
+	const cfg = parseSimpleYaml(`modelRoles:
+  advisor: github-copilot/gpt-5.4-mini
+  default: anthropic/claude-opus-5
+  tiny: "@smol"
+retry:
+  modelFallback: true
+  fallbackChains:
+    default:
+      - anthropic/claude-opus-5
+      - github-copilot/gpt-5.6-terra
+    tiny:
+      - anthropic/claude-haiku-4-5
+symbolPreset: unicode
+`);
+
+	assert.deepEqual(cfg.modelRoles, {
+		advisor: "github-copilot/gpt-5.4-mini",
+		default: "anthropic/claude-opus-5",
+		tiny: "@smol",
+	});
+	assert.deepEqual((cfg.retry as Record<string, unknown>).fallbackChains, {
+		default: ["anthropic/claude-opus-5", "github-copilot/gpt-5.6-terra"],
+		tiny: ["anthropic/claude-haiku-4-5"],
+	});
+	// A sibling key after a nested block must land back at the root, not inside it.
+	assert.equal(cfg.symbolPreset, "unicode");
+});
+
+test("dedents out of a sequence back to the correct parent", () => {
+	const cfg = parseSimpleYaml(`a:
+  chains:
+    one:
+      - x
+      - y
+  after: kept
+b: root
+`);
+	const a = cfg.a as Record<string, unknown>;
+	assert.deepEqual((a.chains as Record<string, unknown>).one, ["x", "y"]);
+	assert.equal(a.after, "kept");
+	assert.equal(cfg.b, "root");
+});
+
+test("strips quotes, trailing comments and blank or comment lines", () => {
+	const cfg = parseSimpleYaml(`
+# leading comment
+theme: 'light'    # inline comment
+
+quoted: "with spaces"
+`);
+	assert.equal(cfg.theme, "light");
+	assert.equal(cfg.quoted, "with spaces");
+});
+
+test("a value containing a colon keeps everything after the first one", () => {
+	// Model ids and URLs both hit this: splitting on the last colon would truncate.
+	const cfg = parseSimpleYaml("plan: anthropic/claude-opus-5:auto\n");
+	assert.equal(cfg.plan, "anthropic/claude-opus-5:auto");
+});
+
+test("resolveLimit prefers the flag, then the env var, then the default", () => {
+	assert.equal(resolveLimit("--max-sessions 12", "max-sessions", "NOPE_UNSET", 99), 12);
+	assert.equal(resolveLimit("--max-sessions=12", "max-sessions", "NOPE_UNSET", 99), 12);
+	assert.equal(resolveLimit("", "max-sessions", "NOPE_UNSET", 99), 99);
+
+	process.env.OMP_INSIGHTS_TEST_LIMIT = "7";
+	try {
+		assert.equal(resolveLimit("", "max-sessions", "OMP_INSIGHTS_TEST_LIMIT", 99), 7);
+		// An explicit flag still wins over the environment.
+		assert.equal(resolveLimit("--max-sessions 3", "max-sessions", "OMP_INSIGHTS_TEST_LIMIT", 99), 3);
+		// Junk in the environment must not silently become a zero cap.
+		process.env.OMP_INSIGHTS_TEST_LIMIT = "not-a-number";
+		assert.equal(resolveLimit("", "max-sessions", "OMP_INSIGHTS_TEST_LIMIT", 99), 99);
+		process.env.OMP_INSIGHTS_TEST_LIMIT = "0";
+		assert.equal(resolveLimit("", "max-sessions", "OMP_INSIGHTS_TEST_LIMIT", 99), 99);
+	} finally {
+		delete process.env.OMP_INSIGHTS_TEST_LIMIT;
+	}
+});
