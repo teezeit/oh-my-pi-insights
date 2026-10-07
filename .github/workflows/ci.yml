@@ -11,6 +11,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      # No dependencies: node strips the types and runs the tests directly.
+      # The extension itself has no runtime dependencies; these are the
+      # typechecker and node's type definitions, which the tests need too.
+      - run: npm install
+      # Node strips the types and runs the tests directly: no build step.
       - run: npm test
-      - run: npx --yes typescript@5 tsc --noEmit --strict --target es2022 --module esnext --moduleResolution bundler --allowImportingTsExtensions --skipLibCheck --types node index.ts test/*.ts
+      - run: npm run typecheck
