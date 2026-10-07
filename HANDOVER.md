@@ -199,8 +199,7 @@ not implement it now.
 
 ## Constraints
 
-- Keep it a single-file extension if practical; upstream is one 2810-line file and
-  splitting it makes the port diff unreadable. Split only after Stage 2 lands.
+- Split from single-file to src/ modules after Stage 3 at tag `pre-split`; for single-file diffs against upstream, use that tag.
 - No new runtime dependencies beyond what upstream uses (node builtins).
 - Do not run project-wide formatters or reflow untouched upstream code - it destroys
   the diff against the vendored baseline.

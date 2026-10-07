@@ -21,6 +21,10 @@ layer, facet taxonomy, prompts and report structure are upstream's work.
 | 2 | LLM facet extraction, 8 section prompts, synthesis, HTML report | **landed** |
 | 3 | `~/.claude/projects` source adapter | **landed** |
 
+### Architecture
+
+After Stage 3, the extension was split from a single file into modules: `index.ts` handles registration and orchestration; `src/` contains session sources, deterministic stats, temporal aggregation, data aggregation, prompt templates, model calls, result caching, user context, and report rendering.
+
 ### How model calls work
 
 omp hands extensions credentials (`ctx.modelRegistry.getApiKeyAndHeaders`) but
