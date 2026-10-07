@@ -1,8 +1,8 @@
 {
-  "name": "oh-my-pi-insights",
-  "version": "1.2.3",
+  "name": "@teezeit/omp-insights",
+  "version": "0.1.0",
   "type": "module",
-  "description": "omp Insights extension — generates a personal usage insights report from your omp session history",
+  "description": "omp Insights extension \u2014 generates a personal usage insights report from your omp session history",
   "author": "Hari Srinivasan <harisrini21@gmail.com>",
   "contributors": [
     "Tobias Hoelzer (omp port)"
@@ -41,5 +41,8 @@
     "index.ts",
     "README.md",
     "tools/verify-cost.sh"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

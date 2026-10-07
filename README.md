@@ -40,9 +40,13 @@ Set `OMP_INSIGHTS_OMP_BIN` if `omp` is not on `PATH`.
 ## Install
 
 ```bash
-omp -e ./index.ts          # try it from a checkout
-omp install ./oh-my-pi-insights
+omp -e ./index.ts        # try it from a checkout, no install
+omp plugin link .        # link the checkout as a plugin
+omp install @teezeit/omp-insights   # once published
 ```
+
+`omp plugin doctor` verifies the install; `omp plugin list` shows the
+resolved path. Not yet published to npm, so the third form does not work yet.
 
 `omp -e npm:<pkg>` does not work for an uninstalled package: it resolves as a
 path and fails with `Cannot find module`.
