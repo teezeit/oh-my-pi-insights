@@ -1,5 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan <harisrini21@gmail.com>
+// SPDX-FileCopyrightText: 2026 Tobias Hoelzer (omp port)
 // SPDX-License-Identifier: AGPL-3.0-only
+//
+// Modified from Observal/pi-insights: ported from the Pi coding agent to the
+// omp harness. See README.md "Port status" and the repository history.
 
 /**
  * /insights — omp Usage Insights

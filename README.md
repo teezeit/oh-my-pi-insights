@@ -125,7 +125,7 @@ Read-only against `~/.omp/agent/sessions`. Results are cached in
 
 ## Requirements
 
-- omp 18.x (developed against `omp/18.1.14`)
+- omp 18.x (developed against `omp/18.1.14`, verified on `omp/18.8.0`)
 - No runtime dependencies beyond node builtins
 
 ## License
