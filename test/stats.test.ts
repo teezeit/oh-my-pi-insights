@@ -12,8 +12,8 @@ import {
 	toolErrorCategory,
 } from "../index.ts";
 
-// The record shapes below are the ones omp writes; see HANDOVER.md "Session
-// data: omp vs Pi". Timestamps on messages are epoch ms, on envelopes ISO.
+// The record shapes below are the ones omp writes; see AGENTS.md "omp session
+// log schema". Timestamps on messages are epoch ms, on envelopes ISO.
 
 const usage = (cost: number, extra: Record<string, number> = {}) => ({
 	input: 10,

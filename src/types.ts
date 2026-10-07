@@ -88,7 +88,7 @@ export type SessionMeta = {
 	// Why: omp writes explicit per-call cost, and advisor/subagent sidecars are
 	// separate logs with their own spend. total_cost is the parent-attributed
 	// sum of all three buckets; the buckets are kept so the report can show
-	// where the money actually went (HANDOVER.md "nested logs").
+	// where the money actually went (AGENTS.md "Patterns to preserve").
 	cost_primary: number;
 	cost_advisor: number;
 	cost_subagent: number;

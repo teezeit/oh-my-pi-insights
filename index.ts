@@ -569,8 +569,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	]);
 
 	// Audit manifest: the exact session set behind the numbers, so a report's
-	// total cost can be reconciled against the logs with jq (acceptance
-	// criterion 2 in HANDOVER.md) instead of being taken on trust.
+	// total cost can be reconciled against the logs with jq
+	// (tools/verify-cost.sh) instead of being taken on trust.
 	await writeFile(
 		SESSION_SET_PATH,
 		JSON.stringify(
@@ -653,9 +653,9 @@ export default function (pi: ExtensionAPI) {
 
 // ─── Test Seam ────────────────────────────────────────────────────────────────
 
-// Why: the port stays a single file until Stage 2 lands (see HANDOVER.md
-// constraints), so the unit-testable internals are re-exported here rather
-// than split into modules. Not part of the extension's public surface.
+// Why: tests exercise internals through this single seam rather than importing
+// src/ modules directly, so the module layout can change without touching
+// tests. Not part of the extension's public surface.
 export {
 	createClaudeSessionSource,
 	aggregateData,
