@@ -4354,6 +4354,8 @@ export {
 };
 export type {
 	AggregatedData,
+	ExtensionAPI,
+	ExtensionCommandContext,
 	ScanSummary,
 	SessionMeta,
 	SessionRef,
