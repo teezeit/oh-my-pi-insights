@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.log
+
+# Orca agent worktrees live inside the checkout; they are not project files.
+.orca/
