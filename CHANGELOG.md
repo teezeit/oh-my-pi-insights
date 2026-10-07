@@ -35,6 +35,25 @@ upstream verbatim; every entry below is a diff against it.
   MCP and device usage is visible instead of hidden inside a `write` count.
 - Deterministic Markdown sections: cost attribution by class, failures by
   tool, corpus provenance, facet coverage, and the user's own setup.
+- **Friction signals**: `stopReason: "aborted"`/`"error"` (classified into
+  `rate_limit`/`quota`/`auth`/`other`), `toolResult.isError` versus invented
+  tool names (the harness's "Tool X not found" replies, kept out of every
+  real tool's error rate), `ttsr_injection` and `reset_boundary`. Reported as
+  an interruption rate, an abort-outcome-label split (heuristic, overridden
+  by the facet LLM's per-event judgment where available), provider-error
+  classes, invented-tool-name counts and a per-tool error-rate table.
+- **Per-turn aggregation**: a pass over human messages tracking LLM round
+  trips, tool calls, exploration calls before the first edit, wall clock and
+  cost per turn; reported as p50/p90 plus the worst 5 turns per session and
+  across the corpus.
+- **Per-tool wall clock**: `tool_execution_start` paired with the matching
+  `toolResult` by `toolCallId`, reported as calls/p50/p90/share of total tool
+  time per tool. `intent` is only recorded before 2026-10-07 (omp disabled
+  `tools.intentTracing` that day) and is never rendered as a column.
+- **Cache efficiency and edit churn**: `cacheRead / (input + cacheRead)` per
+  session plus a token-weighted corpus ratio and a worst-5-sessions table;
+  per-path edit counts (same edit/write detection that already fed
+  `files_modified`) aggregated into a most-re-edited-files table.
 - Caching for generated sections and synthesis, keyed on the shared data block
   and active model; `--no-llm` renders from cache with no spend and labels the
   reuse; `--max-sessions` / `--max-facets` / `--facet-concurrency` flags and
@@ -82,3 +101,11 @@ upstream verbatim; every entry below is a diff against it.
   `gpt-5.6-terra` rendered as `6-terra`.
 - Failed facet extractions were silently dropped, removing those sessions from
   every facet-derived chart with no trace. They are now counted and reported.
+- The friction-signal, per-turn and per-tool-wall-clock fields were added to
+  `SessionMeta` without a cache schema version, so every already-cached
+  session (any log whose `size:mtime` had not changed since before these
+  fields existed) silently read back as zero/empty instead of being
+  recomputed: a real corpus with months of cached sessions reported 0
+  aborted generations and 0 provider errors despite hundreds of each in the
+  logs. `session-meta/<id>.json` now carries a schema version; a stale or
+  missing version is treated as a cache miss rather than backfilled with 0.

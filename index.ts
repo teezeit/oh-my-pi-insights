@@ -234,6 +234,57 @@ function displayLabel(key: string): string {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+/**
+ * Aborts cannot be told apart structurally (user misphrased vs. agent went
+ * wrong), so a cheap heuristic label is attached at extraction time and the
+ * facet pass is given a chance to override it with an LLM judgment later.
+ */
+type AbortEvent = {
+	ts: string;
+	tool_calls_before_abort: number;
+	elapsed_sec: number;
+	partial_text: string;
+	next_user_text: string | null;
+	gap_sec: number | null;
+	heuristic_label: "user_rephrased" | "course_correction" | "abandoned" | "unknown";
+};
+
+/**
+ * A "turn" is one human message through to just before the next one (or
+ * session end). Session totals hide the pathology this exists to catch: one
+ * request costing many LLM round trips and tool calls to change two lines.
+ */
+type TurnStats = {
+	start_ts: string;
+	prompt: string;
+	llm_round_trips: number;
+	tool_calls: number;
+	exploration_before_first_mutation: number;
+	mutated: boolean;
+	wall_sec: number;
+	cost: number;
+	aborted: boolean;
+};
+
+type TurnPercentiles = {
+	round_trips: number;
+	tool_calls: number;
+	exploration: number;
+	wall_sec: number;
+};
+
+/** Top-5-across-the-corpus shape; cost is included because the --md table needs it. */
+type TurnCorpusEntry = {
+	session_id: string;
+	project: string;
+	prompt: string;
+	llm_round_trips: number;
+	tool_calls: number;
+	exploration_before_first_mutation: number;
+	wall_sec: number;
+	cost: number;
+};
+
 type SessionMeta = {
 	session_id: string;
 	session_path: string;
@@ -294,6 +345,35 @@ type SessionMeta = {
 	median_ttft_ms: number;
 	median_response_ms: number;
 	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number }>;
+	// ── friction-signal additions (interruptions, errors, tool-not-found) ──
+	tool_calls_by_tool: Record<string, number>;
+	tool_errors_by_tool: Record<string, number>;
+	tool_not_found: Record<string, number>;
+	error_classes: Record<string, number>;
+	error_generations: number;
+	aborted_generations: number;
+	aborted_at_session_end: number;
+	ttsr_injections: number;
+	ttsr_rules: Record<string, number>;
+	reset_boundaries: number;
+	abort_events: AbortEvent[];
+	// ── per-turn aggregation (Gap 3) ──
+	// Only the percentiles and the worst 5 turns are persisted; the full
+	// per-turn list is a transient detail of extraction, not of the cache.
+	turn_count: number;
+	turn_p50: TurnPercentiles;
+	turn_p90: TurnPercentiles;
+	worst_turns: TurnStats[];
+	// ── per-tool wall-clock (Gap 4) ──
+	// Only percentiles are persisted; the raw per-call duration samples a
+	// session produced are a transient detail of extraction.
+	tool_duration_by_tool: Record<string, { calls: number; total_sec: number; p50_sec: number; p90_sec: number }>;
+	tool_time_share: Array<{ tool: string; total_sec: number; share: number }>;
+	// ── derived ratios (Gap 5) ──
+	cache_hit_ratio: number;
+	// Capped to the top 20 paths by edit count; feeds files_modified's .size
+	// today, but keeping the paths surfaces same-file rework.
+	edits_by_file: Record<string, number>;
 };
 
 type SessionFacets = {
@@ -309,6 +389,10 @@ type SessionFacets = {
 	primary_success: string;
 	brief_summary: string;
 	user_instructions_to_assistant?: string[];
+	abort_labels?: Array<{
+		ts: string;
+		label: "user_rephrased" | "agent_wrong_direction" | "agent_too_slow" | "abandoned";
+	}>;
 };
 
 type AggregatedData = {
@@ -387,6 +471,45 @@ type AggregatedData = {
 		reason: string;
 	}>;
 	estimated_waste: number;
+	// ── friction-signal additions (interruptions, errors, tool-not-found) ──
+	tool_calls_by_tool: Record<string, number>;
+	tool_errors_by_tool: Record<string, number>;
+	tool_not_found: Record<string, number>;
+	error_classes: Record<string, number>;
+	error_generations: number;
+	aborted_generations: number;
+	aborted_at_session_end: number;
+	ttsr_injections: number;
+	ttsr_rules: Record<string, number>;
+	reset_boundaries: number;
+	interruption_rate: number;
+	tool_error_rate_table: Array<{ tool: string; calls: number; errors: number; rate: number }>;
+	abort_labels: Record<string, number>;
+	// ── per-turn aggregation (Gap 3) ──
+	// Pooled approximation: only per-session percentiles are persisted, not
+	// every turn, so the corpus p50/p90 is a weighted median of per-session
+	// p50/p90 values (weighted by each session's turn_count), not the true
+	// percentile over every individual turn.
+	total_turns: number;
+	turn_p50: TurnPercentiles;
+	turn_p90: TurnPercentiles;
+	worst_turns_corpus: TurnCorpusEntry[];
+	// ── per-tool wall-clock (Gap 4) ──
+	// calls/total_sec are exact sums; p50_sec/p90_sec are a pooled
+	// approximation, same weighted-median-of-per-session-percentiles
+	// pattern as turn_p50/turn_p90 above (weighted by each session's calls
+	// for that tool), not a true recomputation over every individual call.
+	tool_duration_by_tool: Record<string, { calls: number; total_sec: number; p50_sec: number; p90_sec: number }>;
+	tool_time_share: Array<{ tool: string; total_sec: number; share: number }>;
+	// ── derived ratios (Gap 5) ──
+	// Token-weighted: recomputed from the already-summed totals, not an
+	// average of per-session ratios.
+	cache_hit_ratio: number;
+	worst_cache_sessions: Array<{ session_id: string; project: string; ratio: number; tokens: number; cost: number }>;
+	// Pooled from each session's own top-20-by-count edits_by_file, so this
+	// can miss a file that is individually common but never in any single
+	// session's top 20 - same approximation class as worst_turns_corpus.
+	most_churned_files: Array<{ path: string; edits: number; sessions: number }>;
 };
 
 type UserContext = {
@@ -444,6 +567,16 @@ async function ensureDirs(): Promise<void> {
 	await mkdir(SECTIONS_DIR, { recursive: true });
 }
 
+// Cache entries predating the friction-signal / per-turn / per-tool-wall-clock
+// / cache-ratio fields (schema v1) carry none of them. Backfilling those
+// fields to 0/{} on load silently hid real signal for the entire
+// pre-existing corpus: every session whose log had not changed since it was
+// last cached kept reporting zero aborts, zero errors, zero turns, forever,
+// because the cache hit and the backfill made the miss invisible. A schema
+// version is the correct fix; bump it whenever SessionMeta gains a field
+// that must not read as a false zero.
+const META_SCHEMA_VERSION = 2;
+
 async function loadCachedMeta(
 	sourceName: string,
 	sessionId: string,
@@ -451,20 +584,22 @@ async function loadCachedMeta(
 ): Promise<SessionMeta | null> {
 	try {
 		const raw = await readFile(join(META_DIR, `${sourceName}-${sessionId}.json`), "utf-8");
-		const meta = JSON.parse(raw) as SessionMeta;
+		const parsed = JSON.parse(raw) as SessionMeta & { _schema_version?: number };
+		if (parsed._schema_version !== META_SCHEMA_VERSION) return null;
 		// A log that has grown since the entry was written must be re-read, or
 		// the report's totals stop matching the logs they claim to summarise.
-		if (meta.log_signature !== signature) return null;
-		return meta;
+		if (parsed.log_signature !== signature) return null;
+		return parsed;
 	} catch {
 		return null;
 	}
 }
 
 async function saveMeta(sourceName: string, meta: SessionMeta): Promise<void> {
+	const withVersion = { ...meta, _schema_version: META_SCHEMA_VERSION };
 	await writeFile(
 		join(META_DIR, `${sourceName}-${meta.session_id}.json`),
-		JSON.stringify(meta, null, 2),
+		JSON.stringify(withVersion, null, 2),
 		{ encoding: "utf-8", mode: 0o600 },
 	);
 }
@@ -1351,6 +1486,27 @@ function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMeta {
 		median_response_ms: 0,
 		cost_recorded: stats.costAvailable,
 		model_usage: stats.modelUsage,
+		// Claude Code's transcripts have no stopReason/ttsr_injection/reset_boundary
+		// concepts; these friction signals are omp-only and read as absent, not zero.
+		tool_calls_by_tool: {},
+		tool_errors_by_tool: {},
+		tool_not_found: {},
+		error_classes: {},
+		error_generations: 0,
+		aborted_generations: 0,
+		aborted_at_session_end: 0,
+		ttsr_injections: 0,
+		ttsr_rules: {},
+		reset_boundaries: 0,
+		abort_events: [],
+		turn_count: 0,
+		turn_p50: { round_trips: 0, tool_calls: 0, exploration: 0, wall_sec: 0 },
+		turn_p90: { round_trips: 0, tool_calls: 0, exploration: 0, wall_sec: 0 },
+		worst_turns: [],
+		tool_duration_by_tool: {},
+		tool_time_share: [],
+		cache_hit_ratio: 0,
+		edits_by_file: {},
 	};
 }
 
@@ -1592,6 +1748,63 @@ function toolErrorCategory(toolName: string): string {
 	return TOOL_ERROR_FAMILY[toolName] ?? `${displayLabel(toolName)} Failed`;
 }
 
+/**
+ * The model sometimes invents a tool name instead of using a real one
+ * ("xd_retain" instead of `write` to `xd://retain`); the harness's reply is
+ * always this fixed shape. These are a distinct failure mode (wrong name,
+ * not a broken tool) and are kept out of every real tool's error rate.
+ */
+const TOOL_NOT_FOUND_RE = /^Tool (\S+) not found/;
+
+// Gap 3 (per-turn): fixed classification lists, checked by membership only.
+const EXPLORATION_TOOLS: readonly string[] = ["read", "grep", "glob", "find", "task", "hub", "ls"];
+const MUTATION_TOOLS: readonly string[] = ["edit", "write", "ast_edit", "notebook_edit"];
+
+/** Classifies a stopReason:"error" assistant turn from the provider's own message. */
+function classifyErrorMessage(text: string): string {
+	if (/429|rate_limit/i.test(text)) return "rate_limit";
+	if (/quota/i.test(text)) return "quota";
+	if (/401|api key|invalidated|unauthori[sz]ed/i.test(text)) return "auth";
+	return "other";
+}
+
+/** Lowercase word-token Jaccard overlap, used to tell a rephrase from a new ask. */
+function jaccardOverlap(a: string, b: string): number {
+	const ta = new Set(a.toLowerCase().match(/\w+/g) ?? []);
+	const tb = new Set(b.toLowerCase().match(/\w+/g) ?? []);
+	if (!ta.size && !tb.size) return 0;
+	let inter = 0;
+	for (const t of ta) if (tb.has(t)) inter++;
+	const union = new Set([...ta, ...tb]).size;
+	return union > 0 ? inter / union : 0;
+}
+
+const ABORT_COURSE_CORRECTION_RE = /^(no|nope|wait|stop|not that|instead|actually|hold on)\b/i;
+
+/**
+ * Aborts cannot be labelled with certainty from structure alone; this is a
+ * first-pass guess that the facet LLM pass can later override per event.
+ */
+function computeAbortHeuristicLabel(
+	prevHumanText: string,
+	nextUserText: string | null,
+	toolCallsBeforeAbort: number,
+	gapSec: number | null,
+): AbortEvent["heuristic_label"] {
+	if (nextUserText && ABORT_COURSE_CORRECTION_RE.test(nextUserText.trim()))
+		return "course_correction";
+	if (
+		toolCallsBeforeAbort === 0 &&
+		gapSec !== null &&
+		gapSec < 60 &&
+		nextUserText &&
+		jaccardOverlap(prevHumanText, nextUserText) >= 0.5
+	)
+		return "user_rephrased";
+	if (gapSec === null || gapSec > 300) return "abandoned";
+	return "unknown";
+}
+
 type SidecarUsage = {
 	totals: UsageRecord;
 	utility_cost: number;
@@ -1654,6 +1867,62 @@ function extractSessionStats(entries: AnyEntry[]) {
 	const responseDurations: number[] = [];
 	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 	const modelUsage: ModelUsageMap = {};
+	const toolCallsByTool: Record<string, number> = {};
+	const toolErrorsByTool: Record<string, number> = {};
+	const toolNotFoundByTool: Record<string, number> = {};
+	// Pre-seeded so every class reads as 0 rather than undefined when absent.
+	const errorClasses: Record<string, number> = { rate_limit: 0, quota: 0, auth: 0, other: 0 };
+	const ttsrRules: Record<string, number> = {};
+	const abortEvents: AbortEvent[] = [];
+	const pendingAborts: Array<{ event: AbortEvent; prevHumanText: string }> = [];
+	const turns: TurnStats[] = [];
+	let turnStartTs: number | null = null;
+	let turnPrompt = "";
+	let turnRoundTrips = 0;
+	let turnToolResultCount = 0;
+	let turnExplorationBeforeMutation = 0;
+	let turnMutated = false;
+	let turnCost = 0;
+	let turnLastAssistantCompletedAt: number | null = null;
+	let turnLastAssistantEntryTs: number | null = null;
+	let turnLastAssistantAborted = false;
+	let turnLastToolResultTs: number | null = null;
+	const editsByFile: Record<string, number> = {};
+	// toolCallId -> startedAt(ms); paired against the matching toolResult to
+	// get per-tool wall-clock. `intent` is read-only-to-caveat: it goes
+	// empty after tools.intentTracing was disabled, so it is deliberately
+	// never stored here.
+	const toolCallStarts = new Map<string, { toolName: string; startedAtMs: number }>();
+	const toolDurationSamples: Record<string, number[]> = {};
+
+	/**
+	 * Ends the in-progress turn (if any) and records it. Preference order for
+	 * the turn's end time: the last assistant message's `completedAt`, then
+	 * that same message's envelope timestamp (completedAt is absent on
+	 * roughly a fifth of assistant rows), then the last toolResult's
+	 * timestamp if the turn had no assistant message at all.
+	 */
+	function finalizeCurrentTurn(): void {
+		if (turnStartTs === null) return;
+		let endTs: number | null = null;
+		if (turnLastAssistantEntryTs !== null) {
+			endTs = turnLastAssistantCompletedAt !== null ? turnLastAssistantCompletedAt : turnLastAssistantEntryTs;
+		} else if (turnLastToolResultTs !== null) {
+			endTs = turnLastToolResultTs;
+		}
+		const wallSec = endTs !== null ? Math.max(0, (endTs - turnStartTs) / 1000) : 0;
+		turns.push({
+			start_ts: new Date(turnStartTs).toISOString(),
+			prompt: turnPrompt,
+			llm_round_trips: turnRoundTrips,
+			tool_calls: turnToolResultCount,
+			exploration_before_first_mutation: turnExplorationBeforeMutation,
+			mutated: turnMutated,
+			wall_sec: wallSec,
+			cost: turnCost,
+			aborted: turnLastAssistantAborted,
+		});
+	}
 
 	let sessionId = "";
 	let sessionStart = "";
@@ -1675,6 +1944,14 @@ function extractSessionStats(entries: AnyEntry[]) {
 	let compactions = 0;
 	let firstPrompt = "";
 	let lastAssistantTs: number | null = null;
+	let errorGenerations = 0;
+	let abortedGenerations = 0;
+	let ttsrInjections = 0;
+	let resetBoundaries = 0;
+	let turnToolCalls = 0;
+	let lastHumanText = "";
+	let lastHumanTs: number | null = null;
+	let lastMessageIsAbortedAssistant = false;
 
 	// Deduplicate tool call IDs to avoid double-counting branched entries
 	const seenToolCallIds = new Set<string>();
@@ -1704,6 +1981,32 @@ function extractSessionStats(entries: AnyEntry[]) {
 			compactions++;
 			continue;
 		}
+		if (entry.type === "ttsr_injection") {
+			ttsrInjections++;
+			const rules = Array.isArray(entry.injectedRules) ? (entry.injectedRules as unknown[]) : [];
+			for (const r of rules) if (typeof r === "string" && r) ttsrRules[r] = (ttsrRules[r] ?? 0) + 1;
+			continue;
+		}
+		if (entry.type === "reset_boundary") {
+			resetBoundaries++;
+			continue;
+		}
+		if (entry.type === "custom" && entry.customType === "tool_execution_start") {
+			const data = entry.data as Record<string, unknown> | undefined;
+			const toolCallId = typeof data?.toolCallId === "string" ? data.toolCallId : "";
+			const toolNameStart = typeof data?.toolName === "string" ? data.toolName : "";
+			const startedAtRaw = data?.startedAt;
+			const startedAtMs =
+				typeof startedAtRaw === "number"
+					? startedAtRaw
+					: typeof startedAtRaw === "string"
+						? Date.parse(startedAtRaw)
+						: Number.NaN;
+			if (toolCallId && toolNameStart && !Number.isNaN(startedAtMs)) {
+				toolCallStarts.set(toolCallId, { toolName: toolNameStart, startedAtMs });
+			}
+			continue;
+		}
 		if (entry.type === "model_usage") {
 			const usage = readUsage(entry.usage);
 			addUsage(totals, usage);
@@ -1724,15 +2027,54 @@ function extractSessionStats(entries: AnyEntry[]) {
 				: Number.isNaN(entryTs)
 					? null
 					: entryTs;
+		let thisEntryAborted = false;
 
 		// ── assistant message ──
 		if (msg.role === "assistant") {
 			assistantMessageCount++;
 			if (msgTs) lastAssistantTs = msgTs;
+			// omp records the provider stop reason on every assistant turn: an
+			// "aborted" generation is the strongest correction signal in the
+			// corpus (user killed it mid-flight); "error" is a provider failure.
+			const stopReason = typeof msg.stopReason === "string" ? msg.stopReason : "";
+			if (stopReason === "aborted") {
+				abortedGenerations++;
+				thisEntryAborted = true;
+				const abortTs = msgTs ?? (Number.isNaN(entryTs) ? null : entryTs);
+				const event: AbortEvent = {
+					ts: abortTs !== null ? new Date(abortTs).toISOString() : "",
+					tool_calls_before_abort: turnToolCalls,
+					elapsed_sec:
+						abortTs !== null && lastHumanTs !== null ? (abortTs - lastHumanTs) / 1000 : 0,
+					partial_text: extractTextFromContent(msg.content).trim().slice(0, 200),
+					next_user_text: null,
+					gap_sec: null,
+					heuristic_label: "unknown",
+				};
+				if (abortEvents.length < 10) {
+					abortEvents.push(event);
+					pendingAborts.push({ event, prevHumanText: lastHumanText });
+				}
+			} else if (stopReason === "error") {
+				errorGenerations++;
+				const errText =
+					typeof msg.errorMessage === "string" && msg.errorMessage
+						? msg.errorMessage
+						: extractTextFromContent(msg.content);
+				const cls = classifyErrorMessage(errText);
+				errorClasses[cls] = (errorClasses[cls] ?? 0) + 1;
+			}
 
 			const usage = readUsage(msg.usage);
 			addUsage(totals, usage);
 			accumulateModel(modelUsage, typeof msg.model === "string" ? msg.model : "unknown", usage);
+			if (turnStartTs !== null) {
+				turnRoundTrips++;
+				turnCost += usage.cost;
+				turnLastAssistantAborted = stopReason === "aborted";
+				turnLastAssistantCompletedAt = typeof msg.completedAt === "number" ? msg.completedAt : null;
+				turnLastAssistantEntryTs = !Number.isNaN(entryTs) ? entryTs : (msgTs ?? turnLastAssistantEntryTs);
+			}
 
 			if (typeof msg.ttft === "number" && msg.ttft > 0) ttfts.push(msg.ttft);
 			if (typeof msg.duration === "number" && msg.duration > 0)
@@ -1748,6 +2090,7 @@ function extractSessionStats(entries: AnyEntry[]) {
 
 					if (seenToolCallIds.has(toolId)) continue;
 					seenToolCallIds.add(toolId);
+					turnToolCalls++;
 
 					const args = (block.arguments as Record<string, unknown>) ?? {};
 					const filePath = typeof args.path === "string" ? args.path : "";
@@ -1777,6 +2120,7 @@ function extractSessionStats(entries: AnyEntry[]) {
 
 					if (toolName === "write" && filePath) {
 						filesModified.add(filePath);
+						editsByFile[filePath] = (editsByFile[filePath] ?? 0) + 1;
 						linesAdded += countNewlines((args.content as string) ?? "") + 1;
 					}
 
@@ -1790,6 +2134,7 @@ function extractSessionStats(entries: AnyEntry[]) {
 							if (section) {
 								const path = section[1]!;
 								filesModified.add(path);
+								editsByFile[path] = (editsByFile[path] ?? 0) + 1;
 								const lang = getLanguageFromPath(path);
 								if (lang) languages[lang] = (languages[lang] ?? 0) + 1;
 								continue;
@@ -1823,6 +2168,42 @@ function extractSessionStats(entries: AnyEntry[]) {
 			// omp flags interruptions structurally: `steering` is set when the
 			// user typed while the agent was still working.
 			if (msg.steering) steeringMessages++;
+			// Resolve any abort(s) still waiting on "what did the user say next".
+			if (pendingAborts.length) {
+				const nextText = text.trim().slice(0, 200);
+				for (const pending of pendingAborts) {
+					pending.event.next_user_text = nextText;
+					const abortTsMs = Date.parse(pending.event.ts);
+					const gapSec =
+						msgTs !== null && !Number.isNaN(abortTsMs) ? (msgTs - abortTsMs) / 1000 : null;
+					pending.event.gap_sec = gapSec;
+					pending.event.heuristic_label = computeAbortHeuristicLabel(
+						pending.prevHumanText,
+						nextText,
+						pending.event.tool_calls_before_abort,
+						gapSec,
+					);
+				}
+				pendingAborts.length = 0;
+			}
+			turnToolCalls = 0;
+			lastHumanText = text;
+			lastHumanTs = msgTs;
+			// Gap 3: a turn runs from one human message up to (not including) the next.
+			if (msgTs) {
+				finalizeCurrentTurn();
+				turnStartTs = msgTs;
+				turnPrompt = text.trim().slice(0, 120);
+				turnRoundTrips = 0;
+				turnToolResultCount = 0;
+				turnExplorationBeforeMutation = 0;
+				turnMutated = false;
+				turnCost = 0;
+				turnLastAssistantCompletedAt = null;
+				turnLastAssistantEntryTs = null;
+				turnLastAssistantAborted = false;
+				turnLastToolResultTs = null;
+			}
 
 			if (msgTs) {
 				const d = new Date(msgTs);
@@ -1837,11 +2218,68 @@ function extractSessionStats(entries: AnyEntry[]) {
 		}
 
 		// ── tool result ──
-		if (msg.role === "toolResult" && msg.isError === true) {
-			toolErrors++;
-			const cat = toolErrorCategory((msg.toolName as string) ?? "");
-			toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
+		// Denominator and error counts both come from toolResult messages, not
+		// the assistant's toolCall blocks (which `toolCounts` uses and which
+		// rewrites xd:// writes to a device key); the two must not be mixed.
+		if (msg.role === "toolResult") {
+			const toolNameRaw = typeof msg.toolName === "string" ? msg.toolName : "";
+			const toolKey = toolNameRaw.trim() || "unknown";
+			const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : "";
+			if (toolCallId) {
+				const start = toolCallStarts.get(toolCallId);
+				if (start) {
+					const resultTsForDuration = msgTs ?? (Number.isNaN(entryTs) ? null : entryTs);
+					if (resultTsForDuration !== null) {
+						const durationSec = Math.max(0, (resultTsForDuration - start.startedAtMs) / 1000);
+						const durationKey = start.toolName || toolKey;
+						(toolDurationSamples[durationKey] ??= []).push(durationSec);
+					}
+					toolCallStarts.delete(toolCallId);
+				}
+			}
+			if (turnStartTs !== null) {
+				turnToolResultCount++;
+				const resultTs = msgTs ?? (Number.isNaN(entryTs) ? null : entryTs);
+				if (resultTs !== null) turnLastToolResultTs = resultTs;
+				if (!turnMutated) {
+					const toolNameLower = toolNameRaw.trim().toLowerCase();
+					if (MUTATION_TOOLS.includes(toolNameLower)) turnMutated = true;
+					else if (EXPLORATION_TOOLS.includes(toolNameLower)) turnExplorationBeforeMutation++;
+				}
+			}
+			if (msg.isError === true) {
+				const resultText = extractTextFromContent(msg.content).trim();
+				const notFoundMatch = resultText.match(TOOL_NOT_FOUND_RE);
+				if (notFoundMatch) {
+					// The model invented a tool name; the harness's reply names it in
+					// the text, which is authoritative over `toolName` (some replies
+					// carry a different/placeholder toolName for an unknown call).
+					const invented = notFoundMatch[1]!;
+					toolNotFoundByTool[invented] = (toolNotFoundByTool[invented] ?? 0) + 1;
+				} else {
+					toolCallsByTool[toolKey] = (toolCallsByTool[toolKey] ?? 0) + 1;
+					toolErrorsByTool[toolKey] = (toolErrorsByTool[toolKey] ?? 0) + 1;
+					toolErrors++;
+					const cat = toolErrorCategory(toolNameRaw);
+					toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
+				}
+			} else {
+				toolCallsByTool[toolKey] = (toolCallsByTool[toolKey] ?? 0) + 1;
+			}
 		}
+		lastMessageIsAbortedAssistant = thisEntryAborted;
+	}
+	finalizeCurrentTurn();
+
+	// Any abort never followed by another human message has no "next ask" to
+	// judge against; that absence of a gap is itself the "abandoned" signal.
+	for (const pending of pendingAborts) {
+		pending.event.heuristic_label = computeAbortHeuristicLabel(
+			pending.prevHumanText,
+			null,
+			pending.event.tool_calls_before_abort,
+			null,
+		);
 	}
 
 	return {
@@ -1875,6 +2313,20 @@ function extractSessionStats(entries: AnyEntry[]) {
 		compactions,
 		firstPrompt,
 		modelUsage,
+		tool_calls_by_tool: toolCallsByTool,
+		tool_errors_by_tool: toolErrorsByTool,
+		tool_not_found: toolNotFoundByTool,
+		error_classes: errorClasses,
+		error_generations: errorGenerations,
+		aborted_generations: abortedGenerations,
+		aborted_at_session_end: lastMessageIsAbortedAssistant ? 1 : 0,
+		ttsr_injections: ttsrInjections,
+		ttsr_rules: ttsrRules,
+		reset_boundaries: resetBoundaries,
+		abort_events: abortEvents,
+		turns,
+		edits_by_file: editsByFile,
+		tool_duration_samples: toolDurationSamples,
 	};
 }
 
@@ -1922,6 +2374,56 @@ function buildSessionMeta(
 			modelUsage[model]!.message_count += usage.message_count - 1;
 		}
 	}
+	// Percentiles and the worst 5 are persisted; the full per-turn list is not
+	// (mirrors how ttfts/responseDurations are reduced to medians below).
+	const turnRoundTrips = stats.turns.map((t) => t.llm_round_trips);
+	const turnToolCallCounts = stats.turns.map((t) => t.tool_calls);
+	const turnExploration = stats.turns.map((t) => t.exploration_before_first_mutation);
+	const turnWallSec = stats.turns.map((t) => t.wall_sec);
+	const turnP50: TurnPercentiles = {
+		round_trips: percentile(turnRoundTrips, 50),
+		tool_calls: percentile(turnToolCallCounts, 50),
+		exploration: percentile(turnExploration, 50),
+		wall_sec: percentile(turnWallSec, 50),
+	};
+	const turnP90: TurnPercentiles = {
+		round_trips: percentile(turnRoundTrips, 90),
+		tool_calls: percentile(turnToolCallCounts, 90),
+		exploration: percentile(turnExploration, 90),
+		wall_sec: percentile(turnWallSec, 90),
+	};
+	const worstTurns = [...stats.turns].sort((a, b) => b.tool_calls - a.tool_calls).slice(0, 5);
+
+	const toolDurationByTool: Record<string, { calls: number; total_sec: number; p50_sec: number; p90_sec: number }> = {};
+	for (const [tool, samples] of Object.entries(stats.tool_duration_samples)) {
+		toolDurationByTool[tool] = {
+			calls: samples.length,
+			total_sec: samples.reduce((a, b) => a + b, 0),
+			p50_sec: percentile(samples, 50),
+			p90_sec: percentile(samples, 90),
+		};
+	}
+	const toolDurationTotalSec = Object.values(toolDurationByTool).reduce((a, d) => a + d.total_sec, 0);
+	const toolTimeShare = Object.entries(toolDurationByTool)
+		.map(([tool, d]) => ({
+			tool,
+			total_sec: d.total_sec,
+			share: toolDurationTotalSec > 0 ? d.total_sec / toolDurationTotalSec : 0,
+		}))
+		.sort((a, b) => b.share - a.share);
+
+	const editsByFileCapped = Object.fromEntries(
+		Object.entries(stats.edits_by_file)
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 20),
+	);
+
+	// Primary-session-only (not sidecar-folded): this is about the resumed-
+	// stale-session tax on the main conversation, not advisor/subagent spend.
+	const cacheHitRatio =
+		stats.totals.input + stats.totals.cacheRead > 0
+			? stats.totals.cacheRead / (stats.totals.input + stats.totals.cacheRead)
+			: 0;
 
 	return {
 		session_id: stats.sessionId || ref.id,
@@ -1971,6 +2473,25 @@ function buildSessionMeta(
 		median_ttft_ms: median(stats.ttfts),
 		median_response_ms: median(stats.responseDurations),
 		model_usage: modelUsage,
+		tool_calls_by_tool: stats.tool_calls_by_tool,
+		tool_errors_by_tool: stats.tool_errors_by_tool,
+		tool_not_found: stats.tool_not_found,
+		error_classes: stats.error_classes,
+		error_generations: stats.error_generations,
+		aborted_generations: stats.aborted_generations,
+		aborted_at_session_end: stats.aborted_at_session_end,
+		ttsr_injections: stats.ttsr_injections,
+		ttsr_rules: stats.ttsr_rules,
+		reset_boundaries: stats.reset_boundaries,
+		abort_events: stats.abort_events,
+		turn_count: stats.turns.length,
+		turn_p50: turnP50,
+		turn_p90: turnP90,
+		worst_turns: worstTurns,
+		tool_duration_by_tool: toolDurationByTool,
+		tool_time_share: toolTimeShare,
+		cache_hit_ratio: cacheHitRatio,
+		edits_by_file: editsByFileCapped,
 	};
 }
 
@@ -2079,6 +2600,34 @@ function median(arr: number[]): number {
 	return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
+/** Nearest-rank percentile (p in [0,100]) over a full, unweighted sample. */
+function percentile(arr: number[], p: number): number {
+	if (!arr.length) return 0;
+	const sorted = [...arr].sort((a, b) => a - b);
+	const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+	return sorted[idx]!;
+}
+
+/**
+ * Weighted median: used to pool a per-session statistic (e.g. each session's
+ * own turn p50 or p90) into one corpus-level number, weighted by how many
+ * turns that session contributed. This is an approximation of the true
+ * percentile over every individual turn, not an exact recomputation.
+ */
+function weightedPercentile(pairs: Array<{ value: number; weight: number }>, p: number): number {
+	const filtered = pairs.filter((v) => v.weight > 0);
+	if (!filtered.length) return 0;
+	const sorted = [...filtered].sort((a, b) => a.value - b.value);
+	const totalWeight = sorted.reduce((s, v) => s + v.weight, 0);
+	const target = totalWeight * (p / 100);
+	let cumulative = 0;
+	for (const v of sorted) {
+		cumulative += v.weight;
+		if (cumulative >= target) return v.value;
+	}
+	return sorted[sorted.length - 1]!.value;
+}
+
 function mergeRecord(
 	target: Record<string, number>,
 	source: Record<string, number>,
@@ -2157,10 +2706,51 @@ function aggregateData(
 		model_usage: {},
 		model_efficiency: [],
 		estimated_waste: 0,
+		// ── friction-signal additions (interruptions, errors, tool-not-found) ──
+		tool_calls_by_tool: {},
+		tool_errors_by_tool: {},
+		tool_not_found: {},
+		error_classes: {},
+		error_generations: 0,
+		aborted_generations: 0,
+		aborted_at_session_end: 0,
+		ttsr_injections: 0,
+		ttsr_rules: {},
+		reset_boundaries: 0,
+		interruption_rate: 0,
+		tool_error_rate_table: [],
+		abort_labels: {},
+		total_turns: 0,
+		turn_p50: { round_trips: 0, tool_calls: 0, exploration: 0, wall_sec: 0 },
+		turn_p90: { round_trips: 0, tool_calls: 0, exploration: 0, wall_sec: 0 },
+		worst_turns_corpus: [],
+		tool_duration_by_tool: {},
+		tool_time_share: [],
+		cache_hit_ratio: 0,
+		worst_cache_sessions: [],
+		most_churned_files: [],
 	};
 
 	const dates: string[] = [];
 	const activeDays = new Set<string>();
+	const turnCorpusCandidates: TurnCorpusEntry[] = [];
+	const p50Pairs = {
+		round_trips: [] as Array<{ value: number; weight: number }>,
+		tool_calls: [] as Array<{ value: number; weight: number }>,
+		exploration: [] as Array<{ value: number; weight: number }>,
+		wall_sec: [] as Array<{ value: number; weight: number }>,
+	};
+	const p90Pairs = {
+		round_trips: [] as Array<{ value: number; weight: number }>,
+		tool_calls: [] as Array<{ value: number; weight: number }>,
+		exploration: [] as Array<{ value: number; weight: number }>,
+		wall_sec: [] as Array<{ value: number; weight: number }>,
+	};
+	const toolDurationAcc = new Map<
+		string,
+		{ calls: number; total_sec: number; p50Pairs: Array<{ value: number; weight: number }>; p90Pairs: Array<{ value: number; weight: number }> }
+	>();
+	const churnAcc = new Map<string, { edits: number; sessions: Set<string> }>();
 
 	// Decay weighting: half-life of 10 days for facet-derived charts
 	const latestTs = metas.reduce((max, m) => {
@@ -2215,6 +2805,61 @@ function aggregateData(
 		agg.total_model_switches += meta.model_switches;
 		agg.total_compactions += meta.compactions;
 		agg.total_steering += meta.steering_messages;
+		mergeRecord(agg.tool_calls_by_tool, meta.tool_calls_by_tool);
+		mergeRecord(agg.tool_errors_by_tool, meta.tool_errors_by_tool);
+		mergeRecord(agg.tool_not_found, meta.tool_not_found);
+		mergeRecord(agg.error_classes, meta.error_classes);
+		mergeRecord(agg.ttsr_rules, meta.ttsr_rules);
+		agg.error_generations += meta.error_generations;
+		agg.aborted_generations += meta.aborted_generations;
+		agg.aborted_at_session_end += meta.aborted_at_session_end;
+		agg.ttsr_injections += meta.ttsr_injections;
+		agg.reset_boundaries += meta.reset_boundaries;
+		agg.total_turns += meta.turn_count;
+		if (meta.turn_count > 0) {
+			const w = meta.turn_count;
+			p50Pairs.round_trips.push({ value: meta.turn_p50.round_trips, weight: w });
+			p50Pairs.tool_calls.push({ value: meta.turn_p50.tool_calls, weight: w });
+			p50Pairs.exploration.push({ value: meta.turn_p50.exploration, weight: w });
+			p50Pairs.wall_sec.push({ value: meta.turn_p50.wall_sec, weight: w });
+			p90Pairs.round_trips.push({ value: meta.turn_p90.round_trips, weight: w });
+			p90Pairs.tool_calls.push({ value: meta.turn_p90.tool_calls, weight: w });
+			p90Pairs.exploration.push({ value: meta.turn_p90.exploration, weight: w });
+			p90Pairs.wall_sec.push({ value: meta.turn_p90.wall_sec, weight: w });
+		}
+		const project = meta.project_path.replace(/.*\//, "") || meta.project_path;
+		for (const t of meta.worst_turns) {
+			turnCorpusCandidates.push({
+				session_id: meta.session_id,
+				project,
+				prompt: t.prompt,
+				llm_round_trips: t.llm_round_trips,
+				tool_calls: t.tool_calls,
+				exploration_before_first_mutation: t.exploration_before_first_mutation,
+				wall_sec: t.wall_sec,
+				cost: t.cost,
+			});
+		}
+		for (const [tool, d] of Object.entries(meta.tool_duration_by_tool)) {
+			let acc = toolDurationAcc.get(tool);
+			if (!acc) {
+				acc = { calls: 0, total_sec: 0, p50Pairs: [], p90Pairs: [] };
+				toolDurationAcc.set(tool, acc);
+			}
+			acc.calls += d.calls;
+			acc.total_sec += d.total_sec;
+			acc.p50Pairs.push({ value: d.p50_sec, weight: d.calls });
+			acc.p90Pairs.push({ value: d.p90_sec, weight: d.calls });
+		}
+		for (const [path, count] of Object.entries(meta.edits_by_file)) {
+			let churn = churnAcc.get(path);
+			if (!churn) {
+				churn = { edits: 0, sessions: new Set() };
+				churnAcc.set(path, churn);
+			}
+			churn.edits += count;
+			churn.sessions.add(meta.session_id);
+		}
 
 		// Aggregate per-model usage
 		for (const [model, usage] of Object.entries(meta.model_usage ?? {})) {
@@ -2237,6 +2882,13 @@ function aggregateData(
 		}
 
 		const facets = facetsMap.get(meta.session_id);
+		// Abort events have no reliable structural label; prefer the facet LLM's
+		// per-event judgment (matched by timestamp) over the cheap heuristic.
+		for (const ev of meta.abort_events) {
+			const llmLabel = facets?.abort_labels?.find((l) => l.ts === ev.ts)?.label;
+			const label = llmLabel || ev.heuristic_label;
+			agg.abort_labels[label] = (agg.abort_labels[label] ?? 0) + 1;
+		}
 		if (facets) {
 			agg.sessions_with_facets++;
 			const w = decayWeight(meta);
@@ -2270,6 +2922,77 @@ function aggregateData(
 		}
 	}
 
+	// Pooled approximation (see the AggregatedData comment): the weighted
+	// median of each session's own p50/p90, not a true recomputation over
+	// every individual turn.
+	agg.turn_p50 = {
+		round_trips: weightedPercentile(p50Pairs.round_trips, 50),
+		tool_calls: weightedPercentile(p50Pairs.tool_calls, 50),
+		exploration: weightedPercentile(p50Pairs.exploration, 50),
+		wall_sec: weightedPercentile(p50Pairs.wall_sec, 50),
+	};
+	agg.turn_p90 = {
+		round_trips: weightedPercentile(p90Pairs.round_trips, 50),
+		tool_calls: weightedPercentile(p90Pairs.tool_calls, 50),
+		exploration: weightedPercentile(p90Pairs.exploration, 50),
+		wall_sec: weightedPercentile(p90Pairs.wall_sec, 50),
+	};
+	agg.worst_turns_corpus = turnCorpusCandidates
+		.sort((a, b) => b.tool_calls - a.tool_calls)
+		.slice(0, 5);
+
+	// Same pooled-weighted-median approximation as turn_p50/p90 above, applied
+	// per tool name instead of to a fixed set of four metrics.
+	for (const [tool, acc] of toolDurationAcc) {
+		agg.tool_duration_by_tool[tool] = {
+			calls: acc.calls,
+			total_sec: acc.total_sec,
+			p50_sec: weightedPercentile(acc.p50Pairs, 50),
+			p90_sec: weightedPercentile(acc.p90Pairs, 50),
+		};
+	}
+	const totalToolSec = Object.values(agg.tool_duration_by_tool).reduce((a, d) => a + d.total_sec, 0);
+	agg.tool_time_share = Object.entries(agg.tool_duration_by_tool)
+		.map(([tool, d]) => ({
+			tool,
+			total_sec: d.total_sec,
+			share: totalToolSec > 0 ? d.total_sec / totalToolSec : 0,
+		}))
+		.sort((a, b) => b.share - a.share);
+
+	// Token-weighted: recomputed from the already-summed corpus totals (which
+	// include sidecar tokens), not an average of the per-session ratios
+	// (which are primary-session-only). Both are reasonable; mixing them
+	// here is a minor, documented approximation.
+	agg.cache_hit_ratio =
+		agg.total_input_tokens + agg.total_cache_read_tokens > 0
+			? agg.total_cache_read_tokens / (agg.total_input_tokens + agg.total_cache_read_tokens)
+			: 0;
+	agg.worst_cache_sessions = metas
+		.map((m) => {
+			const tokens = m.input_tokens + m.cache_read_tokens;
+			// Derived fresh from the always-reliable persisted token counts
+			// rather than trusting m.cache_hit_ratio: that field can be stale
+			// for metas assembled by overriding token counts without
+			// recomputing the derived ratio (as some test fixtures do), not
+			// just for pre-this-change cache entries.
+			return {
+				session_id: m.session_id,
+				project: m.project_path.replace(/.*\//, "") || m.project_path,
+				ratio: tokens > 0 ? m.cache_read_tokens / tokens : 0,
+				tokens,
+				cost: m.total_cost,
+			};
+		})
+		.filter((s) => s.tokens >= 50_000)
+		.sort((a, b) => a.ratio - b.ratio)
+		.slice(0, 5);
+
+	agg.most_churned_files = [...churnAcc.entries()]
+		.map(([path, v]) => ({ path, edits: v.edits, sessions: v.sessions.size }))
+		.sort((a, b) => b.edits - a.edits)
+		.slice(0, 10);
+
 	dates.sort();
 	agg.date_range = {
 		start: dates[0]?.slice(0, 10) ?? "",
@@ -2281,6 +3004,26 @@ function aggregateData(
 		? agg.user_response_times.reduce((a, b) => a + b, 0) /
 			agg.user_response_times.length
 		: 0;
+
+	// Interruption rate: aborted mid-flight or corrected via steering, per
+	// human message. A trailing abort with no next message (session just
+	// ended there) is excluded; there was no further request to interrupt.
+	agg.interruption_rate =
+		agg.total_messages > 0
+			? (agg.aborted_generations - agg.aborted_at_session_end + agg.total_steering) /
+				agg.total_messages
+			: 0;
+
+	// Per-tool error rate, excluding tool_not_found misfires from both sides
+	// of the ratio. Floored at 5 calls so a single unlucky call can't read as
+	// a 100% failure rate.
+	agg.tool_error_rate_table = Object.entries(agg.tool_calls_by_tool)
+		.map(([tool, calls]) => {
+			const errors = agg.tool_errors_by_tool[tool] ?? 0;
+			return { tool, calls, errors, rate: calls > 0 ? errors / calls : 0 };
+		})
+		.filter((r) => r.calls >= 5)
+		.sort((a, b) => b.rate - a.rate);
 
 	// Trim to caps
 	agg.session_summaries = agg.session_summaries.slice(-50);
@@ -2559,6 +3302,13 @@ CRITICAL GUIDELINES:
 
 5. If very short or just a warmup, use warmup_minimal for goal_category
 
+6. abort_labels: for each entry under ABORT EVENTS below (if any), judge from the transcript, the partial text and what the user said next whether the abort was:
+   - user_rephrased: the user was going to ask for something slightly different and just restarted
+   - agent_wrong_direction: the assistant was headed the wrong way and the user cut it off
+   - agent_too_slow: the assistant was on the right track but taking too long or too many steps
+   - abandoned: the user dropped the thread, no related follow-up
+   Echo back the exact "ts" string from the ABORT EVENTS list. Omit the field entirely (or use an empty array) if no ABORT EVENTS are listed.
+
 SESSION:
 `;
 
@@ -2593,11 +3343,30 @@ function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData, userC
 				model_switches: agg.total_model_switches,
 				compactions: agg.total_compactions,
 				steering_messages: agg.total_steering,
+				aborted_generations: agg.aborted_generations,
+				aborted_at_session_end: agg.aborted_at_session_end,
+				error_generations: agg.error_generations,
+				error_classes: agg.error_classes,
+				ttsr_injections: agg.ttsr_injections,
+				ttsr_rules: agg.ttsr_rules,
+				reset_boundaries: agg.reset_boundaries,
+				interruption_rate_pct: (agg.interruption_rate * 100).toFixed(1),
+				tool_not_found: agg.tool_not_found,
+				tool_error_rate_table: agg.tool_error_rate_table.slice(0, 10),
+				abort_labels: agg.abort_labels,
 				subagent_sessions: agg.sessions_using_subagent,
 				mcp_sessions: agg.sessions_using_mcp,
 				model_usage: agg.model_usage,
 				model_efficiency_flags: agg.model_efficiency.length,
 				estimated_waste_usd: agg.estimated_waste.toFixed(2),
+				total_turns: agg.total_turns,
+				turn_p50: agg.turn_p50,
+				turn_p90: agg.turn_p90,
+				worst_turns_corpus: agg.worst_turns_corpus,
+				tool_time_share: agg.tool_time_share.slice(0, 10),
+				cache_hit_ratio_pct: (agg.cache_hit_ratio * 100).toFixed(1),
+				worst_cache_sessions: agg.worst_cache_sessions,
+				most_churned_files: agg.most_churned_files,
 			},
 			null,
 			2,
@@ -2612,6 +3381,11 @@ ${agg.friction_details.map((d) => `- ${d}`).join("\n")}
 
 USER INSTRUCTIONS TO ASSISTANT:
 ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
+		`\n\nFRICTION SIGNALS:\nInterruption rate: ${(agg.interruption_rate * 100).toFixed(1)}% of human messages were aborted mid-flight or steered ((${agg.aborted_generations} aborted - ${agg.aborted_at_session_end} ended-at-session + ${agg.total_steering} steered) / ${agg.total_messages} human messages).\nAbort outcome labels: ${Object.entries(agg.abort_labels).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nProvider errors: ${agg.error_generations} total, by class: ${Object.entries(agg.error_classes).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nInvented tool names (never real tools, excluded from tool error rates): ${Object.entries(agg.tool_not_found).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nPer-tool error rate (>=5 calls, worst first): ${agg.tool_error_rate_table.slice(0, 8).map(r => `${r.tool} ${(r.rate * 100).toFixed(0)}% (${r.errors}/${r.calls})`).join(", ") || "none"}\nTTSR rule injections (harness caught a bad generation and injected a rule): ${agg.ttsr_injections} total, rules: ${Object.entries(agg.ttsr_rules).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nContext reset boundaries (a path was abandoned and context rewound): ${agg.reset_boundaries}` +
+		`\n\nPER-TURN PATHOLOGY (a turn = one human message to the next; the expensive failure mode is one request costing many LLM round trips and tool calls):\n${agg.total_turns} turns across ${agg.total_sessions} sessions. p50: ${agg.turn_p50.round_trips} round trips, ${agg.turn_p50.tool_calls} tool calls, ${agg.turn_p50.exploration} exploration calls before first edit, ${agg.turn_p50.wall_sec.toFixed(0)}s wall clock. p90: ${agg.turn_p90.round_trips} round trips, ${agg.turn_p90.tool_calls} tool calls, ${agg.turn_p90.exploration} exploration calls, ${agg.turn_p90.wall_sec.toFixed(0)}s wall clock.\nWorst turns across the corpus (name these specifically): ${agg.worst_turns_corpus.map(t => `"${t.prompt}" (${t.project}): ${t.llm_round_trips} round trips, ${t.tool_calls} tool calls, ${t.exploration_before_first_mutation} exploration-before-edit, ${t.wall_sec.toFixed(0)}s, $${t.cost.toFixed(2)}`).join("; ") || "none"}` +
+		`\n\nPER-TOOL WALL CLOCK (startedAt paired with the matching toolResult by toolCallId; "intent" is absent for sessions after 2026-10-07 since tools.intentTracing was disabled, so it is never shown):\n${agg.tool_time_share.slice(0, 8).map(t => `${t.tool}: ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}` +
+		`\n\nCACHE EFFICIENCY:\nOverall cache hit ratio: ${(agg.cache_hit_ratio * 100).toFixed(1)}% (cacheRead / (input + cacheRead)). A low ratio on a large prompt is the resumed-stale-session tax: money and latency burned re-reading context.\nWorst sessions by ratio (>=50k input+cacheRead tokens): ${agg.worst_cache_sessions.map(s => `${s.project} (${s.tokens} tok, $${s.cost.toFixed(2)}): ${(s.ratio * 100).toFixed(1)}%`).join("; ") || "none"}` +
+		`\n\nEDIT CHURN (same file edited repeatedly across the corpus = the model did not understand it the first time):\n${agg.most_churned_files.map(f => `${f.path}: ${f.edits} edits across ${f.sessions} session(s)`).join("; ") || "none"}` +
 		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "What changed this week: " + temporal.diff_headlines.join("; ") : "No significant weekly changes."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
 	);
 }
@@ -2721,6 +3495,16 @@ TEMPORAL CONTEXT:
 - Resolved friction (no longer occurring): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none detected"}
 - Ongoing friction (still happening): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14 days)").join(", ") || "none detected"}
 
+FRICTION SIGNALS (from toolResult.isError and stopReason, not text heuristics):
+- Interruption rate: ${(agg.interruption_rate * 100).toFixed(1)}% of human messages were aborted mid-flight or steered. This is the single strongest "went wrong" signal in the corpus; lead with it if it is high.
+- Abort outcome labels: ${Object.entries(agg.abort_labels).map(([k, v]) => `${k}=${v}`).join(", ") || "none"} (user_rephrased/course_correction point at the assistant; abandoned/agent_* labels point at the task or model).
+- Provider errors (${agg.error_generations} total) by class: ${Object.entries(agg.error_classes).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}.
+- Invented tool names that always fail (excluded from per-tool rates below, but a real bug on their own): ${Object.entries(agg.tool_not_found).map(([k, v]) => `${k} (${v}x)`).join(", ") || "none"}.
+- Worst real per-tool error rates (>=5 calls): ${agg.tool_error_rate_table.slice(0, 5).map(r => `${r.tool} ${(r.rate * 100).toFixed(0)}% (${r.errors}/${r.calls})`).join(", ") || "none"}.
+- Per-turn pathology: p50 is ${agg.turn_p50.round_trips} round trips / ${agg.turn_p50.tool_calls} tool calls per request; p90 is ${agg.turn_p90.round_trips} round trips / ${agg.turn_p90.tool_calls} tool calls. The expensive failure mode is ONE request costing many LLM round trips and tool calls to make a small change; name the worst turns specifically (prompt + round trips + tool calls), don't just cite the percentile.
+- Per-tool wall clock (startedAt paired with the matching toolResult; "intent" is only available before 2026-10-07): ${agg.tool_time_share.slice(0, 5).map(t => `${t.tool} ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}. "The model is slow" and "the model is waiting on your test suite" are different findings; name the tool, not just the session.
+- Edit churn: files edited repeatedly across the corpus are a model that did not understand them the first time: ${agg.most_churned_files.slice(0, 5).map(f => `${f.path} (${f.edits}x across ${f.sessions} session(s))`).join(", ") || "none"}.
+
 Focus on ONGOING friction. Mention resolved items briefly as wins.
 
 RESPOND WITH ONLY A VALID JSON OBJECT:
@@ -2756,6 +3540,8 @@ CRITICAL: The user's existing setup is in the data below. DO NOT suggest:
 - Skills (including managed skills), extensions, hooks or MCP servers they already have installed
 - Fixes for "resolved friction" (listed in TEMPORAL CONTEXT)
 FOCUS on ongoing friction. Include at least one NEGATIVE suggestion (something to stop/remove).
+- A tool that fails near 100% of the time, or an invented tool name the model keeps calling, is exactly the class of finding this section exists to surface: check the per-tool error rate table and invented-tool-name list in the data below before writing stop_doing.
+- A turn costing many round trips and tool calls to change little (see worst_turns_corpus in the data) is the other class of finding this section exists to surface: over-exploration before an edit, repeated failed attempts, or a model that should have asked instead of guessing.
 Tailor copyable prompts to their actual model (${userCtx.default_model || "unknown"}) and projects.
 
 RESPOND WITH ONLY A VALID JSON OBJECT:
@@ -2846,6 +3632,7 @@ IMPORTANT CONTEXT:
   * Anthropic: Opus uses more quota than Sonnet or Haiku
 - For subscription models: suggest using lighter models within the same plan for trivial tasks, reserving the heavy model for complex work.
 - For PAYG models: optimize for dollar cost as usual.
+- Cache hit ratio (cacheRead / (input + cacheRead)) is ${(agg.cache_hit_ratio * 100).toFixed(1)}% overall. A low ratio on a large prompt is the resumed-stale-session tax: the context gets re-read from scratch instead of hitting cache, burning both money and latency. Worst sessions by ratio: ${agg.worst_cache_sessions.map(s => `${s.project} (${s.tokens} tok): ${(s.ratio * 100).toFixed(1)}%`).join(", ") || "none"}.
 
 The user's models from their sessions (derived from actual usage data):
 ${modelLines}
@@ -2857,7 +3644,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "underspend_pattern": "1-2 sentences about when weaker models fail on complex tasks, or empty string if none",
   "quota_pressure": "1-2 sentences about subscription quota being burned by heavy models on trivial tasks. Suggest lighter models within the same subscription, or offloading to cheap PAYG. Empty string if no subscription models detected or if they're already using light subscription models.",
   "recommendation": "1-2 sentences with a specific model selection strategy. Reference the user's actual models by name. For subscriptions: use light models for simple tasks, reserve heavy ones for complex work. For PAYG: match tier to task complexity.",
-  "potential_savings_note": "1 sentence about realistic savings. If most usage is subscription, frame as 'quota preservation' or 'extending your monthly budget' rather than dollar savings."
+  "potential_savings_note": "1 sentence about realistic savings. If most usage is subscription, frame as 'quota preservation' or 'extending your monthly budget' rather than dollar savings.",
+  "cache_efficiency_note": "1 sentence about cache hit ratio: either reassuring if high, or naming the specific worst session(s) if a low ratio is burning money/latency on stale-context re-reads. Empty string if ratio is healthy and no session stands out."
 }
 
 DATA:
@@ -3100,6 +3888,61 @@ function generateMarkdown(
 	lines.push(`| Parallel Sessions | ${agg.concurrent_sessions.overlap_events} overlap events across ${agg.concurrent_sessions.sessions_involved} sessions |`);
 	lines.push("");
 
+	lines.push("## \u{1F6A6} Interruptions and Failures");
+	lines.push(`| Metric | Value |`);
+	lines.push(`|--------|-------|`);
+	lines.push(`| Interruption rate | ${(agg.interruption_rate * 100).toFixed(1)}% of human messages |`);
+	lines.push(`| Aborted generations | ${agg.aborted_generations} (${agg.aborted_at_session_end} ended the session there) |`);
+	lines.push(`| Steering messages | ${agg.total_steering} |`);
+	lines.push(`| Provider errors | ${agg.error_generations} |`);
+	lines.push(`| TTSR rule injections | ${agg.ttsr_injections} |`);
+	lines.push(`| Context reset boundaries | ${agg.reset_boundaries} |`);
+	lines.push("");
+	if (Object.keys(agg.abort_labels).length) {
+		lines.push("**Abort outcome labels** (facet LLM judgment per event where available, heuristic otherwise):");
+		for (const [label, count] of Object.entries(agg.abort_labels).sort((a, b) => b[1] - a[1]))
+			lines.push(`- ${label}: ${count}`);
+		lines.push("");
+	}
+	if (agg.error_generations > 0) {
+		lines.push("**Provider errors by class:**");
+		for (const [cls, count] of Object.entries(agg.error_classes).filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1]))
+			lines.push(`- ${cls}: ${count}`);
+		lines.push("");
+	}
+	if (Object.keys(agg.ttsr_rules).length) {
+		lines.push("**Rules the harness had to inject mid-session** (it caught a bad generation and told the model to stop):");
+		for (const [rule, count] of Object.entries(agg.ttsr_rules).sort((a, b) => b[1] - a[1]))
+			lines.push(`- ${rule}: ${count}`);
+		lines.push("");
+	}
+	if (agg.most_churned_files.length) {
+		lines.push("**Most re-edited files** (the same file edited repeatedly across the corpus is a model that did not understand it the first time):");
+		lines.push(`| Path | Edits | Sessions |`);
+		lines.push(`|------|-------|----------|`);
+		for (const f of agg.most_churned_files)
+			lines.push(`| ${f.path} | ${f.edits} | ${f.sessions} |`);
+		lines.push("");
+	}
+
+	if (agg.total_turns > 0) {
+		lines.push("## \u{1F501} Worst Turns");
+		lines.push(`A turn is one human message up to the next. ${agg.total_turns} turns across ${agg.total_sessions} sessions.`);
+		lines.push("");
+		lines.push(`| Prompt | Round Trips | Tool Calls | Exploration-before-edit | Wall Clock | Cost |`);
+		lines.push(`|--------|-------------|------------|--------------------------|------------|------|`);
+		for (const t of agg.worst_turns_corpus) {
+			lines.push(
+				`| ${t.prompt.replace(/\|/g, "\\|")} | ${t.llm_round_trips} | ${t.tool_calls} | ${t.exploration_before_first_mutation} | ${t.wall_sec.toFixed(0)}s | $${t.cost.toFixed(2)} |`,
+			);
+		}
+		lines.push("");
+		lines.push(
+			`p50: ${agg.turn_p50.round_trips} round trips, ${agg.turn_p50.tool_calls} tool calls, ${agg.turn_p50.exploration} exploration calls, ${agg.turn_p50.wall_sec.toFixed(0)}s | p90: ${agg.turn_p90.round_trips} round trips, ${agg.turn_p90.tool_calls} tool calls, ${agg.turn_p90.exploration} exploration calls, ${agg.turn_p90.wall_sec.toFixed(0)}s`,
+		);
+		lines.push("");
+	}
+
 	// Cost attribution. Advisor and subagent logs are separate sessions with
 	// their own spend; omitting them undercounts badly, so they are folded
 	// into the total and shown separately.
@@ -3114,6 +3957,16 @@ function generateMarkdown(
 	lines.push("");
 	lines.push(`Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that total: $${agg.total_utility_cost.toFixed(2)}. ${agg.sessions_with_sidecars} of ${agg.total_sessions} sessions had at least one sidecar.`);
 	lines.push("");
+	lines.push(`**Cache efficiency:** ${(agg.cache_hit_ratio * 100).toFixed(1)}% overall hit ratio (cacheRead / (input + cacheRead)). A low ratio on a large prompt is the resumed-stale-session tax: context re-read from scratch instead of hitting cache, burning money and latency.`);
+	lines.push("");
+	if (agg.worst_cache_sessions.length) {
+		lines.push("**Worst sessions by cache hit ratio** (>=50k input+cacheRead tokens):");
+		lines.push(`| Project | Ratio | Tokens | Cost |`);
+		lines.push(`|---------|-------|--------|------|`);
+		for (const s of agg.worst_cache_sessions)
+			lines.push(`| ${s.project} | ${(s.ratio * 100).toFixed(1)}% | ${fmtTokens(s.tokens)} | $${s.cost.toFixed(2)} |`);
+		lines.push("");
+	}
 
 	lines.push("## \u{1F527} Tools");
 	lines.push(`| Tool | Calls |`);
@@ -3123,6 +3976,30 @@ function generateMarkdown(
 	if (Object.keys(agg.tool_error_categories).length) {
 		lines.push("**Failures by tool** (from `toolResult.isError`, not text matching):");
 		for (const [cat, count] of top8(agg.tool_error_categories)) lines.push(`- ${cat}: ${count}`);
+		lines.push("");
+	}
+	if (agg.tool_error_rate_table.length) {
+		lines.push("**Per-tool error rate** (>=5 calls, worst first; denominator is `toolResult` messages, not `toolCounts`):");
+		lines.push(`| Tool | Errors / Calls | Rate |`);
+		lines.push(`|------|-----------------|------|`);
+		for (const r of agg.tool_error_rate_table.slice(0, 10))
+			lines.push(`| ${r.tool} | ${r.errors} / ${r.calls} | ${(r.rate * 100).toFixed(1)}% |`);
+		lines.push("");
+	}
+	if (Object.keys(agg.tool_not_found).length) {
+		lines.push("**Invented tool names** (the model called a tool that does not exist; every call fails, kept out of the rate table above):");
+		for (const [name, count] of Object.entries(agg.tool_not_found).sort((a, b) => b[1] - a[1]))
+			lines.push(`- \`${name}\`: ${count} calls, 100% failed`);
+		lines.push("");
+	}
+	if (agg.tool_time_share.length) {
+		lines.push("**Per-tool wall clock** (`tool_execution_start` paired with the matching `toolResult` by `toolCallId`; `intent` is only recorded before 2026-10-07, when `tools.intentTracing` was disabled, so it is not shown):");
+		lines.push(`| Tool | Calls | p50 | p90 | Share of Tool Time |`);
+		lines.push(`|------|-------|-----|-----|--------------------|`);
+		for (const t of agg.tool_time_share.slice(0, 10)) {
+			const d = agg.tool_duration_by_tool[t.tool]!;
+			lines.push(`| ${t.tool} | ${d.calls} | ${d.p50_sec.toFixed(1)}s | ${d.p90_sec.toFixed(1)}s | ${(t.share * 100).toFixed(1)}% |`);
+		}
 		lines.push("");
 	}
 
@@ -4090,7 +4967,18 @@ async function runInsights(
 							transcript = `Session: ${meta.session_id.slice(0, 8)}\nDate: ${meta.start_time}\nProject: ${meta.project_path}\n[Long session - summarized]\n\n${summaries.join("\n\n---\n\n")}`;
 						}
 
-						const prompt = `${FACET_EXTRACT_PROMPT}${transcript}
+						const abortBlock = `\n\nABORT EVENTS (generations the user killed mid-flight; label each by its ts; empty list means none occurred):\n${
+							meta.abort_events.length
+								? meta.abort_events
+										.map(
+											(e) =>
+												`- ts=${e.ts} elapsed=${e.elapsed_sec.toFixed(0)}s tool_calls_before=${e.tool_calls_before_abort}\n  partial: ${e.partial_text || "(empty)"}\n  next_user_message: ${e.next_user_text ?? "(none, session ended here)"}`,
+										)
+										.join("\n")
+								: "(none)"
+						}`;
+
+						const prompt = `${FACET_EXTRACT_PROMPT}${transcript}${abortBlock}
 
 RESPOND WITH ONLY A VALID JSON OBJECT:
 {
@@ -4104,7 +4992,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "friction_detail": "one sentence or empty string",
   "primary_success": "none|fast_accurate_search|correct_code_edits|good_explanations|proactive_help|multi_file_changes|good_debugging",
   "brief_summary": "one sentence: what user wanted and whether they got it",
-  "user_instructions_to_assistant": ["instruction1", "instruction2"]
+  "user_instructions_to_assistant": ["instruction1", "instruction2"],
+  "abort_labels": [{"ts": "exact ts string from ABORT EVENTS above", "label": "user_rephrased|agent_wrong_direction|agent_too_slow|abandoned"}]
 }`;
 
 						const text = await callModel(prompt, { model: facetModel });

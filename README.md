@@ -86,6 +86,48 @@ path and fails with `Cannot find module`.
   `compaction`, `ttft`/`duration` (latency), `cacheRead`/`cacheWrite`.
 - **`xd://` writes are tool-device calls**, not file writes, so MCP and device
   usage is visible instead of hidden inside a `write` count.
+- **Per-turn and per-tool pathology.** Session totals hide the expensive
+  failure mode: one request costing many LLM round trips and tool calls to
+  change two lines. A per-turn pass (one human message to the next) and
+  `tool_execution_start`/`toolResult` pairing for per-tool wall clock surface
+  it; neither has a Pi equivalent.
+
+## Friction signals
+
+The report reads these session-log facts to answer "where does the model go
+wrong, get corrected, or work too long for too little":
+
+- `stopReason: "aborted"` on an assistant message (a generation the user
+  killed mid-flight) and `stopReason: "error"` with its `errorMessage`
+  classified into `rate_limit` / `quota` / `auth` / `other`.
+- `toolResult.isError`, and separately, the harness's own "Tool X not found"
+  replies (the model inventing a tool name that does not exist). Invented
+  names are kept out of every real tool's error rate rather than blamed on
+  whichever tool the model meant to call.
+- `type: "ttsr_injection"` (the harness caught a bad generation mid-session
+  and injected a rule) and `type: "reset_boundary"` (a path was abandoned
+  and context rewound).
+- `type: "custom", customType: "tool_execution_start"` paired with the
+  matching `toolResult` by `toolCallId`, for per-tool wall clock (p50/p90
+  and share of total tool time).
+- A per-turn pass over human messages: LLM round trips, tool calls,
+  exploration calls before the first edit, wall clock and cost per turn,
+  reported as p50/p90 plus the worst 5 turns per session and across the
+  corpus.
+- `cacheRead` / `input` per session (the resumed-stale-session tax: a low
+  ratio on a large prompt means money and latency burned re-reading
+  context), and a per-path edit count surfacing the same file edited
+  repeatedly across sessions.
+
+Two caveats:
+
+- `intent` on `tool_execution_start` is only recorded before 2026-10-07; omp
+  disabled `tools.intentTracing` that day, so sessions after it carry no
+  intent. The report never renders an intent column for this reason.
+- The Claude Code source (`--source claude`) has no `steering`,
+  `ttsr_injection`, `reset_boundary` or `tool_execution_start` equivalent, so
+  interruption rate, TTSR injections, reset boundaries and per-tool wall
+  clock all read `0` for that source rather than "unavailable."
 
 ## Verifying the numbers
 

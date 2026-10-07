@@ -3,7 +3,7 @@
 ## Goal
 
 Port `Observal/pi-insights` (a Pi coding-agent extension, AGPL-3.0) to the **omp**
-harness ("Oh My Pi", `omp/18.1.14`). Output: an omp extension exposing `/insights`
+harness ("Oh My Pi", `omp/18.8.0`). Output: an omp extension exposing `/insights`
 that scans local omp session logs and produces a self-contained HTML report plus a
 `--md` export.
 
@@ -212,4 +212,4 @@ not implement it now.
 - Upstream repo: https://github.com/Observal/pi-insights (AGPL-3.0)
 - Local upstream clone used for the baseline: `/tmp/pi-insights`
 - Corpus: `~/.omp/agent/sessions` (383 jsonl, 356 MB)
-- omp version: `omp/18.1.14`
+- omp version: `omp/18.8.0`

@@ -25,6 +25,16 @@
 | Median Reply Wait | 60s |
 | Parallel Sessions | 0 overlap events across 0 sessions |
 
+## 🚦 Interruptions and Failures
+| Metric | Value |
+|--------|-------|
+| Interruption rate | 11.8% of human messages |
+| Aborted generations | 0 (0 ended the session there) |
+| Steering messages | 2 |
+| Provider errors | 0 |
+| TTSR rule injections | 0 |
+| Context reset boundaries | 0 |
+
 ## 💰 Where the Money Went
 | Bucket | Cost | Share |
 |--------|------|-------|
@@ -34,6 +44,14 @@
 | **Total** | **$10.00** | 100% |
 
 Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that total: $0.50. 1 of 2 sessions had at least one sidecar.
+
+**Cache efficiency:** 95.2% overall hit ratio (cacheRead / (input + cacheRead)). A low ratio on a large prompt is the resumed-stale-session tax: context re-read from scratch instead of hitting cache, burning money and latency.
+
+**Worst sessions by cache hit ratio** (>=50k input+cacheRead tokens):
+| Project | Ratio | Tokens | Cost |
+|---------|-------|--------|------|
+| jar | 0.0% | 500k | $4.00 |
+| peach | 96.4% | 41.5M | $6.00 |
 
 ## 🔧 Tools
 | Tool | Calls |
