@@ -11,7 +11,7 @@ package identity that does not exist, since this targets a different harness.
 
 ## 0.1.0-rc.1 - 2026-10-08
 
-Internal test release (not published to npm). Install from git tag
+Release candidate (not yet published to npm). Install from git tag
 `v0.1.0-rc.1`; requires omp `>=18.8.4 <19`. First release of the omp port.
 The initial commit of this repository is upstream verbatim; every entry below
 is a diff against it.

@@ -345,7 +345,7 @@ export type UserContext = {
 	config_yml_flat: Record<string, string>;
 };
 
-/** What the scan itself saw — reported so the numbers can be audited. */
+/** What the scan itself saw - reported so the numbers can be audited. */
 export type ScanSummary = {
 	sessions_dir: string;
 	source: string;
@@ -360,7 +360,7 @@ export type ScanSummary = {
 	excluded_unparsed: number;
 	excluded_not_substantive: number;
 	excluded_by_since: number;
-	/** Sessions matching the tooling exclude list (this repo's own dev sessions by default). Still counted in `included` and every total — only excluded from analysis inputs (friction, worst turns, facets merged into section prompts, suggestion evidence); see excludeToolingSessions / aggregateData. */
+	/** Sessions matching the tooling exclude list (this repo's own dev sessions by default). Still counted in `included` and every total - only excluded from analysis inputs (friction, worst turns, facets merged into section prompts, suggestion evidence); see excludeToolingSessions / aggregateData. */
 	excluded_tooling: number;
 	/** Sessions whose facet extraction failed or returned nothing usable. */
 	facet_failures: number;

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Tobias Hoelzer (omp port)
+# SPDX-License-Identifier: AGPL-3.0-only
+
 #!/usr/bin/env bash
 # Reconcile the report's total cost against the session logs with jq.
 #
@@ -28,10 +31,14 @@ sizes_of() {
 	# the report are the bytes summed here; the recorded mtime is not compared
 	# because its sub-millisecond precision differs between stat and node.
 	local out
-	out="$(stat -f '%z' "$1")"
+	local size
+	# Portable file size: wc -c works everywhere
+	size=$(wc -c <"$1" | tr -d ' ')
+	out="$size"
 	shift
 	for sidecar in "$@"; do
-		out+="|$(stat -f '%z' "$sidecar")"
+		size=$(wc -c <"$sidecar" | tr -d ' ')
+		out+="|$size"
 	done
 	printf '%s' "$out"
 }

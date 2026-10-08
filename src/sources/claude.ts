@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readJsonl } from "./omp.ts";
 import type { DirEntry } from "./omp.ts";
-import { activityIntervals, countNewlines, extractSidecarUsage, getLanguageFromPath, isMetaSession, toolErrorCategory } from "../stats.ts";
+import { activityIntervals, countNewlines, extractSidecarUsage, getLanguageFromPath, isMetaSession, resolveSafeSessionId, toolErrorCategory } from "../stats.ts";
 import type {
 	AnyEntry,
 	AnyMessage,
@@ -27,14 +27,14 @@ import type {
 	UsageRecord,
 } from "../types.ts";
 
-// ~/.claude/projects/<slugified-cwd>/<session-uuid>.jsonl — one flat log per
+// ~/.claude/projects/<slugified-cwd>/<session-uuid>.jsonl - one flat log per
 // session, no sidecar directories: subagent turns are inline entries flagged
 // `isSidechain`.
 //
 // Differences that matter, all verified against the real corpus:
 // - Cost lives in periodic `cost-state` records (`totalCostUSD` plus per-model
 //   `costUSD`), not on each message. The last one wins. Only some sessions
-//   carry any, and a session without one has NO recorded cost — it is reported
+//   carry any, and a session without one has NO recorded cost - it is reported
 //   as unavailable rather than silently counted as $0, and never estimated
 //   from tokens, which is the workaround this port exists to avoid.
 // - One API response can be logged as several assistant entries sharing a
@@ -276,9 +276,10 @@ export function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMe
 	const stats = extractClaudeStats(entries);
 	const startTime = new Date(stats.firstTs || ref.created.getTime()).toISOString();
 	const endMs = stats.lastTs || ref.modified.getTime();
+	const sessionId = resolveSafeSessionId(stats.sessionId || undefined, ref.id);
 
 	return {
-		session_id: stats.sessionId || ref.id,
+		session_id: sessionId,
 		session_path: ref.path,
 		project_path: stats.projectPath || ref.project_path,
 		start_time: startTime,

@@ -31,7 +31,7 @@ export function unquoteYaml(v: string): string {
  *
  * Why not a real YAML parser: the port takes no new runtime dependencies
  * (node builtins only), and the only consumers here are `modelRoles` and
- * `retry.fallbackChains` — both plain string maps and string lists.
+ * `retry.fallbackChains` - both plain string maps and string lists.
  */
 export function parseSimpleYaml(text: string): YamlNode {
 	const root: YamlNode = {};

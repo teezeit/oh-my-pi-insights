@@ -9,6 +9,7 @@
 
 import { extname } from "node:path";
 import { median, percentile } from "./aggregate.ts";
+import { isSafeSessionId } from "./cache.ts";
 import type {
 	AbortEvent,
 	AnyEntry,
@@ -893,6 +894,20 @@ export function extractSessionStats(entries: AnyEntry[]) {
 	};
 }
 
+
+/**
+ * A session id comes straight from a log's `session` record, a field a
+ * crafted log fully controls. Fall back to the filename-derived ref id
+ * when the record's id is unsafe for a cache filename, and give up
+ * entirely (so the session is skipped and counted, not silently written
+ * somewhere unexpected) only when neither candidate is safe.
+ */
+export function resolveSafeSessionId(recordId: string | undefined, refId: string): string {
+	if (recordId && isSafeSessionId(recordId)) return recordId;
+	if (isSafeSessionId(refId)) return refId;
+	throw new Error(`unsafe session id: ${recordId ?? refId}`);
+}
+
 /**
  * Fold a session and its sidecars into one SessionMeta. Cost is attributed to
  * the parent and broken out per class, so a run's total can be reconciled
@@ -904,6 +919,7 @@ export function buildSessionMeta(
 	sidecars: Array<{ kind: SidecarKind; usage: SidecarUsage }>,
 ): SessionMeta {
 	const stats = extractSessionStats(entries);
+	const sessionId = resolveSafeSessionId(stats.sessionId, ref.id);
 
 	const startTime = stats.sessionStart || ref.created.toISOString();
 	const endMs = stats.lastEntryTs || ref.modified.getTime();
@@ -995,7 +1011,7 @@ export function buildSessionMeta(
 			: 0;
 
 	return {
-		session_id: stats.sessionId || ref.id,
+		session_id: sessionId,
 		session_path: ref.path,
 		project_path: stats.projectPath || ref.project_path,
 		start_time: startTime,

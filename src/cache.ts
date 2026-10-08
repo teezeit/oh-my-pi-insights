@@ -12,6 +12,17 @@ import { join } from "node:path";
 import type { SessionFacets, SessionMeta } from "./types.ts";
 
 /**
+ * Session ids are read verbatim from a log's `session` record, a field a
+ * crafted log fully controls. Every cache path below interpolates the id
+ * into a filename, so an id like "../../x" would write outside the cache
+ * dir if it ever reached these builders unchecked.
+ */
+export function isSafeSessionId(id: string): boolean {
+	if (id === "." || id === "..") return false;
+	return /^[A-Za-z0-9._-]{1,128}$/.test(id);
+}
+
+/**
  * omp's agent dir: `OMP_PROFILE`/`PI_PROFILE` select a named profile under
  * `~/.omp/profiles/<name>/agent`; the literal "default" (or no env set)
  * means the default profile, where `PI_CODING_AGENT_DIR` relocates the dir.
@@ -157,6 +168,9 @@ export async function loadCachedFacets(
 	sessionId: string,
 ): Promise<SessionFacets | null> {
 	try {
+		// Why: same traversal guard as loadCachedMeta; caught below as a
+		// cache miss.
+		if (!isSafeSessionId(sessionId)) throw new Error(`unsafe session id: ${sessionId}`);
 		const raw = await readFile(join(FACETS_DIR, `${sessionId}.json`), "utf-8");
 		const parsed = JSON.parse(raw) as SessionFacets;
 		// Basic schema check
@@ -169,6 +183,9 @@ export async function loadCachedFacets(
 }
 
 export async function saveFacets(facets: SessionFacets): Promise<void> {
+	// Why: never let an unsafe id reach a write path.
+	if (!isSafeSessionId(facets.session_id))
+		throw new Error(`unsafe session id: ${facets.session_id}`);
 	await writeFile(
 		join(FACETS_DIR, `${facets.session_id}.json`),
 		JSON.stringify(facets, null, 2),
@@ -178,6 +195,8 @@ export async function saveFacets(facets: SessionFacets): Promise<void> {
 
 export async function deleteCachedFacets(sessionId: string): Promise<void> {
 	try {
+		// Why: never let an unsafe id reach an unlink path either.
+		if (!isSafeSessionId(sessionId)) throw new Error(`unsafe session id: ${sessionId}`);
 		await unlink(join(FACETS_DIR, `${sessionId}.json`));
 	} catch {
 		/* ok */

@@ -111,7 +111,7 @@ function toolExecutionStart(
 const SESSION = {
 	type: "session",
 	version: 3,
-	id: "01a07af7-bbe1-77b4-9c0e-e1295ebb1e38",
+	id: "00000000-0000-7000-8000-000000000001",
 	timestamp: "2026-09-07T10:00:00.000Z",
 	cwd: "/Users/me/projects/webapp",
 };

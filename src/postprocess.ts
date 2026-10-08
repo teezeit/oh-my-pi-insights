@@ -14,8 +14,8 @@
 //   precedence order) keeps the full item; any later item sharing that id is
 //   collapsed to a one-line reference.
 // - dedupeRecommendations: a second, independent key for the four
-//   suggestions arrays — a normalized title (plus `where` for
-//   config_additions) — because the same recommendation can be phrased
+//   suggestions arrays - a normalized title (plus `where` for
+//   config_additions) - because the same recommendation can be phrased
 //   twice across categories (e.g. both a config_additions and a
 //   features_to_try entry) even when their evidence_sessions don't fully
 //   overlap.
@@ -162,7 +162,7 @@ export function truncateAtWord(text: string, maxWords: number): string {
 export type BudgetTarget = { section: string; arrayField?: string; field: string; maxWords: number; noEllipsis?: boolean };
 
 // Why 40 words: C13's summary-card budget. Workflow descriptions (what_works)
-// get the same numeric cap rather than a separate "2 sentences" code path —
+// get the same numeric cap rather than a separate "2 sentences" code path -
 // two real sentences of prose are rarely longer than 40 words, and a single
 // word-count budget keeps enforceBudget's contract uniform.
 export const DEFAULT_WORD_BUDGETS: BudgetTarget[] = [

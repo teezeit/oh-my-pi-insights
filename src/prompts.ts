@@ -193,37 +193,37 @@ export function buildFeaturesReference(ctx: UserContext): string {
 
 ${memoryFeatureBlock(ctx)}
 
-3. Hooks — executables under ~/.omp/agent/hooks/<event>/ (e.g. pre/) that run
+3. Hooks - executables under ~/.omp/agent/hooks/<event>/ (e.g. pre/) that run
    on tool lifecycle events and can block or annotate a call
    - Good for: format/type gates, permission gates, injecting scoped instructions
 
-4. Extensions — TypeScript modules in ~/.omp/agent/extensions/ that register
+4. Extensions - TypeScript modules in ~/.omp/agent/extensions/ that register
    commands, tools and widgets (this report is one)
    - Good for: custom commands, external integrations, bespoke UI
 
-5. Subagents (task tool) — background agents with their own context, batched in
+5. Subagents (task tool) - background agents with their own context, batched in
    one tasks[] array; typed agents (scout for read-only research, reviewer,
    sonic for mechanical edits); coordinate over hub messaging
    - Good for: parallel independent slices, unknown-code mapping, review passes
 
-6. xd:// tool devices — schema-driven tools invoked by writing JSON args
+6. xd:// tool devices - schema-driven tools invoked by writing JSON args
    (ast_edit for codemods, lsp for symbol-aware refactors, debug for DAP,
    github for gh ops, plus every mounted MCP tool)
    - Good for: structural rewrites, reference-safe renames, breakpoint debugging
 
-7. MCP servers — configured in ~/.omp/agent/mcp.json, mounted as xd:// devices
+7. MCP servers - configured in ~/.omp/agent/mcp.json, mounted as xd:// devices
    - Good for: Jira/Confluence, Outline, Sentry, Metabase, Postgres and similar
 
-8. Model roles and fallback chains — ~/.omp/agent/config.yml modelRoles
+8. Model roles and fallback chains - ~/.omp/agent/config.yml modelRoles
    (default, plan, task, smol, tiny, advisor) and retry.fallbackChains
    - Good for: routing cheap work to smol/tiny, pinning a stronger default,
      surviving provider rate limits
 
-9. Advisor — a second model reviewing the main loop, logged to a per-session
+9. Advisor - a second model reviewing the main loop, logged to a per-session
    __advisor.jsonl sidecar with its own cost
    - Good for: catching wrong turns early; costs real money, so worth toggling
 
-10. AGENTS.md — per-repo instruction files, plus scoped
+10. AGENTS.md - per-repo instruction files, plus scoped
    .agent/instructions/*.instructions.md with applyTo globs
    - Good for: team conventions and per-path rules the agent always follows`;
 }
@@ -232,7 +232,7 @@ export type ConfigAddition = { addition: string; why: string; where: string; evi
 export type FeatureToTry = { feature: string; one_liner: string; why_for_you: string; example: string; evidence_sessions: string[]; title?: string };
 export type UsagePattern = { title: string; suggestion: string; detail: string; copyable_prompt: string; evidence_sessions: string[] };
 export type StopDoingItem = { what: string; why: string; alternative: string; evidence_sessions: string[]; title?: string };
-/** friction_analysis's "ongoing" items; carries evidence_sessions like the suggestion item types (B10), but is not run through filterByEvidence — the fix design filters stop_doing/suggestions only. */
+/** friction_analysis's "ongoing" items; carries evidence_sessions like the suggestion item types (B10), but is not run through filterByEvidence - the fix design filters stop_doing/suggestions only. */
 export type OngoingFrictionItem = { category: string; description: string; examples: string[]; severity: string; evidence_sessions: string[]; title?: string };
 
 export type SuggestionSections = {
@@ -540,7 +540,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   ]
 }
 
-Include 3 opportunities. Think ambitiously — autonomous workflows, parallel subagents, self-correcting pipelines, iterating against test suites.
+Include 3 opportunities. Think ambitiously - autonomous workflows, parallel subagents, self-correcting pipelines, iterating against test suites.
 
 DATA:
 ${data}`,
@@ -607,12 +607,12 @@ Use this 4-part structure:
 
 2. What's hindering you
    Split into two parts:
-   (a) assistant-side failures — misunderstandings, wrong approaches, buggy output
-   (b) user-side friction — insufficient context, environment issues, setup problems
+   (a) assistant-side failures - misunderstandings, wrong approaches, buggy output
+   (b) user-side friction - insufficient context, environment issues, setup problems
    Be honest and constructive. Aim for patterns, not one-off incidents.
 
 3. Quick wins to try
-   Specific omp features or workflow changes you could adopt immediately. Avoid generic advice — suggest concrete things.
+   Specific omp features or workflow changes you could adopt immediately. Avoid generic advice - suggest concrete things.
 
 4. Ambitious workflows
    As models become significantly more capable, what workflows that feel out of reach today will become practical?

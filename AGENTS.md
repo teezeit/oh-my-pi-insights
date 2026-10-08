@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Tobias Hoelzer (omp port) -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
 # Repository Guidelines
 
 ## Project Overview

@@ -4,3 +4,6 @@ dist/
 
 # Orca agent worktrees live inside the checkout; they are not project files.
 .orca/
+
+# Local-only plans and notes
+.gitignorelocal/

@@ -83,7 +83,7 @@ test("a tooling session's cost/sessions count stay in totals; its worst turn is 
 
 	// Why the full (unfiltered) metas list is passed in: tooling sessions must
 	// stay in totals (cost, session count) while still dropping out of
-	// worst-turn/friction analysis — a pre-filtered list would wrongly drop
+	// worst-turn/friction analysis - a pre-filtered list would wrongly drop
 	// them from both.
 	const agg = aggregateData(metas, new Map(), ["oh-my-pi-insights"]);
 

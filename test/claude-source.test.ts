@@ -15,7 +15,7 @@ import { createClaudeSessionSource, type SessionRef } from "../index.ts";
 //   - tool_result blocks name a tool_use_id, not the tool
 //   - subagent turns are inline, flagged isSidechain
 
-const SID = "4feb9b4b-058b-4147-aad0-abba7d265f8f";
+const SID = "00000000-0000-4000-8000-000000000003";
 let root: string;
 let source: ReturnType<typeof createClaudeSessionSource>;
 

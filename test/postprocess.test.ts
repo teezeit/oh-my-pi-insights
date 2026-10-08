@@ -17,7 +17,7 @@ test("dedupeIncidents keeps the friction write-up and replaces matching items el
 			ongoing: [
 				{
 					category: "Worktree reap",
-					description: "Orca reaped a worktree mid-task, losing uncommitted edits.",
+					description: "the runner reaped a worktree mid-task, losing uncommitted edits.",
 					examples: ["lost edits in session s1"],
 					evidence_sessions: ["s1", "s2"],
 				},
@@ -25,7 +25,7 @@ test("dedupeIncidents keeps the friction write-up and replaces matching items el
 		},
 		suggestions: {
 			stop_doing: [
-				{ what: "Leaving worktrees idle", why: "Orca reaped one mid-task and lost edits.", alternative: "Commit before stepping away.", evidence_sessions: ["s1"] },
+				{ what: "Leaving worktrees idle", why: "the runner reaped one mid-task and lost edits.", alternative: "Commit before stepping away.", evidence_sessions: ["s1"] },
 			],
 			config_additions: [
 				{ addition: "Add a pre-idle commit hook", why: "Same worktree-reap incident cost uncommitted work.", where: "AGENTS.md", evidence_sessions: ["s2", "s3"] },
@@ -39,7 +39,7 @@ test("dedupeIncidents keeps the friction write-up and replaces matching items el
 	const result = dedupeIncidents(sections) as typeof sections;
 
 	// Owning section (highest precedence: friction_analysis) keeps its full text.
-	assert.equal(result.friction_analysis.ongoing[0]!.description, "Orca reaped a worktree mid-task, losing uncommitted edits.");
+	assert.equal(result.friction_analysis.ongoing[0]!.description, "the runner reaped a worktree mid-task, losing uncommitted edits.");
 	assert.deepEqual(result.friction_analysis.ongoing[0]!.examples, ["lost edits in session s1"]);
 
 	// stop_doing shares s1 with friction_analysis.ongoing: collapsed to a reference.
@@ -201,10 +201,10 @@ test("enforceBudget truncates an over-budget interaction_style block body", asyn
 });
 
 test("truncateAtSentence keeps the start of a sentence containing decimals instead of dropping text before them", () => {
-	const text = "The three worst turns in the corpus all begin with a bare dispatch (a Linear URL or the generic Orca worker preamble) and run 133 to 148 round trips at $15.82 to $18.51 each, with up to 46 exploration calls before the first edit.";
+	const text = "The three slowest jobs in the batch all start from an empty template (a bare link or the default worker header) and run 120 to 140 steps at $10.25 to $12.75 each, with up to 30 lookups before the first write.";
 	const out = truncateAtSentence(text, 40);
-	assert.ok(out.startsWith("The three worst turns"), out);
-	assert.ok(out.includes("$15.82"), out);
+	assert.ok(out.startsWith("The three slowest jobs"), out);
+	assert.ok(out.includes("$10.25"), out);
 	// Whole sentences still win when they fit; a period inside a number is not a boundary.
 	assert.equal(truncateAtSentence("It cost $1.50 today. Then more text follows here.", 4), "It cost $1.50 today.");
 });

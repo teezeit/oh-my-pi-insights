@@ -28,7 +28,7 @@ export async function readJsonl(path: string): Promise<AnyEntry[]> {
 	const out: AnyEntry[] = [];
 	for (const line of raw.split("\n")) {
 		// Why the brace check: a live session's tail can be a partial write, and
-		// the first record is padded — both are cheaper to skip than to parse.
+		// the first record is padded - both are cheaper to skip than to parse.
 		if (!line.startsWith("{")) continue;
 		try {
 			out.push(JSON.parse(line) as AnyEntry);
@@ -150,7 +150,7 @@ export function createOmpSessionSource(sessionsDir: string = SESSIONS_DIR): Sess
 			// The same session can exist twice on disk under two slugified-cwd
 			// directories (a copied or relocated log keeps its session record id).
 			// Counting it twice would double-count its spend, so the largest copy
-			// wins — it is the most complete one.
+			// wins - it is the most complete one.
 			const byId = new Map<string, SessionRef>();
 			for (const ref of sessions) {
 				const seen = byId.get(ref.id);

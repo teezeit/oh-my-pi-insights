@@ -6,7 +6,7 @@
 // omp harness. See README.md "Port status" and the repository history.
 
 /**
- * /insights — omp Usage Insights
+ * /insights - omp Usage Insights
  *
  * Scans all omp session logs, extracts deterministic stats, runs LLM
  * facet extraction per session (cached), fires 7 parallel insight prompts
@@ -15,11 +15,11 @@
  * Ported from Observal/pi-insights (AGPL-3.0-only) to the omp harness.
  *
  * Usage:
- *   /insights             — run with caches (fast on re-runs)
- *   /insights --refresh   — invalidate all LLM facet caches, re-extract
- *   /insights --md        — write the Markdown export instead of HTML
- *   /insights --no-open   — don't open the report in the browser
- *   /insights --since 7d  — restrict the corpus to the last 7 days
+ *   /insights             - run with caches (fast on re-runs)
+ *   /insights --refresh   - invalidate all LLM facet caches, re-extract
+ *   /insights --md        - write the Markdown export instead of HTML
+ *   /insights --no-open   - don't open the report in the browser
+ *   /insights --since 7d  - restrict the corpus to the last 7 days
  *
  * Data dir: ~/.omp/agent/usage-data/
  *   session-meta/<id>.json   deterministic stats, cached permanently
@@ -43,10 +43,13 @@ import {
 	DATA_DIR,
 	deleteCachedFacets,
 	ensureDirs,
+	FACETS_DIR,
+	isSafeSessionId,
 	loadCachedFacets,
 	loadCachedSections,
 	loadCachedMeta,
 	loadLatestSections,
+	META_DIR,
 	pruneSections,
 	resolveAgentDir,
 	REPORT_MD_PATH,
@@ -97,6 +100,7 @@ import {
 	extractSidecarUsage,
 	isMetaSession,
 	readUsage,
+	resolveSafeSessionId,
 	toolErrorCategory,
 } from "./src/stats.ts";
 import type {
@@ -116,7 +120,7 @@ const execFile = promisify(execFileCb);
 
 // Why: no package-specific type import here. Pi and omp expose the same
 // extension API but publish their types under different package names, so the
-// host is typed structurally — same rationale as the note at the top of
+// host is typed structurally - same rationale as the note at the top of
 // ~/.omp/agent/extensions/orca-agent-status.ts.
 
 type ExtensionUI = {
@@ -251,7 +255,7 @@ async function runInsights(
 	// Stage 1 never calls a model, so an active model is only required once the
 	// LLM phases are wired.
 	if (useLlm && !ctx.model) {
-		ctx.ui.notify("No active model — set a model first (/model)", "error");
+		ctx.ui.notify("No active model - set a model first (/model)", "error");
 		return;
 	}
 
@@ -328,7 +332,7 @@ async function runInsights(
 		"",
 		"  📊 omp Insights",
 		"  ─────────────────────────────────",
-		`  Phase 1/5 done — ${allRefs.length} sessions, ${scan.advisor_logs} advisor + ${scan.subagent_logs} subagent logs`,
+		`  Phase 1/5 done - ${allRefs.length} sessions, ${scan.advisor_logs} advisor + ${scan.subagent_logs} subagent logs`,
 		"  Phase 2/5: Extracting session stats...",
 	]);
 
@@ -416,7 +420,7 @@ async function runInsights(
 		"",
 		"  📊 omp Insights",
 		"  ─────────────────────────────────",
-		`  Phase 2/5 done — ${substantive.length} substantive sessions`,
+		`  Phase 2/5 done - ${substantive.length} substantive sessions`,
 		useLlm
 			? "  Phase 3/5: LLM facet extraction..."
 			: "  Phase 3/5: skipped (deterministic run)",
@@ -545,16 +549,16 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		"  📊 omp Insights",
 		"  ─────────────────────────────────",
 		useLlm
-			? `  Phase 3/5 done — ${facetsMap.size} facets extracted`
-			: "  Phase 3/5 skipped — deterministic sections only",
+			? `  Phase 3/5 done - ${facetsMap.size} facets extracted`
+			: "  Phase 3/5 skipped - deterministic sections only",
 		"  Phase 4/5: Aggregating...",
 	]);
 
 	// ── Phase 4: Aggregate + Insight Prompts ─────────────────────────────────────
 	// Follow-up: tooling sessions (this tool's own dev work) now stay in every
 	// total (cost, tokens, sessions, active time, tool rates, the manifest)
-	// and are excluded only from analysis inputs — worst turns, friction,
-	// facets merged into session summaries/suggestion evidence — inside
+	// and are excluded only from analysis inputs - worst turns, friction,
+	// facets merged into session summaries/suggestion evidence - inside
 	// aggregateData itself. computeTemporalData's anomaly detection still
 	// needs the pre-filtered list, since nothing there feeds a total.
 	const analysisMetas = excludeToolingSessions(kept, excludeProjects);
@@ -570,7 +574,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	scan.facets_analyzed = agg.sessions_with_facets;
 	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
 	const temporal = computeTemporalData(analysisMetas, facetsMap);
-	// Follow-up: snapshot diff instead of config.yml.bak-* parsing — see
+	// Follow-up: snapshot diff instead of config.yml.bak-* parsing - see
 	// src/harness.ts. windowEnd gates too_recent only; the diff itself needs
 	// no date range (a snapshot diff is always "since last run").
 	if (agg.date_range.end) {
@@ -622,7 +626,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 				const parsed = parseJsonFromResponse(text);
 				if (parsed) sectionResults[key] = parsed;
 			} catch {
-				// Section failed — continue without it
+				// Section failed - continue without it
 			}
 			sectionsDone++;
 			ctx.ui.setWidget("insights", [
@@ -635,10 +639,10 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	);
 
 	// B8: drop suggestions naming an unavailable feature or an installed skill,
-	// whether the section came fresh or from cache — the live harness state can
+	// whether the section came fresh or from cache - the live harness state can
 	// change (e.g. memory.backend) after a cached run was generated.
 	// B10: drop stop_doing/suggestion items citing fewer than 2 distinct
-	// evidence sessions — same reasoning, applied regardless of cache freshness.
+	// evidence sessions - same reasoning, applied regardless of cache freshness.
 	if (sectionResults.suggestions) {
 		sectionResults.suggestions = filterSuggestions(
 			filterByEvidence(sectionResults.suggestions as SuggestionSections),
@@ -867,6 +871,10 @@ export {
 	readUsage,
 	readProviderAuth,
 	resolveAgentDir,
+	resolveSafeSessionId,
+	isSafeSessionId,
+	FACETS_DIR,
+	META_DIR,
 	resolveLimit,
 	resolveProjectList,
 	saveHarnessSnapshot,

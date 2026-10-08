@@ -8,10 +8,11 @@ history, extracts deterministic stats, and generates a report covering your
 workflows, spend and friction points.
 
 This is a port of [`Observal/pi-insights`](https://github.com/Observal/pi-insights)
-(AGPL-3.0-only, © Hari Srinivasan) from the Pi coding agent to omp. The initial
-commit of this repository is upstream verbatim; diff against it to read the
-port. Upstream is itself a rewrite of a Claude Code command; the temporal
-layer, facet taxonomy, prompts and report structure are upstream's work.
+(AGPL-3.0-only) from the Pi coding agent to omp, built by the Observal team
+([Hari Srinivasan](https://github.com/Observal)). The initial commit of this
+repository is upstream verbatim; diff against it to read the port. Upstream
+is itself a rewrite of a Claude Code command; the temporal layer, facet
+taxonomy, prompts and report structure are upstream's work.
 
 ## Port status
 
@@ -41,11 +42,38 @@ per uncached session); the section prompts and the synthesis run on the
 
 Set `OMP_INSIGHTS_OMP_BIN` if `omp` is not on `PATH`.
 
+## Relationship to pi-insights
+
+Kept from upstream:
+
+- The pipeline: scan sessions, extract facets, generate sections, synthesize a report.
+- The facet taxonomy (outcomes, goals, satisfaction, friction, success signals).
+- The section-prompt structure (project areas, interaction style, what works, friction, horizon, suggestions, synthesis).
+- The temporal layer (before/after deltas, trajectory, major transitions, anomalies).
+- The caching design (keyed on the shared data block and active model).
+- The report outline (summary, stats, charts, sections, actions).
+
+Removed, and why:
+
+- The price table and token-derived cost: omp records `usage.cost.total` per call, so cost is read, not estimated.
+- Regex bucketing of tool-error text: `toolResult.isError` is a boolean, so the error count is exact.
+- The Pi `SessionManager` import: replaced by a filesystem walk of `~/.omp/agent/sessions`.
+- `fun_ending`: duplicated the friction section's findings and, unlike every other section, wrote in third person.
+
+Added or changed, and why:
+
+- An omp session source plus a Claude Code source (`--source claude`), since this targets a different harness than upstream's Pi.
+- Friction signals derived from omp's own records (`steering`, `ttsr_injection`, `reset_boundary`, `tool_execution_start`) that have no Pi equivalent.
+- A facts object and checker (`src/facts.ts`): every percentage and dollar amount the report may quote is computed in TS and verified against the generated prose.
+- Cost split by how it is actually paid for (`cost_by_provider`, `billed_cost`, `subscription_cost`), since omp mixes subscription and API-key auth.
+- A harness snapshot and diff (`src/harness.ts`) surfacing model-role, skill, hook and AGENTS.md changes since the last run.
+- Profile-aware agent dir resolution (`OMP_PROFILE` / `PI_PROFILE` / `PI_CODING_AGENT_DIR`) instead of a hardcoded path.
+- A redesigned report: light theme, collapsible sections, an action list, evidence links, config diffs, report-to-report diffs.
+- A test suite (node --test, no dependencies); upstream shipped none.
+
 ## Install
 
-Current release: **`v0.1.0-rc.1`** (internal test release, not on npm). The
-repository is private, so you need read access to
-`github.com/teezeit/oh-my-pi-insights`.
+Current release: **`v0.1.0-rc.1`** (release candidate; not yet on npm).
 
 ```bash
 omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.1"
@@ -61,14 +89,14 @@ clean slate).
 From a checkout instead: `omp -e ./index.ts` (one session, no install) or
 `omp plugin link .` (links the checkout).
 
-### Trying it (for testers)
+### First run
 
 1. Start omp in any project and run `/insights`. The first run reads every
    session and classifies up to 50 of them, so it takes minutes, not seconds.
 2. The report opens in your browser; it is also at
    `~/.omp/agent/usage-data/report.html`. Add `--md` for a Markdown copy.
 3. Re-render without any model calls: `/insights --no-llm`.
-4. Feedback: open an issue on the repository with the report section, what
+4. Feedback: open an issue on this repository with the report section, what
    you expected, and (if relevant) a screenshot. Do not attach `report.html`
    or session logs unless you are fine sharing their content.
 
@@ -84,6 +112,15 @@ jump to a collapsed section's header but do not open it.
   as first prompts, friction notes and file names, not full transcripts)
   goes to your active model for the report sections. It all runs through
   your local `omp -p` with your credentials; nothing goes anywhere else.
+- **Setup context sent to the model:** the shared data block behind the
+  section prompts includes a "user existing setup" summary so the report does
+  not recommend what you already have: your default model, model roles,
+  fallback chains, the names (not contents) of installed skills, extensions,
+  hooks and MCP servers, and up to 20 rule lines (150 characters each) that
+  look like instructions, excerpted from `~/.claude/CLAUDE.md` and
+  `~/.omp/agent/AGENTS.md`. Transcripts longer than 25,000 characters are
+  first split into chunks and each chunk is summarized by the `smol` role
+  model before the session is classified.
 - **What stays local:** the report, all caches and the audit manifest under
   `~/.omp/agent/usage-data/`. Session logs are only read, never written.
 - **What it costs:** one smol call per not-yet-classified session (capped by

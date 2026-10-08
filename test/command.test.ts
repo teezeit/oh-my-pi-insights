@@ -24,7 +24,7 @@ let home: string;
 // test supplies rather than by the extension's own ExtensionAPI.
 let extension: { default: (pi: ExtensionAPI) => void };
 
-const SID = "01a07af7-bbe1-77b4-9c0e-e1295ebb1e38";
+const SID = "00000000-0000-7000-8000-000000000001";
 
 function fakeHost(ui: UiCall[]) {
 	let handler:

@@ -20,8 +20,8 @@ import { createOmpSessionSource } from "../index.ts";
 //   <root>/-proj-b/2026-09-07T10-00-00-000Z_<A>.jsonl             <- duplicate of A, smaller
 //   <root>/loose.jsonl                                            <- not in a project dir
 
-const ID_A = "01a07af7-bbe1-77b4-9c0e-e1295ebb1e38";
-const ID_B = "01a082a3-9969-7034-951e-8ba58ae3288f";
+const ID_A = "00000000-0000-7000-8000-000000000001";
+const ID_B = "00000000-0000-7000-8000-000000000002";
 
 let root: string;
 

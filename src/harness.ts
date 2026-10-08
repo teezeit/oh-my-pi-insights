@@ -12,7 +12,7 @@
 //
 // Why a persisted snapshot instead of config.yml.bak-*: those backup files
 // are written by hand or by an agent editing config.yml, not by omp itself,
-// so they are not a reliable change log — a user who never triggers a
+// so they are not a reliable change log - a user who never triggers a
 // backup leaves no trail at all. Every /insights run instead writes its own
 // snapshot of the live state; the next run diffs against it. The very first
 // run (no snapshot yet) reports no changes rather than guessing.
@@ -57,7 +57,7 @@ function describeModelRoleDiff(prev: Record<string, string>, cur: Record<string,
 /**
  * Pure diff between the previous persisted snapshot (null on the first run)
  * and the current one. `windowEnd` is the report's date_range.end; too_recent
- * is based on the PREVIOUS snapshot's timestamp, not the change itself —
+ * is based on the PREVIOUS snapshot's timestamp, not the change itself -
  * a snapshot diff only brackets a change between two run times, it never
  * dates it precisely, so "how long has it been" is measured from the last
  * point we know the harness was still in its old state.
