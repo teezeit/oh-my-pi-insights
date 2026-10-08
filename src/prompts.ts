@@ -329,7 +329,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
     {
       "name": "area name",
       "session_count": N,
-      "description": "2-3 sentences about what was worked on and how Pi was used"
+      "description": "2-3 sentences about what was worked on and how omp was used"
     }
   ]
 }
@@ -339,18 +339,18 @@ Include 4-5 areas. Skip internal tooling sessions.
 DATA:
 ${data}`,
 
-		interaction_style: `Analyze this usage data and describe the user's interaction style with Pi.
+		interaction_style: `Analyze this usage data and describe your interaction style with omp.
 
 RESPOND WITH ONLY A VALID JSON OBJECT:
 {
-  "narrative": "2-3 paragraphs analyzing HOW the user interacts. Use second person 'you'. Describe patterns: do they iterate quickly or write detailed specs upfront? Do they interrupt often or let it run? Include specific examples. Use **bold** for key insights.",
+  "narrative": "2-3 paragraphs analyzing HOW you interact. Use second person 'you'. Describe patterns: do they iterate quickly or write detailed specs upfront? Do they interrupt often or let it run? Include specific examples. Use **bold** for key insights.",
   "key_pattern": "one sentence summary of the most distinctive interaction style"
 }
 
 DATA:
 ${data}`,
 
-		what_works: `Analyze this usage data and identify what's working well for this user with Pi.
+		what_works: `Analyze this usage data and identify what's working well for you with omp.
 Use second person ("you").
 
 RESPOND WITH ONLY A VALID JSON OBJECT:
@@ -369,7 +369,7 @@ Include 3 impressive workflows.
 DATA:
 ${data}`,
 
-		friction_analysis: `Analyze this usage data and identify friction points for this user.
+		friction_analysis: `Analyze this usage data and identify friction points for you.
 Use second person ("you").
 
 TEMPORAL CONTEXT:
@@ -484,7 +484,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "opportunities": [
     {
       "title": "short title (4-8 words)",
-      "whats_possible": "2-3 ambitious sentences about autonomous Pi workflows",
+      "whats_possible": "2-3 ambitious sentences about autonomous omp workflows",
       "how_to_try": "1-2 sentences on how to start experimenting with this",
       "copyable_prompt": "detailed prompt to try right now"
     }
@@ -492,19 +492,6 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 }
 
 Include 3 opportunities. Think ambitiously — autonomous workflows, parallel subagents, self-correcting pipelines, iterating against test suites.
-
-DATA:
-${data}`,
-
-		fun_ending: `Analyze this usage data and find one memorable moment from the sessions.
-
-RESPOND WITH ONLY A VALID JSON OBJECT:
-{
-  "headline": "a memorable QUALITATIVE moment from the transcripts — not a statistic. something human, funny, or genuinely surprising.",
-  "detail": "brief context about when or where this happened"
-}
-
-Find something interesting or amusing. Avoid generic observations.
 
 DATA:
 ${data}`,
@@ -552,12 +539,12 @@ export function buildSynthesisPrompt(
 	data: string,
 	sections: Record<string, unknown>,
 ): string {
-	return `You're writing an "At a Glance" section for a Pi usage insights report. The goal is to help the user understand their patterns and improve how they work with AI assistance.
+	return `You're writing an "At a Glance" section for an omp usage insights report. The goal is to help you understand your patterns and improve how you work with AI assistance.
 
 Use this 4-part structure:
 
 1. What's working
-   What is the user's distinctive style and what impactful things have they done? Keep it high level. Don't be flattering or fluffy. Don't focus on which tools they use.
+   What is your distinctive style and what impactful things have you done? Keep it high level. Don't be flattering or fluffy. Don't focus on which tools you use.
 
 2. What's hindering you
    Split into two parts:
@@ -566,7 +553,7 @@ Use this 4-part structure:
    Be honest and constructive. Aim for patterns, not one-off incidents.
 
 3. Quick wins to try
-   Specific Pi features or workflow changes they could adopt immediately. Avoid generic advice — suggest concrete things.
+   Specific omp features or workflow changes you could adopt immediately. Avoid generic advice — suggest concrete things.
 
 4. Ambitious workflows
    As models become significantly more capable, what workflows that feel out of reach today will become practical?
