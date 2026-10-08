@@ -43,18 +43,17 @@ function buildFixtureHtml(sessionPaths: Record<string, string> = {}) {
 	});
 }
 
-// ── Sections: heavy ones collapsible, narrative ones plain ──────────────────
+// ── Sections: only Top Actions and Summary stay open; everything else collapses ──
 
-test("narrative sections are plain <section> blocks with ids, never <details>", async () => {
+test("Top Actions and Summary are plain <section> blocks, never <details>", async () => {
 	const html = await buildFixtureHtml();
 	const ids = [...html.matchAll(/<section class="rpt-section" id="([^"]+)">/g)].map((m) => m[1]);
-	for (const id of ["at-a-glance", "action-list", "projects", "style", "what-works", "friction", "suggestions", "horizon"])
-		assert.ok(ids.includes(id), `missing section ${id}`);
+	assert.deepEqual(ids.sort(), ["action-list", "at-a-glance"]);
 });
 
-test("heavy sections (By the Numbers, Model Spend) are collapsed <details> without the open attribute", async () => {
+test("every other section is a collapsed <details> without the open attribute", async () => {
 	const html = await buildFixtureHtml();
-	for (const id of ["stats", "model-efficiency"]) {
+	for (const id of ["stats", "projects", "style", "what-works", "friction", "suggestions", "horizon", "model-efficiency"]) {
 		assert.match(html, new RegExp(`<details class="rpt-section" id="${id}">\\s*<summary><h2>`), `${id} is not a collapsed <details>`);
 		assert.doesNotMatch(html, new RegExp(`<details[^>]*id="${id}"[^>]*\\bopen\\b`), `${id} must not default open`);
 	}

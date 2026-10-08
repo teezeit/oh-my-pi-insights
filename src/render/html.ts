@@ -726,8 +726,8 @@ ${actionListHtml}
 </details>
 
 <!-- ── Project Areas ── -->
-<section class="rpt-section" id="projects">
-<h2>Where You Worked</h2>
+<details class="rpt-section" id="projects">
+<summary><h2>Where You Worked</h2></summary>
   <div class="card-grid ${areas.length > 2 ? "cols2" : ""}">
     ${areas
 			.map(
@@ -738,11 +738,11 @@ ${actionListHtml}
 			)
 			.join("\n")}
   </div>
-</section>
+</details>
 
 <!-- ── Interaction Style ── -->
-<section class="rpt-section" id="style">
-<h2>How You Work</h2>
+<details class="rpt-section" id="style">
+<summary><h2>How You Work</h2></summary>
   <div class="card">
     ${
 			iStyle?.blocks?.length
@@ -763,11 +763,11 @@ ${actionListHtml}
 		}
     ${iStyle?.key_pattern ? `<div style="margin-top:16px;padding:14px 16px;background:var(--bg3);border-radius:var(--radius-sm);border:1px solid var(--border2);color:var(--accent2);font-size:14px;font-style:italic">"${esc(iStyle.key_pattern)}"</div>` : ""}
   </div>
-</section>
+</details>
 
 <!-- ── What's Working ── -->
-<section class="rpt-section" id="what-works">
-<h2>Wins</h2>
+<details class="rpt-section" id="what-works">
+<summary><h2>Wins</h2></summary>
   ${whatWorks?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(whatWorks.intro)}</p>` : ""}
   <div class="card-grid ${(whatWorks?.impressive_workflows?.length ?? 0) > 1 ? "cols2" : ""}">
     ${(whatWorks?.impressive_workflows ?? [])
@@ -779,11 +779,11 @@ ${actionListHtml}
 			)
 			.join("\n")}
   </div>
-</section>
+</details>
 
 <!-- ── Friction ── -->
-<section class="rpt-section" id="friction">
-<h2>Where Things Broke</h2>
+<details class="rpt-section" id="friction">
+<summary><h2>Where Things Broke</h2></summary>
   ${frictionSec?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(frictionSec.intro)}</p>` : ""}
   ${(frictionSec?.resolved?.length || resolvedSinceLastRun.length) ? `<div style="margin-bottom:20px">
     <h3 style="color:var(--green);font-size:13px;margin-bottom:10px">Resolved</h3>
@@ -805,11 +805,11 @@ ${actionListHtml}
 			})
 			.join("\n")}
   </div>
-</section>
+</details>
 
 <!-- ── Suggestions ── -->
-<section class="rpt-section" id="suggestions">
-<h2>Next Steps</h2>
+<details class="rpt-section" id="suggestions">
+<summary><h2>Next Steps</h2></summary>
 
   ${
 		configAdditions.length
@@ -893,11 +893,11 @@ ${actionListHtml}
 			sessionPaths,
 		})).join("\n")}
   </div>` : ""}
-</section>
+</details>
 
 <!-- ── On the Horizon ── -->
-<section class="rpt-section" id="horizon">
-<h2>Future Workflows</h2>
+<details class="rpt-section" id="horizon">
+<summary><h2>Future Workflows</h2></summary>
   ${horizonSec?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(horizonSec.intro)}</p>` : ""}
   <div style="display:flex;flex-direction:column;gap:12px">
     ${(horizonSec?.opportunities ?? [])
@@ -912,7 +912,7 @@ ${actionListHtml}
 			)
 			.join("\n")}
   </div>
-</section>
+</details>
 
 <!-- ── Model Efficiency ── -->
 <details class="rpt-section" id="model-efficiency">
