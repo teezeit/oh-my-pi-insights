@@ -7,11 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { DatabaseSync } from "node:sqlite";
 import { readProviderAuth } from "../src/auth.ts";
-
-// Why: the pinned @types/node predates node:sqlite; a variable specifier keeps tsc from resolving it.
-type FixtureDb = { exec(sql: string): void; prepare(sql: string): { run(...args: string[]): void }; close(): void };
-const { DatabaseSync } = (await import("node:sqlite" as string)) as { DatabaseSync: new (path: string) => FixtureDb };
 
 async function makeAgentDb(dir: string, rows: Array<{ provider: string; credential_type: string }>): Promise<string> {
 	const dbPath = join(dir, "agent.db");

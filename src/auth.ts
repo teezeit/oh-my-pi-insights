@@ -21,13 +21,9 @@ function mapCredentialType(provider: string, credentialType: string): "subscript
 
 type Row = { provider: unknown; credential_type: unknown };
 
-// Why: the pinned @types/node predates node:sqlite and bun:sqlite has no
-// types under Node; a variable specifier keeps tsc from resolving them, and
-// these minimal shapes cover the two calls made.
-type SqliteStatement = { all(): unknown[] };
-type NodeSqlite = { DatabaseSync: new (path: string, opts: { readOnly: boolean }) => { prepare(sql: string): SqliteStatement; close(): void } };
-type BunSqlite = { Database: new (path: string, opts: { readonly: boolean }) => { query(sql: string): SqliteStatement; close(): void } };
-const NODE_SQLITE = "node:sqlite";
+// Why: bun:sqlite has no types under Node; a variable specifier keeps tsc from
+// resolving it, and this minimal shape covers the one call made.
+type BunSqlite = { Database: new (path: string, opts: { readonly: boolean }) => { query(sql: string): { all(): unknown[] }; close(): void } };
 const BUN_SQLITE = "bun:sqlite";
 
 /**
@@ -47,7 +43,7 @@ export async function readProviderAuth(agentDb: string): Promise<Record<string, 
 		// Exception: platform-specific module, only present under Node;
 		// static import would throw at module-load time when run inside
 		// omp's Bun binary, which has no "node:sqlite".
-		const { DatabaseSync } = (await import(NODE_SQLITE)) as NodeSqlite;
+		const { DatabaseSync } = await import("node:sqlite");
 		const db = new DatabaseSync(agentDb, { readOnly: true });
 		try {
 			rows = db.prepare("SELECT provider, credential_type FROM auth_credentials").all() as Row[];
