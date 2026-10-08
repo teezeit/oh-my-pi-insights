@@ -3,90 +3,127 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 
-// B9: detects changes to the harness itself (memory backend, installed
-// skills/hooks, AGENTS.md) inside the report window, so "what changed" isn't
+// B9: detects changes to the harness itself (memory backend, model roles,
+// installed skills/hooks, AGENTS.md) between runs, so "what changed" isn't
 // limited to the mid-session model-switch signal in src/temporal.ts. That
 // file owns the facet-derived week-over-week diff only; this is a separate,
-// config/filesystem-derived signal, wired in by index.ts after the fact
+// snapshot-derived signal, wired in by index.ts after the fact
 // (TemporalData.harness_changes is optional for exactly this reason).
+//
+// Why a persisted snapshot instead of config.yml.bak-*: those backup files
+// are written by hand or by an agent editing config.yml, not by omp itself,
+// so they are not a reliable change log — a user who never triggers a
+// backup leaves no trail at all. Every /insights run instead writes its own
+// snapshot of the live state; the next run diffs against it. The very first
+// run (no snapshot yet) reports no changes rather than guessing.
 
-import type { Dirent } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { AGENT_DIR } from "./cache.ts";
-import { parseSimpleYaml, yamlMap } from "./context.ts";
+import { listDirNames, parseSimpleYaml, yamlMap } from "./context.ts";
 import type { HarnessChange } from "./types.ts";
 
-export type ConfigSnapshot = { when: string; memory_backend: string };
-export type DirAddition = { name: string; added_at: string };
-
-export type HarnessState = {
-	/** Sorted oldest -> newest; the live config.yml is the last entry. */
-	config_snapshots: ConfigSnapshot[];
-	skill_additions: DirAddition[];
-	hook_additions: DirAddition[];
-	agents_md_mtime: string | null;
+export type HarnessSnapshot = {
+	timestamp: string;
+	/** sha256 of config.yml's raw text; "" if the file could not be read. */
+	config_hash: string;
+	memory_backend: string;
+	model_roles: Record<string, string>;
+	/** Sorted names from both skills/ and managed-skills/. */
+	skills: string[];
+	/** Sorted "event/name", e.g. "pre/eval". */
+	hooks: string[];
+	/** sha256 of AGENTS.md's raw text; null if the file does not exist. */
+	agents_md_hash: string | null;
 };
 
 const SEVEN_DAYS_MS = 7 * 86400000;
+const HARNESS_SNAPSHOT_FILENAME = "harness-snapshot.json";
+
+function sameRecord(a: Record<string, string>, b: Record<string, string>): boolean {
+	const ak = Object.keys(a).sort();
+	const bk = Object.keys(b).sort();
+	if (ak.length !== bk.length) return false;
+	return ak.every((k, i) => k === bk[i] && a[k] === b[k]);
+}
+
+function describeModelRoleDiff(prev: Record<string, string>, cur: Record<string, string>): string {
+	const roles = [...new Set([...Object.keys(prev), ...Object.keys(cur)])]
+		.filter((k) => prev[k] !== cur[k])
+		.map((k) => `${k}: ${prev[k] ?? "unset"} -> ${cur[k] ?? "unset"}`);
+	return `model roles changed (${roles.join(", ")})`;
+}
 
 /**
- * Pure diff over an already-gathered harness state (see gatherHarnessState
- * for the filesystem side). A change is reported when its date falls inside
- * [windowStart, windowEnd]; it is additionally flagged too_recent when fewer
- * than 7 days of corpus data exist after it, mirroring the "not enough data
- * yet" caveat src/temporal.ts applies to facet-derived trends.
+ * Pure diff between the previous persisted snapshot (null on the first run)
+ * and the current one. `windowEnd` is the report's date_range.end; too_recent
+ * is based on the PREVIOUS snapshot's timestamp, not the change itself —
+ * a snapshot diff only brackets a change between two run times, it never
+ * dates it precisely, so "how long has it been" is measured from the last
+ * point we know the harness was still in its old state.
  */
 export function detectHarnessChanges(
-	state: HarnessState,
-	windowStart: string,
+	previous: HarnessSnapshot | null,
+	current: HarnessSnapshot,
 	windowEnd: string,
 ): HarnessChange[] {
-	const startMs = new Date(windowStart).getTime();
-	const endMs = new Date(windowEnd).getTime();
-	const inWindow = (iso: string) => {
-		const t = new Date(iso).getTime();
-		return t >= startMs && t <= endMs;
-	};
-	const tooRecent = (iso: string) => endMs - new Date(iso).getTime() < SEVEN_DAYS_MS;
+	if (!previous) return [];
 
+	const when = current.timestamp;
+	const tooRecent = new Date(windowEnd).getTime() - new Date(previous.timestamp).getTime() < SEVEN_DAYS_MS;
 	const changes: HarnessChange[] = [];
 
-	for (let i = 1; i < state.config_snapshots.length; i++) {
-		const prev = state.config_snapshots[i - 1]!;
-		const cur = state.config_snapshots[i]!;
-		if (cur.memory_backend === prev.memory_backend || !inWindow(cur.when)) continue;
+	if (previous.memory_backend !== current.memory_backend) {
 		changes.push({
 			type: "memory_backend",
-			when: cur.when,
-			detail: `memory backend changed from "${prev.memory_backend || "unset"}" to "${cur.memory_backend || "unset"}"`,
-			too_recent: tooRecent(cur.when),
+			when,
+			detail: `memory backend changed from "${previous.memory_backend || "unset"}" to "${current.memory_backend || "unset"}"`,
+			too_recent: tooRecent,
 		});
 	}
-	for (const s of state.skill_additions) {
-		if (!inWindow(s.added_at)) continue;
+	if (!sameRecord(previous.model_roles, current.model_roles)) {
 		changes.push({
-			type: "skill_added",
-			when: s.added_at,
-			detail: `skill "${s.name}" installed`,
-			too_recent: tooRecent(s.added_at),
+			type: "model_roles_changed",
+			when,
+			detail: describeModelRoleDiff(previous.model_roles, current.model_roles),
+			too_recent: tooRecent,
 		});
 	}
-	for (const h of state.hook_additions) {
-		if (!inWindow(h.added_at)) continue;
-		changes.push({
-			type: "hook_added",
-			when: h.added_at,
-			detail: `hook "${h.name}" added`,
-			too_recent: tooRecent(h.added_at),
-		});
+	for (const skill of current.skills) {
+		if (!previous.skills.includes(skill)) {
+			changes.push({ type: "skill_added", when, detail: `skill "${skill}" installed`, too_recent: tooRecent });
+		}
 	}
-	if (state.agents_md_mtime && inWindow(state.agents_md_mtime)) {
+	for (const skill of previous.skills) {
+		if (!current.skills.includes(skill)) {
+			changes.push({ type: "skill_removed", when, detail: `skill "${skill}" removed`, too_recent: tooRecent });
+		}
+	}
+	for (const hook of current.hooks) {
+		if (!previous.hooks.includes(hook)) {
+			changes.push({ type: "hook_added", when, detail: `hook "${hook}" added`, too_recent: tooRecent });
+		}
+	}
+	for (const hook of previous.hooks) {
+		if (!current.hooks.includes(hook)) {
+			changes.push({ type: "hook_removed", when, detail: `hook "${hook}" removed`, too_recent: tooRecent });
+		}
+	}
+	if (previous.agents_md_hash !== current.agents_md_hash) {
+		changes.push({ type: "agents_md_updated", when, detail: "AGENTS.md updated", too_recent: tooRecent });
+	}
+	// Catch-all: config.yml changed in some field not individually tracked
+	// above (e.g. retry.fallbackChains, theme, bash.enabled).
+	if (
+		previous.config_hash !== current.config_hash &&
+		previous.memory_backend === current.memory_backend &&
+		sameRecord(previous.model_roles, current.model_roles)
+	) {
 		changes.push({
-			type: "agents_md_updated",
-			when: state.agents_md_mtime,
-			detail: "AGENTS.md updated",
-			too_recent: tooRecent(state.agents_md_mtime),
+			type: "config_changed",
+			when,
+			detail: "config.yml changed (fields outside memory backend and model roles)",
+			too_recent: tooRecent,
 		});
 	}
 
@@ -94,87 +131,72 @@ export function detectHarnessChanges(
 	return changes;
 }
 
-// omp writes timestamped backups as config.yml.bak-YYYYMMDD or
-// config.yml.bak-YYYYMMDD-HHMMSS (plus a bare config.yml.bak with no
-// timestamp); the suffix is the change date when present.
-const BAK_TIMESTAMP = /\.bak(?:-(\d{8})(?:-(\d{6}))?)?$/;
-
-async function readMemoryBackend(path: string): Promise<string> {
-	try {
-		const cfg = parseSimpleYaml(await readFile(path, "utf-8"));
-		const backend = yamlMap(cfg, "memory")?.backend;
-		return typeof backend === "string" && backend ? backend : "learn";
-	} catch {
-		return "learn";
-	}
+async function readMemoryBackend(cfg: ReturnType<typeof parseSimpleYaml>): Promise<string> {
+	const backend = yamlMap(cfg, "memory")?.backend;
+	return typeof backend === "string" && backend ? backend : "learn";
 }
 
-async function dirAdditions(dir: string): Promise<DirAddition[]> {
-	let entries: Dirent[];
+/** Reads the live harness state from an omp agent dir (defaults to the real one; tests pass a temp dir). */
+export async function gatherHarnessSnapshot(agentDir: string): Promise<HarnessSnapshot> {
+	let configText = "";
 	try {
-		entries = await readdir(dir, { withFileTypes: true });
-	} catch {
-		return [];
-	}
-	const out: DirAddition[] = [];
-	for (const e of entries) {
-		if (e.name.startsWith(".")) continue;
-		const st = await stat(join(dir, e.name)).catch(() => null);
-		if (!st) continue;
-		// birthtime is unreliable on some filesystems (reads as epoch 0); fall
-		// back to mtime, which is always set.
-		const at = st.birthtimeMs > 0 ? st.birthtime : st.mtime;
-		out.push({ name: e.name.replace(/\.[^.]+$/, ""), added_at: at.toISOString() });
-	}
-	return out;
-}
-
-/** Reads the real on-disk harness state from ~/.omp/agent. */
-export async function gatherHarnessState(): Promise<HarnessState> {
-	const config_snapshots: ConfigSnapshot[] = [];
-	try {
-		const entries = await readdir(AGENT_DIR, { withFileTypes: true });
-		for (const e of entries) {
-			if (e.isDirectory() || !e.name.startsWith("config.yml.bak")) continue;
-			const path = join(AGENT_DIR, e.name);
-			const st = await stat(path).catch(() => null);
-			const m = e.name.match(BAK_TIMESTAMP);
-			const d = m?.[1];
-			const when = d
-				? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${(m![2] ?? "000000").slice(0, 2)}:${(m![2] ?? "000000").slice(2, 4)}:${(m![2] ?? "000000").slice(4, 6)}.000Z`
-				: (st?.mtime ?? new Date(0)).toISOString();
-			config_snapshots.push({ when, memory_backend: await readMemoryBackend(path) });
-		}
+		configText = await readFile(join(agentDir, "config.yml"), "utf-8");
 	} catch {}
-	config_snapshots.sort((a, b) => a.when.localeCompare(b.when));
+	const config_hash = configText ? createHash("sha256").update(configText).digest("hex") : "";
+	const cfg = parseSimpleYaml(configText);
+	const memory_backend = await readMemoryBackend(cfg);
 
-	const liveConfigPath = join(AGENT_DIR, "config.yml");
-	const liveStat = await stat(liveConfigPath).catch(() => null);
-	config_snapshots.push({
-		when: (liveStat?.mtime ?? new Date()).toISOString(),
-		memory_backend: await readMemoryBackend(liveConfigPath),
-	});
+	const model_roles: Record<string, string> = {};
+	const roles = yamlMap(cfg, "modelRoles");
+	if (roles) {
+		for (const [role, model] of Object.entries(roles)) {
+			if (typeof model === "string") model_roles[role] = model;
+		}
+	}
 
-	const skill_additions = [
-		...(await dirAdditions(join(AGENT_DIR, "skills"))),
-		...(await dirAdditions(join(AGENT_DIR, "managed-skills"))),
-	];
+	const skills = [
+		...(await listDirNames(join(agentDir, "skills"), "dirs")),
+		...(await listDirNames(join(agentDir, "managed-skills"), "dirs")),
+	].sort();
 
-	const hook_additions: DirAddition[] = [];
+	const hooks: string[] = [];
 	try {
-		const events = await readdir(join(AGENT_DIR, "hooks"), { withFileTypes: true });
+		const events = await readdir(join(agentDir, "hooks"), { withFileTypes: true });
 		for (const event of events) {
 			if (!event.isDirectory()) continue;
-			for (const h of await dirAdditions(join(AGENT_DIR, "hooks", event.name))) {
-				hook_additions.push({ name: `${event.name}/${h.name}`, added_at: h.added_at });
+			for (const h of await listDirNames(join(agentDir, "hooks", event.name), "files")) {
+				hooks.push(`${event.name}/${h}`);
 			}
 		}
 	} catch {}
+	hooks.sort();
 
-	let agents_md_mtime: string | null = null;
+	let agents_md_hash: string | null = null;
 	try {
-		agents_md_mtime = (await stat(join(AGENT_DIR, "AGENTS.md"))).mtime.toISOString();
+		const text = await readFile(join(agentDir, "AGENTS.md"), "utf-8");
+		agents_md_hash = createHash("sha256").update(text).digest("hex");
 	} catch {}
 
-	return { config_snapshots, skill_additions, hook_additions, agents_md_mtime };
+	return {
+		timestamp: new Date().toISOString(),
+		config_hash,
+		memory_backend,
+		model_roles,
+		skills,
+		hooks,
+		agents_md_hash,
+	};
+}
+
+/** null if no snapshot has been saved yet (the very first run). */
+export async function loadHarnessSnapshot(dataDir: string): Promise<HarnessSnapshot | null> {
+	try {
+		return JSON.parse(await readFile(join(dataDir, HARNESS_SNAPSHOT_FILENAME), "utf-8")) as HarnessSnapshot;
+	} catch {
+		return null;
+	}
+}
+
+export async function saveHarnessSnapshot(dataDir: string, snapshot: HarnessSnapshot): Promise<void> {
+	await writeFile(join(dataDir, HARNESS_SNAPSHOT_FILENAME), JSON.stringify(snapshot, null, 2), "utf-8");
 }

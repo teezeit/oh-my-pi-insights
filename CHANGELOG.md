@@ -75,12 +75,19 @@ upstream verbatim; every entry below is a diff against it.
   suggestion if it names a feature unavailable in the live harness state
   (e.g. the `learn` tool when `memory.backend` is `mnemopi`) or an
   already-installed skill (exact name or close token-overlap match).
-- **Harness-change detection** (`src/harness.ts`): diffs
-  `config.yml.bak-*` snapshots, skill/hook install dates and `AGENTS.md`
-  mtime against the report window, surfacing memory-backend switches and
-  other harness changes in "What Changed This Week" (flagged `too_recent`
-  when fewer than 7 days of corpus data exist after the change) — a signal
-  independent of `src/temporal.ts`'s facet-derived model-switch diff.
+- **Harness-change detection** (`src/harness.ts`): persists a snapshot of the
+  live harness state (config.yml hash, memory backend, model roles, skill
+  names, hook names, AGENTS.md hash) to
+  `~/.omp/agent/usage-data/harness-snapshot.json` at the end of every run,
+  and diffs it against the previous run's snapshot — surfacing
+  memory-backend switches, model-role changes, skill/hook installs and
+  removals, and AGENTS.md edits in "What Changed This Week" (flagged
+  `too_recent` when fewer than 7 days have passed since the previous
+  snapshot). The first run, with no prior snapshot, reports no changes.
+  An earlier revision parsed `config.yml.bak-*` files instead; those are
+  written by hand or by an agent editing config.yml, not by omp, so they
+  are not a reliable change log — this is the fix. Independent of
+  `src/temporal.ts`'s facet-derived model-switch diff.
 - **Tooling-session exclusion** (`excludeToolingSessions`): this repo's own
   development sessions stay in every total (cost, tokens, sessions, active
   time, tool rates, the manifest) but are excluded from analysis inputs:

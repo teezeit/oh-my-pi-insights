@@ -38,6 +38,8 @@ import { createClaudeSessionSource } from "./src/sources/claude.ts";
 import { createOmpSessionSource, ompSessionSource } from "./src/sources/omp.ts";
 import { flattenYaml, gatherUserContext, parseSimpleYaml } from "./src/context.ts";
 import {
+	AGENT_DIR,
+	DATA_DIR,
 	deleteCachedFacets,
 	ensureDirs,
 	loadCachedFacets,
@@ -54,7 +56,13 @@ import {
 } from "./src/cache.ts";
 import { computeTemporalData } from "./src/temporal.ts";
 import { aggregateData, detectConcurrentSessions, excludeToolingSessions } from "./src/aggregate.ts";
-import { detectHarnessChanges, gatherHarnessState, type HarnessState } from "./src/harness.ts";
+import {
+	detectHarnessChanges,
+	gatherHarnessSnapshot,
+	loadHarnessSnapshot,
+	saveHarnessSnapshot,
+	type HarnessSnapshot,
+} from "./src/harness.ts";
 import {
 	buildFeaturesReference,
 	buildSectionPrompts,
@@ -90,7 +98,6 @@ import {
 } from "./src/stats.ts";
 import type {
 	AggregatedData,
-	HarnessChange,
 	ScanSummary,
 	SessionFacets,
 	SessionMeta,
@@ -248,10 +255,12 @@ async function runInsights(
 	// Fetched before the LLM phases: the facet phase needs the smol model role
 	// out of it, and the section prompts need the installed-skills list.
 	const userCtx = await gatherUserContext();
-	// B9: config.yml.bak-* snapshots, skill/hook install dates and AGENTS.md
-	// mtime, diffed against the report window further down once date_range is
-	// known (fs-only, costs no tokens, so gathered alongside userCtx).
-	const harnessState = await gatherHarnessState();
+	// Follow-up: read the previous run's harness snapshot and capture a fresh
+	// one now; diffed below once date_range is known, persisted at the end of
+	// this run (gatherHarnessSnapshot is fs-only, costs no tokens, so done
+	// alongside userCtx).
+	const previousHarnessSnapshot = await loadHarnessSnapshot(DATA_DIR);
+	const currentHarnessSnapshot = await gatherHarnessSnapshot(AGENT_DIR);
 	// The subprocess would otherwise use the configured default; pin it to the
 	// model actually active in this session so the report reflects /model.
 	const activeModel =
@@ -544,12 +553,13 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	scan.facets_analyzed = agg.sessions_with_facets;
 	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
 	const temporal = computeTemporalData(analysisMetas, facetsMap);
-	// B9: a separate, config/filesystem-derived "what changed" signal — see
-	// src/harness.ts. Only meaningful once a date range exists to diff against.
-	if (agg.date_range.start && agg.date_range.end) {
-		const harnessChanges: HarnessChange[] = detectHarnessChanges(
-			harnessState,
-			agg.date_range.start,
+	// Follow-up: snapshot diff instead of config.yml.bak-* parsing — see
+	// src/harness.ts. windowEnd gates too_recent only; the diff itself needs
+	// no date range (a snapshot diff is always "since last run").
+	if (agg.date_range.end) {
+		const harnessChanges = detectHarnessChanges(
+			previousHarnessSnapshot,
+			currentHarnessSnapshot,
 			agg.date_range.end,
 		);
 		if (harnessChanges.length) temporal.harness_changes = harnessChanges;
@@ -732,6 +742,11 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		{ encoding: "utf-8", mode: 0o600 },
 	);
 
+	// Persisted so the NEXT run can diff against it (see src/harness.ts); the
+	// snapshot captured at the top of this run, not a fresh read, so the
+	// comparison in detectHarnessChanges above and what's saved here agree.
+	await saveHarnessSnapshot(DATA_DIR, currentHarnessSnapshot);
+
 	const sessionPaths = Object.fromEntries(kept.map((m) => [m.session_id, m.session_path]));
 	const html = generateHTML(agg, renderSections, synthesis, temporal, { prevSections, sessionPaths, userCtx });
 	await writeFile(REPORT_PATH, html, { encoding: "utf-8" });
@@ -799,7 +814,7 @@ export {
 	extractSidecarUsage,
 	filterByEvidence,
 	filterSuggestions,
-	gatherHarnessState,
+	gatherHarnessSnapshot,
 	gatherUserContext,
 	generateHTML,
 	generateMarkdown,
@@ -812,9 +827,11 @@ export {
 	diffReports,
 	buildEvidenceLinks,
 	isMetaSession,
+	loadHarnessSnapshot,
 	parseSimpleYaml,
 	readUsage,
 	resolveLimit,
+	saveHarnessSnapshot,
 	toolErrorCategory,
 };
 export type {
@@ -824,7 +841,7 @@ export type {
 	ExtensionCommandContext,
 	Fact,
 	FeatureToTry,
-	HarnessState,
+	HarnessSnapshot,
 	OngoingFrictionItem,
 	ScanSummary,
 	SessionFacets,

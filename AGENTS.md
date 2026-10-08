@@ -19,7 +19,7 @@ Port of Observal/pi-insights (Pi harness) to omp. AGPL-3.0-only; keep SPDX heade
 | `src/stats.ts` | Per-session deterministic extraction | `extractSessionStats`, `buildSessionMeta`, `readUsage`, `toolErrorCategory`, `classifyErrorMessage` |
 | `src/aggregate.ts` | Corpus aggregation, 10-day decay weighting, concurrency, tooling-session exclusion | `aggregateData`, `detectConcurrentSessions`, `excludeToolingSessions` |
 | `src/temporal.ts` | Week-over-week deltas, anomalies, trajectory | `computeTemporalData` |
-| `src/harness.ts` | Harness-change detection (config/skills/hooks/AGENTS.md, separate from temporal.ts) | `detectHarnessChanges`, `gatherHarnessState` |
+| `src/harness.ts` | Harness-change detection via persisted run-to-run snapshots (config/model-roles/skills/hooks/AGENTS.md, separate from temporal.ts) | `detectHarnessChanges`, `gatherHarnessSnapshot`, `loadHarnessSnapshot`, `saveHarnessSnapshot` |
 | `src/cache.ts` | session-meta / facets / sections caches | `loadCachedMeta`, `saveMeta`, `loadCachedSections`, `pruneSections` |
 | `src/context.ts` | User context from `~/.omp/agent` (config.yml incl. memory backend, skills, managed-skills, extensions) | `gatherUserContext`, `parseSimpleYaml` |
 | `src/model.ts` | Shells out to `omp -p` | `callModel`, `parseJsonFromResponse` |

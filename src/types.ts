@@ -360,12 +360,20 @@ export type TemporalDelta = {
 	errors_per_session: { before: number; after: number; pct: number };
 };
 
-/** A detected change to the harness itself (config, skills, hooks, AGENTS.md) inside the report window. */
+/** A detected change to the harness itself between two run snapshots (config, model roles, skills, hooks, AGENTS.md). */
 export type HarnessChange = {
-	type: "memory_backend" | "skill_added" | "hook_added" | "agents_md_updated";
+	type:
+		| "memory_backend"
+		| "model_roles_changed"
+		| "skill_added"
+		| "skill_removed"
+		| "hook_added"
+		| "hook_removed"
+		| "agents_md_updated"
+		| "config_changed";
 	when: string;
 	detail: string;
-	/** Fewer than 7 days of corpus data exist after this change; too early to say whether it helped. */
+	/** Fewer than 7 days of corpus data exist since the previous snapshot; too early to say whether it helped. */
 	too_recent: boolean;
 };
 
@@ -386,7 +394,7 @@ export type TemporalData = {
 	 * printed delta now quotes this object.
 	 */
 	delta: TemporalDelta | null;
-	/** Optional: populated by index.ts from gatherHarnessState/detectHarnessChanges, outside computeTemporalData (src/temporal.ts owns only the facet-derived week-over-week diff). */
+	/** Optional: populated by index.ts from gatherHarnessSnapshot/loadHarnessSnapshot/detectHarnessChanges, outside computeTemporalData (src/temporal.ts owns only the facet-derived week-over-week diff). */
 	harness_changes?: HarnessChange[];
 };
 
