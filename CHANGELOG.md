@@ -9,10 +9,12 @@ Versioning restarts at `0.1.0` for this fork. Upstream
 `1.2.3`; carrying that number forward would have implied a continuity of
 package identity that does not exist, since this targets a different harness.
 
-## 0.1.0 — unreleased
+## 0.1.0-rc.1 - 2026-10-08
 
-First release of the omp port. The initial commit of this repository is
-upstream verbatim; every entry below is a diff against it.
+Internal test release (not published to npm). Install from git tag
+`v0.1.0-rc.1`; requires omp `>=18.8.4 <19`. First release of the omp port.
+The initial commit of this repository is upstream verbatim; every entry below
+is a diff against it.
 
 ### Added
 
@@ -79,14 +81,14 @@ upstream verbatim; every entry below is a diff against it.
   live harness state (config.yml hash, memory backend, model roles, skill
   names, hook names, AGENTS.md hash) to
   `~/.omp/agent/usage-data/harness-snapshot.json` at the end of every run,
-  and diffs it against the previous run's snapshot — surfacing
+  and diffs it against the previous run's snapshot, surfacing
   memory-backend switches, model-role changes, skill/hook installs and
   removals, and AGENTS.md edits in "What Changed This Week" (flagged
   `too_recent` when fewer than 7 days have passed since the previous
   snapshot). The first run, with no prior snapshot, reports no changes.
   An earlier revision parsed `config.yml.bak-*` files instead; those are
   written by hand or by an agent editing config.yml, not by omp, so they
-  are not a reliable change log — this is the fix. Independent of
+  are not a reliable change log; this is the fix. Independent of
   `src/temporal.ts`'s facet-derived model-switch diff.
 - **Tooling-session exclusion** (`excludeToolingSessions`): this repo's own
   development sessions stay in every total (cost, tokens, sessions, active
@@ -104,7 +106,7 @@ upstream verbatim; every entry below is a diff against it.
   item, plus `friction_analysis`'s `ongoing` items, now carries
   `evidence_sessions` (session ids from the data block); the suggestion
   section's four item arrays are filtered to drop anything citing fewer
-  than 2 distinct ids before render — "stop using the browser tool" from a
+  than 2 distinct ids before render. "Stop using the browser tool" from a
   single remark despite deliberate relay setup work is exactly the class of
   advice this was built to catch.
 - **Incident dedupe** (`src/postprocess.ts`, `dedupeIncidents`): sections are
@@ -124,12 +126,9 @@ upstream verbatim; every entry below is a diff against it.
   through the active model, then a sentence-boundary truncation if still
   over budget.
 - Collapsible HTML report (`<details>`/`<summary>`, zero new JavaScript):
-  every section collapsed by default except Summary and What Changed;
-  find-in-page still matches collapsed text, since the browser opens a
-  matching `<details>` natively. Long copyable-prompt blocks collapse
-  inside their card; the existing copy-button script still reads their
-  text while collapsed. Three charts (time of day, languages, response
-  times) demote into a collapsed "Numbers" sub-section.
+  every section except Top Actions and Summary is collapsed by default; a
+  friction-type pill pointing into a collapsed chart opens it natively.
+  Copyable text always shows in full.
 - **Action list** (`src/render/actions.ts`, `buildActionList`): the top 5
   `config_additions` / `stop_doing` / `usage_patterns` items, fixed priority
   (config additions first), rendered as checkboxes above every section in
@@ -212,8 +211,8 @@ upstream verbatim; every entry below is a diff against it.
   "before 2026-10-07"; a new `tool_calls_with_intent` count is read from
   the actual `tool_execution_start` records, and the prose/Markdown only
   mention `intent` when the corpus actually carries it.
-- `docs/how-it-works.html`'s worked example now uses synthetic numbers and
-  generic model names instead of a real run's costs, dates and model ids.
+- `docs/how-it-works.html` moved out of the repository: its worked example
+  was tied to one machine's corpus and went stale with every pipeline change.
 - Personal project names and anecdotes scrubbed from `src/prompts.ts`
   comments and test fixtures, replaced with neutral examples.
 - **Cost is now split by how it is actually paid for.** `AggregatedData`
@@ -231,18 +230,31 @@ upstream verbatim; every entry below is a diff against it.
   provider is present, with billed and unknown-basis amounts underneath, and
   a "Cost by Provider" table (HTML and Markdown). Prompts never quote dollar
   savings for subscription providers; they frame those as quota and speed.
-- Report theme is light (off-white background). Sections toggle with a CSS
-  chevron instead of the native marker.
-- "What Changed" is a non-collapsible "Since Last Report" block inside the
-  Summary card instead of a standalone section at the top.
-- The top action list is numbered with a copy button per item, not
-  checkboxes; the Markdown export uses `1.` items.
-- Evidence links also show `omp -r <session-id>` with a copy button.
+- Report design: light theme on an off-white background, neutral greys,
+  Inter/system font at 15px, no emojis anywhere (stripped from model text
+  too), no en/em dashes in rendered output. Section headers toggle with a
+  CSS chevron.
+- "What Changed" is a "Since Last Report" bullet list inside the Summary
+  card instead of a standalone section at the top.
+- Top Actions is a section heading above a numbered list of advice cards:
+  short semibold title (new `title` prompt field, <= 10 words), muted
+  reason, accent "Instead" line, the full copyable text, then meta rows.
+  The Markdown export uses `1.` items.
+- Copy buttons say what they copy ("Copy rule", "Copy config", "Copy hook
+  spec", "Copy prompt", "Copy command"), show a tooltip with the text, and
+  switch to "Copied" after a click.
+- Target files render as a file icon plus mono name ("APPLIES TO"), linked
+  when the file exists on disk.
+- Evidence is one row per session: `omp -r <session-id>`, a copy button, and
+  a "log" link to the session file.
+- Friction types render as pills on cards, in the Resolved list and in the
+  Friction Types chart; a card's pill links to its chart row.
 - "How You Work" renders 3-4 short titled blocks (body <= 60 words) plus the
   key pattern; cached sections with the old single narrative still render.
 
 ### Removed
 
+- **`docs/how-it-works.html`.** See Changed.
 - **The price table and token-derived cost.** omp records
   `usage.cost.total` per call, so cost is read rather than estimated. A
   session whose source kept no cost reports it as unavailable and never as $0.
@@ -258,6 +270,16 @@ upstream verbatim; every entry below is a diff against it.
 
 ### Fixed
 
+- **Dead copy buttons.** The inline report script declared its functions
+  with `export`, a syntax error in a classic `<script>`, so the browser
+  dropped the whole script and no button worked. A test now runs the
+  script and checks the functions exist and copy the right text.
+- **Reasons cut mid-sentence.** The word-budget sentence splitter skipped
+  text it could not match, so a decimal like `$18.51` dropped everything
+  before it ("51 each, ..."). It now splits only where punctuation is
+  followed by whitespace.
+- **Clicking a copy button toggled its config checkbox**: the whole card
+  was a `<label>`; only the checkbox and title toggle it now.
 - **Memory blowup from unbounded `omp -p` fan-out.** Facets ran 50 sessions
   at once, each long transcript fired every chunk summary in parallel, and
   all 8 sections ran together. Every call is a full omp process (~450 MB), so

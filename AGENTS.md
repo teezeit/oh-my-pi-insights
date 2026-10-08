@@ -66,7 +66,6 @@ Session id and start time come from the `session` record; project from its `cwd`
 ## Key Directories
 
 - `index.ts`: orchestration and entry; `src/`: modules per the table above; `src/sources/` adapters; `src/render/` output formats.
-- `docs/how-it-works.html`: standalone explainer of the pipeline.
 - `test/`: `node:test` suites, one per concern (`scanner`, `stats`, `friction`, `claude-source`, `report`, `config`).
 - `test/golden/report.md`: byte-exact Markdown golden.
 - `tools/verify-cost.sh`: jq cross-check of report totals against raw logs.

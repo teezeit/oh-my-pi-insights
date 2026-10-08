@@ -43,17 +43,55 @@ Set `OMP_INSIGHTS_OMP_BIN` if `omp` is not on `PATH`.
 
 ## Install
 
+Current release: **`v0.1.0-rc.1`** (internal test release, not on npm). The
+repository is private, so you need read access to
+`github.com/teezeit/oh-my-pi-insights`.
+
 ```bash
-omp -e ./index.ts        # try it from a checkout, no install
-omp plugin link .        # link the checkout as a plugin
-omp install @teezeit/omp-insights   # once published
+omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.1"
+omp plugin list            # shows the installed version and path
+omp plugin doctor          # verifies the install
 ```
 
-`omp plugin doctor` verifies the install; `omp plugin list` shows the
-resolved path. Not yet published to npm, so the third form does not work yet.
+Always install from the tag, not `#main`: `main` moves. To update, re-run the
+install with the newer tag. To remove: `omp plugin uninstall @teezeit/omp-insights`
+(the caches under `~/.omp/agent/usage-data/` stay; delete that folder too for a
+clean slate).
 
-`omp -e npm:<pkg>` does not work for an uninstalled package: it resolves as a
-path and fails with `Cannot find module`.
+From a checkout instead: `omp -e ./index.ts` (one session, no install) or
+`omp plugin link .` (links the checkout).
+
+### Trying it (for testers)
+
+1. Start omp in any project and run `/insights`. The first run reads every
+   session and classifies up to 50 of them, so it takes minutes, not seconds.
+2. The report opens in your browser; it is also at
+   `~/.omp/agent/usage-data/report.html`. Add `--md` for a Markdown copy.
+3. Re-render without any model calls: `/insights --no-llm`.
+4. Feedback: open an issue on the repository with the report section, what
+   you expected, and (if relevant) a screenshot. Do not attach `report.html`
+   or session logs unless you are fine sharing their content.
+
+Known limits in this release: untested on Windows; the Claude Code source
+(`--source claude`) has no interruption or per-tool timing data; nav links
+jump to a collapsed section's header but do not open it.
+
+## Data and cost
+
+- **What leaves your machine:** session transcripts (long ones in chunks)
+  are sent to *your own* configured model to classify each session (the
+  `smol` role), and an aggregated data block (stats plus short excerpts such
+  as first prompts, friction notes and file names, not full transcripts)
+  goes to your active model for the report sections. It all runs through
+  your local `omp -p` with your credentials; nothing goes anywhere else.
+- **What stays local:** the report, all caches and the audit manifest under
+  `~/.omp/agent/usage-data/`. Session logs are only read, never written.
+- **What it costs:** one smol call per not-yet-classified session (capped by
+  `--max-facets`, default 50) plus 9 calls on your active model. Re-runs reuse
+  cached classifications; `--no-llm` costs nothing. The dollar cost depends on
+  your models and has not been measured for this release.
+- **Memory:** each model call is a separate `omp -p` process (~450 MB); at
+  most 4 run at once (`--model-concurrency`).
 
 ## Usage
 
@@ -173,21 +211,26 @@ $ ./tools/verify-cost.sh
 ## Data layout
 
 Read-only against `~/.omp/agent/sessions`. Results are cached in
-`~/.omp/agent/usage-data/`:
+`~/.omp/agent/usage-data/` (under the active profile's agent directory when
+`OMP_PROFILE` or `PI_CODING_AGENT_DIR` is set):
 
 | Path | Contents |
 |------|----------|
 | `session-meta/<id>.json` | Deterministic stats; invalidated when a log's size or mtime changes |
 | `facets/<id>.json` | LLM-extracted facets, cleared by `--refresh` |
 | `sections/<hash>.json` | Generated sections and synthesis, keyed on the shared data block and active model; newest 5 kept |
+| `harness-snapshot.json` | Your setup at the last run (config hash, model roles, skills, hooks), diffed for "Since Last Report" |
 | `report.html` | Last generated HTML report |
 | `report.md` | Last Markdown export |
 | `session-set.json` | Audit manifest for the last run |
 
 ## Requirements
 
-- omp 18.x. Developed against `omp/18.1.14`; verified on `omp/18.8.0` (extension API, log schema, `omp -p` flags and both sources all unchanged)
-- No runtime dependencies beyond node builtins
+- omp `>=18.8.4 <19` (declared as `engines.omp` in `package.json`; omp does
+  not enforce it, so check `omp --version`). Developed against `omp/18.1.14`,
+  verified on `omp/18.8.4`.
+- Node `>=22.6` only for running the tests; inside omp there are no runtime
+  dependencies beyond built-ins.
 
 ## License
 
@@ -200,7 +243,7 @@ npm test                    # node --test, no dependencies
 npm run test:update-golden   # after an intentional report-layout change
 ```
 
-26 tests, ~0.4s. Node >= 22.6 (native TypeScript type-stripping); upstream ships
+195 tests, ~2s. Node >= 22.6 (native TypeScript type-stripping); upstream ships
 no test suite, builder or linter config, so this adds a runner rather than
 adopting one.
 
@@ -226,7 +269,7 @@ for 44 facets plus sections and synthesis.
 Sections are cached on a hash of the shared data block and the active model, so
 an unchanged corpus re-renders for free. The corpus changes whenever omp runs,
 though, so on a machine that is actively using omp the key legitimately misses:
-two consecutive runs here read $2790.305 and $2790.503, because the session
+two consecutive runs read slightly different totals because the session
 doing the measuring kept spending. Use `--no-llm` when you want a re-render
 with no spend; it reuses the newest cached generation and the report says so.
 
