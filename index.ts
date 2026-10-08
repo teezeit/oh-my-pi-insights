@@ -84,7 +84,7 @@ import {
 } from "./src/prompts.ts";
 import { callModel, createLimiter, parseJsonFromResponse } from "./src/model.ts";
 import { generateMarkdown } from "./src/render/md.ts";
-import { generateHTML } from "./src/render/html.ts";
+import { generateHTML, resolveTargetPath } from "./src/render/html.ts";
 import { buildFacts, checkFacts, type Fact } from "./src/facts.ts";
 import { DEFAULT_WORD_BUDGETS, dedupeIncidents, dedupeRecommendations, enforceBudget } from "./src/postprocess.ts";
 import { buildActionList, type ActionItem } from "./src/render/actions.ts";
@@ -851,6 +851,7 @@ export {
 	gatherHarnessSnapshot,
 	gatherUserContext,
 	generateHTML,
+	resolveTargetPath,
 	generateMarkdown,
 	buildFacts,
 	checkFacts,

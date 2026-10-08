@@ -15,6 +15,10 @@ import { diffReports, type ReportDiffEntry } from "./reportDiff.ts";
 import { diffConfigAddition } from "./configDiff.ts";
 import { type CopyKind, configAdditionTitle, copyKindForWhere, copyLabel, copyTooltip, isFillerText, itemTitle, stripEmoji } from "./text.ts";
 import type { AggregatedData, TemporalData, UserContext } from "../types.ts";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { AGENT_DIR } from "../cache.ts";
 
 export const SATISFACTION_ORDER = [
 	"frustrated",
@@ -156,10 +160,29 @@ function chartTitle(title: string, n: string): string {
 	return `<h3>${esc(title)} <span style="text-transform:none;font-weight:400;color:var(--muted)">${esc(n)}</span></h3>`;
 }
 
-/** 14px outline file icon: links the evidence row's copy command to the
- * actual session log on disk, with the full path as the hover title. */
+// Why: an outgoing-arrow icon, not a plain file glyph, so it reads as "opens elsewhere".
+const OPEN_ICON = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
+
+/** Evidence row's link to the session log on disk, full path as the hover title. */
 function fileIconLink(href: string, path: string): string {
-	return `<a class="file-icon-link" href="${esc(href)}" title="${esc(path)}" aria-label="Open session log"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></a>`;
+	return `<a class="file-icon-link" href="${esc(href)}" target="_blank" title="Open session log: ${esc(path)}" aria-label="Open session log">log ${OPEN_ICON}</a>`;
+}
+
+/** Absolute on-disk path for a suggestion's `where`, or null when it cannot be
+ * pinned down. `~/` and absolute paths resolve directly; a bare file name
+ * (e.g. "AGENTS.md") resolves against the omp agent dir only if it exists
+ * there. Why: a link to a guessed path that does not exist is worse than none. */
+export function resolveTargetPath(where: string, agentDir: string = AGENT_DIR, home: string = homedir()): string | null {
+	const w = where.trim();
+	const p = w.startsWith("~/") ? join(home, w.slice(2)) : isAbsolute(w) ? w : !w.includes("/") ? join(agentDir, w) : null;
+	return p && existsSync(p) ? p : null;
+}
+
+function targetChip(where: string): string {
+	const path = resolveTargetPath(where);
+	return path
+		? `<a class="meta-chip meta-link" href="file://${esc(path)}" target="_blank" title="Open ${esc(path)}">${esc(where)} ${OPEN_ICON}</a>`
+		: `<code class="meta-chip" title="Not found on disk at a known location">${esc(where)}</code>`;
 }
 
 /** Evidence line: an `omp -r <id>` replay command, a copy button, then a
@@ -207,7 +230,7 @@ function adviceCard(opts: {
 			: box;
 	}
 	const meta = opts.where
-		? `<div class="meta-row"><span class="meta-label">APPLIES TO</span> <code class="meta-chip">${esc(opts.where)}</code></div>`
+		? `<div class="meta-row"><span class="meta-label">APPLIES TO</span> ${targetChip(opts.where)}</div>`
 		: "";
 	return `<div class="advice-card" style="border-left-color:${opts.borderColor}">
       <h3 class="advice-title">${esc(opts.title)}</h3>
@@ -344,16 +367,17 @@ export function generateHTML(
 
 	// Since-last-report delta, folded into the Summary card instead of a
 	// standalone section: temporal diff headlines, the one major transition
-	// and harness-level changes, capped at 3 lines and only shown when any
+	// and harness-level changes, one bullet each (capped at 6), only shown when any
 	// of the three actually produced something.
 	const sinceLastReportLines: string[] = [];
-	if (temporal.diff_headlines.length) sinceLastReportLines.push(temporal.diff_headlines.join(" \u00b7 "));
+	// Why: one change per bullet; joined with separators the deltas ran together into one dense line.
+	if (temporal.diff_headlines.length) sinceLastReportLines.push(...temporal.diff_headlines);
 	if (temporal.major_transition) sinceLastReportLines.push(`Major shift (${temporal.major_transition.when}): ${temporal.major_transition.what}. Impact: ${temporal.major_transition.impact}`);
-	if (temporal.harness_changes?.length) sinceLastReportLines.push(`Harness: ${temporal.harness_changes.map((c) => c.detail).join("; ")}`);
+	for (const c of temporal.harness_changes ?? []) sinceLastReportLines.push(`Setup: ${c.detail}`);
 	const sinceLastReportHtml = sinceLastReportLines.length
 		? `<div class="at-a-glance-part since-last-report">
       <h3>Since Last Report${temporal.delta ? ` <span style="text-transform:none;font-weight:400">(${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})</span>` : ""}</h3>
-      <p>${sinceLastReportLines.slice(0, 3).map((l) => esc(l)).join("<br>")}</p>
+      <ul class="since-list">${sinceLastReportLines.slice(0, 6).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>
     </div>`
 		: "";
 
@@ -439,8 +463,8 @@ export function generateHTML(
   .evidence { margin-top: 8px; font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
   .evidence-link { display: flex; align-items: center; gap: 6px; }
   .evidence-cmd { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--accent2); font-size: 11px; }
-  .file-icon-link { color: var(--muted); display: inline-flex; align-items: center; }
-  .file-icon-link:hover { color: var(--accent); }
+  .file-icon-link { color: var(--accent); display: inline-flex; align-items: center; gap: 3px; font-size: 11px; text-decoration: none; }
+  .file-icon-link:hover { color: var(--accent2); text-decoration: underline; }
   .config-diff { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
   .config-diff-row { margin-top: 4px; color: var(--text); }
   .config-diff-row code { color: var(--accent2); }
@@ -477,6 +501,8 @@ export function generateHTML(
   .at-a-glance-part p { color: var(--text); line-height: 1.6; }
   .at-a-glance-part.since-last-report { background: var(--bg3); }
   .at-a-glance-part.since-last-report h3 { color: var(--accent2); }
+  .since-list { margin: 0; padding-left: 18px; color: var(--text); line-height: 1.6; }
+  .since-list li + li { margin-top: 4px; }
 
   .area-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
   .area-card h3 { color: var(--text); font-size: 15px; }
@@ -514,14 +540,17 @@ export function generateHTML(
 
   .meta-row { margin-top: 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px; }
   .meta-chip { text-transform: none; letter-spacing: 0; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--text); font-size: 12px; }
+  a.meta-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; }
+  a.meta-link:hover { border-color: var(--accent); text-decoration: underline; }
 
   .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .cost-table th, .cost-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
   .cost-table th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.4px; }
 
-  .copy-box { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--teal); white-space: pre-wrap; word-break: break-all; margin-top: 10px; }
-  .copy-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--bg3); border: 1px solid var(--border2); color: var(--dim); font-size: 12px; padding: 5px 12px; border-radius: var(--radius-sm); cursor: pointer; margin-top: 8px; transition: all 0.15s; }
-  .copy-btn:hover { color: var(--text); border-color: var(--accent); background: var(--bg2); }
+  .copy-box { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--teal); white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 10px; }
+  /* Why: buttons are the only interactive controls in a card; an accent tint separates them from the grey chips and code blocks around them. */
+  .copy-btn { display: inline-flex; align-items: center; gap: 6px; background: #e8f0fa; border: 1px solid #b9cde6; color: #1f4f8a; font-family: inherit; font-weight: 500; font-size: 12px; padding: 5px 12px; border-radius: var(--radius-sm); cursor: pointer; margin-top: 8px; transition: all 0.15s; }
+  .copy-btn:hover { background: #d6e5f6; border-color: #8fb0d8; color: #163d6d; }
   .copy-btn.tiny { padding: 2px 8px; margin-top: 0; font-size: 11px; }
   .copy-all-btn { background: var(--accent); color: #fff; font-weight: 600; border: none; padding: 8px 18px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; margin-top: 16px; transition: opacity 0.15s; }
   .copy-all-btn:hover { opacity: 0.85; }
@@ -773,7 +802,7 @@ ${actionListHtml}
           ${diffHtml}
           ${isFillerText(c.why) ? "" : `<p class="advice-reason">${esc(c.why)}</p>`}
           ${copyBlock}
-          <div class="meta-row"><span class="meta-label">APPLIES TO</span> <code class="meta-chip">${esc(c.where)}</code></div>
+          <div class="meta-row"><span class="meta-label">APPLIES TO</span> ${targetChip(c.where)}</div>
           ${evidenceHtml(c.evidence_sessions)}
         </div>
       </div>

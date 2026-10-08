@@ -3,9 +3,10 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregateData, computeTemporalData, generateHTML, type SessionFacets } from "../index.ts";
+import { aggregateData, computeTemporalData, generateHTML, resolveTargetPath, type SessionFacets } from "../index.ts";
 import { meta } from "./helpers.ts";
 
 test("every stat card and chart in the HTML report states its sample size", () => {
@@ -181,8 +182,28 @@ test("config addition meta row shows an APPLIES TO label with a mono chip, not a
 	const temporal = computeTemporalData([], new Map());
 	const html = generateHTML(agg, sections, {}, temporal);
 
-	assert.match(html, /<span class="meta-label">APPLIES TO<\/span> <code class="meta-chip">AGENTS\.md<\/code>/);
+	// The chip is a link when the target exists on this machine, plain code otherwise; resolveTargetPath has its own deterministic test.
+	assert.match(html, /<span class="meta-label">APPLIES TO<\/span> <(code|a) class="meta-chip[^"]*"[^>]*>AGENTS\.md/);
 	assert.doesNotMatch(html, /<h3 class="advice-title">[^<]*AGENTS\.md[^<]*<\/h3>/);
+});
+
+test("resolveTargetPath links only targets that exist: ~/ and absolute paths directly, bare names via the agent dir", async () => {
+	const root = await mkdtemp(join(tmpdir(), "omp-insights-target-"));
+	try {
+		const agentDir = join(root, "agent");
+		await mkdir(join(root, "home", "x"), { recursive: true });
+		await mkdir(agentDir, { recursive: true });
+		await writeFile(join(agentDir, "AGENTS.md"), "");
+		await writeFile(join(root, "home", "x", "f.ts"), "");
+		const home = join(root, "home");
+		assert.equal(resolveTargetPath("AGENTS.md", agentDir, home), join(agentDir, "AGENTS.md"));
+		assert.equal(resolveTargetPath("RULES.md", agentDir, home), null);
+		assert.equal(resolveTargetPath("~/x/f.ts", agentDir, home), join(home, "x", "f.ts"));
+		assert.equal(resolveTargetPath("~/x/missing.ts", agentDir, home), null);
+		assert.equal(resolveTargetPath("src/foo.ts", agentDir, home), null);
+	} finally {
+		await rm(root, { recursive: true });
+	}
 });
 
 test("evidence line orders the replay command, then the copy button, then the file icon link, with no bare short-id anchor", async () => {
