@@ -80,8 +80,11 @@ export function buildFacts(agg: AggregatedData, temporal: TemporalData): Fact[] 
 	const toolCalls = Object.values(agg.tool_calls_by_tool).reduce((a, b) => a + b, 0);
 	add("tool_errors", agg.total_tool_errors, "count", "tool results with isError", toolCalls, "tool calls");
 	add("tool_error_rate", share(agg.total_tool_errors, toolCalls), "pct", "failed tool calls / tool calls", toolCalls, "tool calls");
-	for (const r of agg.tool_error_rate_table)
-		add(`tool_error_rate.${r.tool}`, r.rate * 100, "pct", `failed / calls for ${r.tool}`, r.calls, `${r.tool} calls`);
+	for (const r of agg.tool_error_rate_table) {
+		add(`tool_error_rate.${r.tool}`, r.rate * 100, "pct", `failed / calls for ${r.tool} (browser includes eval calls driving the browser global)`, r.calls, `${r.tool} calls`);
+		for (const [cls, count] of Object.entries(r.classes))
+			add(`tool_error_class_share.${r.tool}.${cls}`, share(count, r.errors), "pct", `${cls} errors / ${r.tool} errors`, r.errors, `${r.tool} errors`);
+	}
 	for (const t of agg.tool_time_share.slice(0, 10))
 		add(`tool_time_share.${t.tool}`, t.share * 100, "pct", `${t.tool} share of measured tool wall clock`, sessions, "sessions");
 

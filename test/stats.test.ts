@@ -292,3 +292,41 @@ test("sidecar spend folds into the parent and stays broken out", () => {
 	// Duration comes from the log's own last timestamp, not the file mtime.
 	assert.equal(meta.duration_minutes, 20);
 });
+
+test("browser automation run through eval is attributed to browser, with error classes per tool", () => {
+	const at = 1_788_000_000_000;
+	const call = (id: string, name: string, args: Record<string, unknown>) => ({ type: "toolCall", id, name, arguments: args });
+	const result = (id: string, toolName: string, isError: boolean, text = "") => ({
+		type: "message",
+		timestamp: new Date(at + 2_000).toISOString(),
+		message: { role: "toolResult", toolName, toolCallId: id, isError, content: text ? [{ type: "text", text }] : [] },
+	});
+
+	const stats = extractSessionStats([
+		SESSION,
+		human("automate it", at),
+		assistant(0.1, [
+			call("e1", "eval", { language: "js", code: "const tab = await browser.open('https://example.test');" }),
+			call("e2", "eval", { language: "js", code: "await browser.open('https://example.test/login')" }),
+			call("e3", "eval", { language: "py", code: "x = None\nx.foo()" }),
+			call("e4", "eval", { language: "py", code: "print(1 + 1)" }),
+			call("b1", "browser", { action: "open", url: "https://example.test" }),
+		], at + 1_000),
+		result("e1", "eval", false),
+		result("e2", "eval", true, "Error: no matching page for https://example.test/login"),
+		result("e3", "eval", true, "TypeError: 'NoneType' object has no attribute 'foo'"),
+		result("e4", "eval", false),
+		result("b1", "browser", true, "Browser extension not connected"),
+	]);
+
+	assert.equal(stats.tool_calls_by_tool.browser, 3);
+	assert.equal(stats.tool_errors_by_tool.browser, 2);
+	assert.equal(stats.tool_calls_by_tool.eval, 2);
+	assert.equal(stats.tool_errors_by_tool.eval, 1);
+	assert.deepEqual(stats.tool_error_classes_by_tool, {
+		browser: { relay: 2 },
+		eval: { runtime: 1 },
+	});
+	assert.equal(stats.toolErrorCategories["Browser Failed"], 2);
+	assert.equal(stats.toolErrorCategories["Eval Failed"], 1);
+});

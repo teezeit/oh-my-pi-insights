@@ -273,6 +273,22 @@ export function classifyErrorMessage(text: string): string {
 	return "other";
 }
 
+// Why: browser automation mostly runs through `eval` (the `browser` global),
+// so counting errors by tool name blamed the browser relay's failures on eval
+// and produced "stop scripting in eval" advice. The error itself is still
+// decided by `isError`; these patterns only name its cause.
+const BROWSER_IN_CODE_RE = /\bbrowser\s*\./;
+const RELAY_ERROR_RE = /no matching page|not visible|extension (?:is )?not connected|\brelay\b|ECONNREFUSED|ECONNRESET|socket hang up|target (?:page )?closed|connection (?:closed|refused|lost)/i;
+
+/** Cause of a failed tool call: relay (browser/connectivity), syntax, timeout, runtime or other. */
+export function classifyToolError(text: string): string {
+	if (RELAY_ERROR_RE.test(text)) return "relay";
+	if (/SyntaxError|IndentationError|Unexpected token/.test(text)) return "syntax";
+	if (/timed? ?out|timeout|deadline exceeded/i.test(text)) return "timeout";
+	if (/\b[A-Z]\w*(?:Error|Exception)\b|Traceback/.test(text)) return "runtime";
+	return "other";
+}
+
 /** Lowercase word-token Jaccard overlap, used to tell a rephrase from a new ask. */
 export function jaccardOverlap(a: string, b: string): number {
 	const ta = new Set(a.toLowerCase().match(/\w+/g) ?? []);
@@ -367,6 +383,9 @@ export function extractSessionStats(entries: AnyEntry[]) {
 	const toolCallsByTool: Record<string, number> = {};
 	const toolErrorsByTool: Record<string, number> = {};
 	const toolNotFoundByTool: Record<string, number> = {};
+	const toolErrorClassesByTool: Record<string, Record<string, number>> = {};
+	// toolCallIds of eval calls whose code drives the `browser` global.
+	const browserEvalCalls = new Set<string>();
 	// Pre-seeded so every class reads as 0 rather than undefined when absent.
 	const errorClasses: Record<string, number> = { rate_limit: 0, quota: 0, auth: 0, other: 0 };
 	const ttsrRules: Record<string, number> = {};
@@ -590,6 +609,8 @@ export function extractSessionStats(entries: AnyEntry[]) {
 					turnToolCalls++;
 
 					const args = (block.arguments as Record<string, unknown>) ?? {};
+					if (toolName === "eval" && typeof args.code === "string" && BROWSER_IN_CODE_RE.test(args.code))
+						browserEvalCalls.add(toolId);
 					const filePath = typeof args.path === "string" ? args.path : "";
 
 					// omp routes MCP servers and tool devices through a write to
@@ -744,8 +765,13 @@ export function extractSessionStats(entries: AnyEntry[]) {
 					else if (EXPLORATION_TOOLS.includes(toolNameLower)) turnExplorationBeforeMutation++;
 				}
 			}
+			const resultText = msg.isError === true ? extractTextFromContent(msg.content).trim() : "";
+			// Rates are keyed by what the call was for, not which tool ran it.
+			const rateKey =
+				toolKey === "eval" && (browserEvalCalls.has(toolCallId) || RELAY_ERROR_RE.test(resultText))
+					? "browser"
+					: toolKey;
 			if (msg.isError === true) {
-				const resultText = extractTextFromContent(msg.content).trim();
 				const notFoundMatch = resultText.match(TOOL_NOT_FOUND_RE);
 				if (notFoundMatch) {
 					// The model invented a tool name; the harness's reply names it in
@@ -754,14 +780,17 @@ export function extractSessionStats(entries: AnyEntry[]) {
 					const invented = notFoundMatch[1]!;
 					toolNotFoundByTool[invented] = (toolNotFoundByTool[invented] ?? 0) + 1;
 				} else {
-					toolCallsByTool[toolKey] = (toolCallsByTool[toolKey] ?? 0) + 1;
-					toolErrorsByTool[toolKey] = (toolErrorsByTool[toolKey] ?? 0) + 1;
+					toolCallsByTool[rateKey] = (toolCallsByTool[rateKey] ?? 0) + 1;
+					toolErrorsByTool[rateKey] = (toolErrorsByTool[rateKey] ?? 0) + 1;
 					toolErrors++;
-					const cat = toolErrorCategory(toolNameRaw);
+					const cat = toolErrorCategory(rateKey === "browser" ? "browser" : toolNameRaw);
 					toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
+					const cls = classifyToolError(resultText);
+					const classes = (toolErrorClassesByTool[rateKey] ??= {});
+					classes[cls] = (classes[cls] ?? 0) + 1;
 				}
 			} else {
-				toolCallsByTool[toolKey] = (toolCallsByTool[toolKey] ?? 0) + 1;
+				toolCallsByTool[rateKey] = (toolCallsByTool[rateKey] ?? 0) + 1;
 			}
 		}
 		lastMessageIsAbortedAssistant = thisEntryAborted;
@@ -812,6 +841,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 		modelUsage,
 		tool_calls_by_tool: toolCallsByTool,
 		tool_errors_by_tool: toolErrorsByTool,
+		tool_error_classes_by_tool: toolErrorClassesByTool,
 		tool_not_found: toolNotFoundByTool,
 		error_classes: errorClasses,
 		error_generations: errorGenerations,
@@ -974,6 +1004,7 @@ export function buildSessionMeta(
 		model_usage: modelUsage,
 		tool_calls_by_tool: stats.tool_calls_by_tool,
 		tool_errors_by_tool: stats.tool_errors_by_tool,
+		tool_error_classes_by_tool: stats.tool_error_classes_by_tool,
 		tool_not_found: stats.tool_not_found,
 		error_classes: stats.error_classes,
 		error_generations: stats.error_generations,

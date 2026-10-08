@@ -327,6 +327,7 @@ export function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMe
 		// concepts; these friction signals are omp-only and read as absent, not zero.
 		tool_calls_by_tool: {},
 		tool_errors_by_tool: {},
+		tool_error_classes_by_tool: {},
 		tool_not_found: {},
 		error_classes: {},
 		error_generations: 0,
