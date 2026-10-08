@@ -116,7 +116,7 @@ export type SessionMeta = {
 	cost_recorded: boolean;
 	median_ttft_ms: number;
 	median_response_ms: number;
-	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number }>;
+	model_usage: ModelUsageMap;
 	// ── friction-signal additions (interruptions, errors, tool-not-found) ──
 	tool_calls_by_tool: Record<string, number>;
 	tool_errors_by_tool: Record<string, number>;
@@ -240,7 +240,18 @@ export type AggregatedData = {
 	total_compactions: number;
 	total_steering: number;
 	median_ttft_ms: number;
-	model_usage: Record<string, { input_tokens: number; output_tokens: number; cost: number; message_count: number; sessions: number; tier?: string }>;
+	model_usage: Record<string, ModelUsageEntry & {
+		sessions: number;
+		tier?: string;
+		/**
+		 * Implied list price, $ per million uncached tokens: cost.input / input
+		 * and cost.output / output. Why: blended cost / (input + output) folds
+		 * cache reads into the rate, so the same list price read 2-5x apart
+		 * between models with different cache mixes. Null when the source
+		 * recorded no per-component cost.
+		 */
+		list_price?: { input_per_mtok: number; output_per_mtok: number } | null;
+	}>;
 	model_efficiency: Array<{
 		model: string;
 		session_id: string;
@@ -436,12 +447,22 @@ export type UsageRecord = {
 	cacheRead: number;
 	cacheWrite: number;
 	cost: number;
+	/** usage.cost.input / .output: the uncached components, used to recover list price. */
+	costInput: number;
+	costOutput: number;
 };
 
-export type ModelUsageMap = Record<
-	string,
-	{ input_tokens: number; output_tokens: number; cost: number; message_count: number }
->;
+export type ModelUsageEntry = {
+	input_tokens: number;
+	output_tokens: number;
+	cost: number;
+	message_count: number;
+	// Optional: Claude Code logs and hand-built fixtures carry no per-component cost.
+	cost_input?: number;
+	cost_output?: number;
+};
+
+export type ModelUsageMap = Record<string, ModelUsageEntry>;
 
 export type SidecarUsage = {
 	totals: UsageRecord;

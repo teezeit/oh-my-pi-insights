@@ -78,12 +78,14 @@ test("readUsage reads the recorded cost and never invents one", () => {
 		cacheRead: 100,
 		cacheWrite: 20,
 		cost: 0.25,
+		costInput: 0,
+		costOutput: 0,
 	});
 	// Missing, malformed and non-numeric usage must all be zero, not NaN: a NaN
 	// would poison every total downstream.
 	for (const bad of [undefined, null, {}, { cost: null }, { input: "10", cost: { total: "1" } }]) {
 		const parsed = readUsage(bad);
-		assert.deepEqual(parsed, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
+		assert.deepEqual(parsed, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costInput: 0, costOutput: 0 });
 	}
 });
 

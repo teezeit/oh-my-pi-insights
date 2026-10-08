@@ -97,6 +97,10 @@ export function buildFacts(agg: AggregatedData, temporal: TemporalData): Fact[] 
 	for (const [model, u] of Object.entries(agg.model_usage)) {
 		add(`model_cost.${model}`, u.cost, "usd", `recorded cost on ${model}`, u.sessions, "sessions using the model");
 		add(`model_cost_share.${model}`, share(u.cost, agg.total_cost), "pct", `${model} cost / total cost`, u.sessions, "sessions using the model");
+		if (u.list_price) {
+			add(`list_price.input.${model}`, u.list_price.input_per_mtok, "usd", `implied list price per Mtok uncached input on ${model}`, u.sessions, "sessions using the model");
+			add(`list_price.output.${model}`, u.list_price.output_per_mtok, "usd", `implied list price per Mtok output on ${model}`, u.sessions, "sessions using the model");
+		}
 	}
 	add("estimated_waste", agg.estimated_waste, "usd", "heuristic model-mismatch waste over flagged sessions", agg.model_efficiency.length, "flagged sessions");
 	for (const e of agg.model_efficiency)

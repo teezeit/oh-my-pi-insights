@@ -188,6 +188,8 @@ export function readUsage(usage: unknown): UsageRecord {
 		cacheRead: typeof u.cacheRead === "number" ? u.cacheRead : 0,
 		cacheWrite: typeof u.cacheWrite === "number" ? u.cacheWrite : 0,
 		cost: typeof cost.total === "number" ? cost.total : 0,
+		costInput: typeof cost.input === "number" ? cost.input : 0,
+		costOutput: typeof cost.output === "number" ? cost.output : 0,
 	};
 }
 
@@ -197,6 +199,8 @@ export function addUsage(target: UsageRecord, add: UsageRecord): void {
 	target.cacheRead += add.cacheRead;
 	target.cacheWrite += add.cacheWrite;
 	target.cost += add.cost;
+	target.costInput += add.costInput;
+	target.costOutput += add.costOutput;
 }
 
 export function accumulateModel(
@@ -209,11 +213,15 @@ export function accumulateModel(
 		output_tokens: 0,
 		cost: 0,
 		message_count: 0,
+		cost_input: 0,
+		cost_output: 0,
 	});
 	slot.input_tokens += usage.input;
 	slot.output_tokens += usage.output;
 	slot.cost += usage.cost;
 	slot.message_count++;
+	slot.cost_input = (slot.cost_input ?? 0) + usage.costInput;
+	slot.cost_output = (slot.cost_output ?? 0) + usage.costOutput;
 }
 
 export const TOOL_ERROR_FAMILY: Record<string, string> = {
@@ -309,7 +317,7 @@ export function computeAbortHeuristicLabel(
  * activity would corrupt message counts, response times and hour-of-day.
  */
 export function extractSidecarUsage(entries: AnyEntry[]): SidecarUsage {
-	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costInput: 0, costOutput: 0 };
 	const modelUsage: ModelUsageMap = {};
 	let utilityCost = 0;
 	let toolCalls = 0;
@@ -354,7 +362,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 	const userMessageTimestamps: string[] = [];
 	const ttfts: number[] = [];
 	const responseDurations: number[] = [];
-	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costInput: 0, costOutput: 0 };
 	const modelUsage: ModelUsageMap = {};
 	const toolCallsByTool: Record<string, number> = {};
 	const toolErrorsByTool: Record<string, number> = {};
@@ -858,6 +866,8 @@ export function buildSessionMeta(
 				cacheRead: 0,
 				cacheWrite: 0,
 				cost: usage.cost,
+				costInput: usage.cost_input ?? 0,
+				costOutput: usage.cost_output ?? 0,
 			});
 			// accumulateModel counts one message; restore the real count.
 			modelUsage[model]!.message_count += usage.message_count - 1;

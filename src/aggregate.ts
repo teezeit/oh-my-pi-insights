@@ -388,12 +388,14 @@ export function aggregateData(
 
 		// Aggregate per-model usage
 		for (const [model, usage] of Object.entries(meta.model_usage ?? {})) {
-			if (!agg.model_usage[model]) agg.model_usage[model] = { input_tokens: 0, output_tokens: 0, cost: 0, message_count: 0, sessions: 0 };
-			agg.model_usage[model]!.input_tokens += usage.input_tokens;
-			agg.model_usage[model]!.output_tokens += usage.output_tokens;
-			agg.model_usage[model]!.cost += usage.cost;
-			agg.model_usage[model]!.message_count += usage.message_count;
-			agg.model_usage[model]!.sessions++;
+			const slot = (agg.model_usage[model] ??= { input_tokens: 0, output_tokens: 0, cost: 0, message_count: 0, cost_input: 0, cost_output: 0, sessions: 0 });
+			slot.input_tokens += usage.input_tokens;
+			slot.output_tokens += usage.output_tokens;
+			slot.cost += usage.cost;
+			slot.message_count += usage.message_count;
+			slot.cost_input = (slot.cost_input ?? 0) + (usage.cost_input ?? 0);
+			slot.cost_output = (slot.cost_output ?? 0) + (usage.cost_output ?? 0);
+			slot.sessions++;
 		}
 
 		if (meta.start_time) {
@@ -573,43 +575,43 @@ export function aggregateData(
 	);
 
 	// Model efficiency analysis
-	// Classify models by observed cost-per-token from actual usage data.
-	// Models with negligible cost-per-token (subscriptions like Mistral Pro, ChatGPT Plus)
+	// Classify models by their implied list price (see AggregatedData
+	// model_usage.list_price), never by blended cost per token: that rate
+	// mixes cache reads in and ranked identically priced models apart.
+	// Models with negligible cost (subscriptions like Mistral Pro, ChatGPT Plus)
 	// are classified as "subscription" and excluded from cost optimization recommendations.
 	const MODEL_TIERS: Record<string, "high" | "mid" | "low" | "subscription"> = {};
-	const MODEL_CPT: Record<string, number> = {}; // cost per 1k tokens
-
-	// Pre-compute cost-per-token for each model across all sessions
-	for (const meta of metas) {
-		for (const [model, usage] of Object.entries(meta.model_usage ?? {})) {
-			const totalTokens = usage.input_tokens + usage.output_tokens;
-			if (totalTokens > 0 && !MODEL_CPT[model]) {
-				// Use aggregate data for a stable estimate
-				const aggUsage = agg.model_usage[model];
-				if (aggUsage) {
-					const aggTotal = aggUsage.input_tokens + aggUsage.output_tokens;
-					if (aggTotal > 0) MODEL_CPT[model] = (aggUsage.cost / aggTotal) * 1000;
-				}
-			}
-		}
+	const INPUT_PRICE: Record<string, number> = {}; // implied list $ per Mtok uncached input
+	for (const [model, u] of Object.entries(agg.model_usage)) {
+		const perMtok = (cost: number | undefined, tokens: number) =>
+			cost && tokens > 0 ? Math.round((cost / tokens) * 1e6 * 1e4) / 1e4 : 0;
+		const input = perMtok(u.cost_input, u.input_tokens);
+		const output = perMtok(u.cost_output, u.output_tokens);
+		u.list_price = input || output ? { input_per_mtok: input, output_per_mtok: output } : null;
+		if (input > 0) INPUT_PRICE[model] = input;
 	}
 
-	// Derive tiers from cost-per-token distribution
-	const cptValues = Object.values(MODEL_CPT).filter(v => v > 0);
-	const cptMedian = cptValues.length ? cptValues.sort((a, b) => a - b)[Math.floor(cptValues.length / 2)]! : 0.01;
+	// Derive tiers from the list-price distribution
+	const priceValues = Object.values(INPUT_PRICE).sort((a, b) => a - b);
+	const priceMedian = priceValues.length ? priceValues[Math.floor(priceValues.length / 2)]! : 0;
 
 	const classifyModel = (name: string): "high" | "mid" | "low" | "subscription" => {
 		if (MODEL_TIERS[name]) return MODEL_TIERS[name]!;
-		const cpt = MODEL_CPT[name];
-		// Subscription detection: effectively zero cost-per-token or no cost recorded
-		// despite significant usage (fixed monthly plans)
+		const price = INPUT_PRICE[name];
+		// Subscription detection: no cost recorded despite significant usage
+		// (fixed monthly plans)
 		const aggUsage = agg.model_usage[name];
 		if (aggUsage && (aggUsage.input_tokens + aggUsage.output_tokens) > 10000 && aggUsage.cost < 0.01) {
 			MODEL_TIERS[name] = "subscription";
 			return "subscription";
 		}
-		if (!cpt || cpt < 0.001) {
-			// Very low cost, likely subscription or free tier
+		if (!price) {
+			if (aggUsage && aggUsage.cost > 0) {
+				// Cost recorded but no per-component split: price unknown, not cheap.
+				MODEL_TIERS[name] = "mid";
+				return "mid";
+			}
+			// Zero cost: subscription or free tier
 			if (aggUsage && aggUsage.message_count > 20) {
 				MODEL_TIERS[name] = "subscription";
 				return "subscription";
@@ -617,10 +619,10 @@ export function aggregateData(
 			MODEL_TIERS[name] = "low";
 			return "low";
 		}
-		// Classify relative to the median observed cost-per-token
-		if (cpt > cptMedian * 3) {
+		// Classify relative to the median implied list price
+		if (price > priceMedian * 3) {
 			MODEL_TIERS[name] = "high";
-		} else if (cpt < cptMedian * 0.4) {
+		} else if (price < priceMedian * 0.4) {
 			MODEL_TIERS[name] = "low";
 		} else {
 			MODEL_TIERS[name] = "mid";

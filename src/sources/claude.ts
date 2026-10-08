@@ -99,7 +99,7 @@ export function extractClaudeStats(entries: AnyEntry[]) {
 	let assistantMessageCount = 0;
 	let firstPrompt = "";
 	let lastAssistantTs: number | null = null;
-	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costInput: 0, costOutput: 0 };
 
 	for (const entry of entries) {
 		if (typeof entry.sessionId === "string" && !sessionId) sessionId = entry.sessionId;

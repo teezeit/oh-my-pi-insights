@@ -326,11 +326,12 @@ export function generateMarkdown(
 	// Claude Code's cost-state carries no per-model message count, so the
 	// column reports tokens where counts are unavailable rather than "0".
 	const haveMessageCounts = Object.values(agg.model_usage).some((u) => u.message_count > 0);
-	lines.push(`| Model | Cost | ${haveMessageCounts ? "Messages" : "Tokens"} |`);
-	lines.push(`|-------|------|----------|`);
+	lines.push(`| Model | Cost | ${haveMessageCounts ? "Messages" : "Tokens"} | List $/Mtok in / out |`);
+	lines.push(`|-------|------|----------|----------------------|`);
 	for (const [model, usage] of Object.entries(agg.model_usage).sort((a, b) => b[1].cost - a[1].cost).slice(0, 8)) {
+		const price = usage.list_price ? `$${usage.list_price.input_per_mtok} / $${usage.list_price.output_per_mtok}` : "unknown";
 		lines.push(
-			`| ${model.replace(/.*\//, "")} | $${usage.cost.toFixed(2)} | ${haveMessageCounts ? usage.message_count : fmtTokens(usage.input_tokens + usage.output_tokens)} |`,
+			`| ${model.replace(/.*\//, "")} | $${usage.cost.toFixed(2)} | ${haveMessageCounts ? usage.message_count : fmtTokens(usage.input_tokens + usage.output_tokens)} | ${price} |`,
 		);
 	}
 	if (agg.estimated_waste > 0) lines.push(`\n**Estimated waste from model mismatch:** $${agg.estimated_waste.toFixed(2)}`);

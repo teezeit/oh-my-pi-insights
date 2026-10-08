@@ -380,3 +380,47 @@ test("most_churned_files aggregates edits across sessions, top 10 by edits desc"
 	const coldIndex = agg.most_churned_files.findIndex((f) => f.path === "src/cold.ts");
 	assert(hotIndex < coldIndex);
 });
+
+test("model price comparison is cache-invariant: equal list prices compare equal at any cache mix", () => {
+	const at = Date.UTC(2026, 8, 7, 10, 0, 0);
+	// Same list price for both models: input $5/Mtok, output $25/Mtok, cacheRead $0.50/Mtok.
+	const priced = (model: string, input: number, cacheRead: number, output: number, ts: number) => {
+		const cost = { input: input * 5e-6, output: output * 25e-6, cacheRead: cacheRead * 0.5e-6, cacheWrite: 0, total: 0 };
+		cost.total = cost.input + cost.output + cost.cacheRead;
+		return {
+			type: "message",
+			timestamp: new Date(ts).toISOString(),
+			message: { role: "assistant", model, usage: { input, output, cacheRead, cacheWrite: 0, cost }, content: [], timestamp: ts },
+		};
+	};
+	const sessionWith = (id: string, entry: unknown) =>
+		buildSessionMeta(
+			{
+				id,
+				path: `/sessions/proj/${id}.jsonl`,
+				project_path: "/Users/me/projects/peach",
+				size: 1,
+				created: new Date(at),
+				modified: new Date(at + 60_000),
+				sidecars: [],
+				signature: "1:1",
+			},
+			[{ ...SESSION, id }, human("ask", at), entry as Record<string, unknown>],
+			[],
+		);
+
+	const agg = aggregateData(
+		[
+			sessionWith("uncached", priced("model-a", 100_000, 0, 10_000, at + 1_000)),
+			// 90% of input served from cache: blended $/token reads ~2.5x pricier.
+			sessionWith("cached", priced("model-b", 10_000, 90_000, 10_000, at + 1_000)),
+		],
+		new Map(),
+	);
+
+	const a = agg.model_usage["model-a"]!;
+	const b = agg.model_usage["model-b"]!;
+	assert.deepEqual(a.list_price, { input_per_mtok: 5, output_per_mtok: 25 });
+	assert.deepEqual(b.list_price, a.list_price);
+	assert.equal(a.tier, b.tier);
+});

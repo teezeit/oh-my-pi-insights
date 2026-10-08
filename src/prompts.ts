@@ -370,14 +370,13 @@ ${data}`,
 
 		model_efficiency: (() => {
 			const modelLines = Object.entries(agg.model_usage).sort((a, b) => b[1].cost - a[1].cost).map(([m, u]) => {
-				const totalTok = u.input_tokens + u.output_tokens;
-				const cpt = totalTok > 0 ? (u.cost / totalTok * 1000).toFixed(4) : "0";
-				return `- ${m.replace(/.*\//, "")}: ${u.sessions} sessions, $${u.cost.toFixed(2)} total, ${u.message_count} msgs, tier=${u.tier || "mid"}, $/1k-tok=${cpt}`;
+				const price = u.list_price ? `list price $${u.list_price.input_per_mtok}/Mtok input, $${u.list_price.output_per_mtok}/Mtok output` : "list price unknown";
+				return `- ${m.replace(/.*\//, "")}: ${u.sessions} sessions, $${u.cost.toFixed(2)} total, ${u.message_count} msgs, tier=${u.tier || "mid"}, ${price}`;
 			}).join("\n");
 			return `Analyze this model usage data and identify efficiency issues.
 
 IMPORTANT CONTEXT:
-- Model tiers are derived from observed cost-per-token in the user's actual usage
+- Model tiers and prices are implied list prices: recorded uncached input/output cost divided by uncached input/output tokens. They do not depend on cache hit ratio, so compare models by these, never by total cost divided by tokens (that blends cache reads in and is not comparable across models).
 - Models marked as "subscription" are on fixed monthly plans (e.g. Mistral Pro, ChatGPT Plus, Gemini Advanced). Their effective dollar cost per token is $0. Do NOT recommend switching away from subscription models to "save money."
 - However, subscriptions have finite quotas (rate limits, daily message caps, monthly token budgets). Within a subscription, heavier models consume more quota than lighter ones:
   * Mistral Pro: Medium 3.5 uses more message budget than Small or Codestral
@@ -398,7 +397,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "underspend_pattern": "1-2 sentences about when weaker models fail on complex tasks, or empty string if none",
   "quota_pressure": "1-2 sentences about subscription quota being burned by heavy models on trivial tasks. Suggest lighter models within the same subscription, or offloading to cheap PAYG. Empty string if no subscription models detected or if they're already using light subscription models.",
   "recommendation": "1-2 sentences with a specific model selection strategy. Reference the user's actual models by name. For subscriptions: use light models for simple tasks, reserve heavy ones for complex work. For PAYG: match tier to task complexity.",
-  "potential_savings_note": "1 sentence about realistic savings. If most usage is subscription, frame as 'quota preservation' or 'extending your monthly budget' rather than dollar savings.",
+  "potential_savings_note": "1 sentence about realistic savings. Quote only the estimated_waste fact; never estimate a savings percentage from per-token rates or model price differences. If most usage is subscription, frame as 'quota preservation' or 'extending your monthly budget' rather than dollar savings.",
   "cache_efficiency_note": "1 sentence about cache hit ratio: either reassuring if high, or naming the specific worst session(s) if a low ratio is burning money/latency on stale-context re-reads. Empty string if ratio is healthy and no session stands out."
 }
 
