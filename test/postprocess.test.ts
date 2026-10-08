@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dedupeIncidents, dedupeRecommendations, enforceBudget } from "../index.ts";
-import { DEFAULT_WORD_BUDGETS, truncateAtWord } from "../src/postprocess.ts";
+import { DEFAULT_WORD_BUDGETS, truncateAtSentence, truncateAtWord } from "../src/postprocess.ts";
 
 // C12: the same incident (same evidence session id) written up in multiple
 // sections collapses to one full write-up, in precedence order
@@ -198,4 +198,13 @@ test("enforceBudget truncates an over-budget interaction_style block body", asyn
 	)) as typeof sections;
 
 	assert.equal(result.interaction_style.blocks[0]!.body, longSentence);
+});
+
+test("truncateAtSentence keeps the start of a sentence containing decimals instead of dropping text before them", () => {
+	const text = "The three worst turns in the corpus all begin with a bare dispatch (a Linear URL or the generic Orca worker preamble) and run 133 to 148 round trips at $15.82 to $18.51 each, with up to 46 exploration calls before the first edit.";
+	const out = truncateAtSentence(text, 40);
+	assert.ok(out.startsWith("The three worst turns"), out);
+	assert.ok(out.includes("$15.82"), out);
+	// Whole sentences still win when they fit; a period inside a number is not a boundary.
+	assert.equal(truncateAtSentence("It cost $1.50 today. Then more text follows here.", 4), "It cost $1.50 today.");
 });

@@ -128,9 +128,12 @@ export function wordCount(text: string): number {
 	return trimmed ? trimmed.split(/\s+/).length : 0;
 }
 
+// Why: split only where terminal punctuation is followed by whitespace. A
+// global match() silently skips text it cannot match, so a period inside a
+// number ("$18.51") used to drop everything before it.
 function splitSentences(text: string): string[] {
-	const matches = text.match(/[^.!?]+[.!?]+(\s+|$)|[^.!?]+$/g);
-	return matches ? matches.map((s) => s.trim()).filter(Boolean) : [text.trim()];
+	const parts = text.trim().split(/(?<=[.!?])\s+/);
+	return parts.map((s) => s.trim()).filter(Boolean);
 }
 
 /** Truncates to the longest prefix of whole sentences that fits maxWords; a
