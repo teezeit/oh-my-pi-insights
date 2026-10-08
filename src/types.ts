@@ -339,7 +339,7 @@ export type ScanSummary = {
 	excluded_unparsed: number;
 	excluded_not_substantive: number;
 	excluded_by_since: number;
-	/** Sessions dropped because their project matched the tooling exclude list (this repo's own dev sessions by default); see excludeToolingSessions. */
+	/** Sessions matching the tooling exclude list (this repo's own dev sessions by default). Still counted in `included` and every total — only excluded from analysis inputs (friction, worst turns, facets merged into section prompts, suggestion evidence); see excludeToolingSessions / aggregateData. */
 	excluded_tooling: number;
 	/** Sessions whose facet extraction failed or returned nothing usable. */
 	facet_failures: number;

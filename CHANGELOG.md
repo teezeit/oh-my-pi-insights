@@ -82,12 +82,16 @@ upstream verbatim; every entry below is a diff against it.
   when fewer than 7 days of corpus data exist after the change) — a signal
   independent of `src/temporal.ts`'s facet-derived model-switch diff.
 - **Tooling-session exclusion** (`excludeToolingSessions`): this repo's own
-  development sessions are dropped before aggregation entirely (totals
-  included), so they no longer dominate worst-turn and friction signals.
+  development sessions stay in every total (cost, tokens, sessions, active
+  time, tool rates, the manifest) but are excluded from analysis inputs:
+  worst turns, friction, facets merged into session summaries, and
+  suggestion-evidence session ids (`worst_cache_sessions`). An earlier
+  revision dropped them before aggregation entirely, which also zeroed them
+  out of cost and session-count totals; this is the fix.
   Configurable via `--exclude-projects` / `OMP_INSIGHTS_EXCLUDE_PROJECTS`
   (comma-separated, substring-matched; `none` opts out), default excludes
-  `oh-my-pi-insights`. The excluded count is reported in the corpus audit
-  table and the session-set.json manifest.
+  `oh-my-pi-insights`. The excluded-from-analysis count is reported in the
+  corpus audit table as a caveat, not a subtraction from `included`.
 - **Evidence-backed suggestions** (`filterByEvidence`): every
   `config_additions`, `features_to_try`, `usage_patterns` and `stop_doing`
   item, plus `friction_analysis`'s `ongoing` items, now carries

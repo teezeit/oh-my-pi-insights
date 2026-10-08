@@ -229,7 +229,6 @@ export function generateMarkdown(
 	lines.push(`| Unparseable | ${scan.excluded_unparsed} |`);
 	lines.push(`| Below substance floor (<2 user messages or <1 min) | ${scan.excluded_not_substantive} |`);
 	lines.push(`| Outside --since window | ${scan.excluded_by_since} |`);
-	lines.push(`| Tooling (this repo's own dev sessions) | ${scan.excluded_tooling} |`);
 	lines.push(`| **Included** | **${scan.included}** |`);
 	lines.push("");
 	lines.push(
@@ -239,6 +238,12 @@ export function generateMarkdown(
 		lines.push("");
 		lines.push(
 			`_${scan.cost_unavailable} of ${scan.included} sessions carry no recorded cost in the \`${scan.source}\` logs. They contribute $0 to the totals above because this report never estimates cost from token counts; treat the spend figures as a lower bound._`,
+		);
+	}
+	if (scan.excluded_tooling) {
+		lines.push("");
+		lines.push(
+			`_${scan.excluded_tooling} of ${scan.included} sessions are this tool's own development work (matched against the tooling exclude list). They count in every total above — cost, tokens, active time, tool rates — but are left out of friction, worst-turn and suggestion-evidence analysis, so this tool's own build sessions never get mistaken for the user's work._`,
 		);
 	}
 	if (scan.reused_stale_sections) {

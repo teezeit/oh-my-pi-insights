@@ -171,10 +171,14 @@ export function activeHoursByDay(metas: SessionMeta[]): Record<string, number> {
  * B11: this tool's own development sessions (scanner port, friction-analysis
  * implementation) are naturally turn/tool-call heavy builds against this very
  * codebase, and would otherwise dominate worst-turn and friction signals
- * meant to reflect the user's other work. Dropped before aggregation
- * entirely — including from totals, not just friction/worst-turns — so
- * every number in the report describes only non-tooling work; callers
- * audit how many were dropped via ScanSummary.excluded_tooling.
+ * meant to reflect the user's other work. Follow-up revision: these sessions
+ * must still count in every total (cost, tokens, sessions, active time, tool
+ * rates, the manifest), so this matcher is no longer used to drop them from
+ * the corpus before aggregation. aggregateData calls it internally to build
+ * an isAnalysis set gating only the analysis-facing fields (worst turns,
+ * facets merged into session summaries/friction, suggestion-evidence session
+ * ids); computeTemporalData (anomalies, trajectory) still takes a
+ * pre-filtered list from index.ts, since nothing there feeds a total.
  */
 export function excludeToolingSessions(
 	metas: SessionMeta[],
@@ -188,6 +192,7 @@ export function excludeToolingSessions(
 export function aggregateData(
 	metas: SessionMeta[],
 	facetsMap: Map<string, SessionFacets>,
+	excludeProjects: string[] = [],
 ): AggregatedData {
 	const agg: AggregatedData = {
 		total_sessions: metas.length,
@@ -298,6 +303,12 @@ export function aggregateData(
 		{ calls: number; total_sec: number; p50Pairs: Array<{ value: number; weight: number }>; p90Pairs: Array<{ value: number; weight: number }> }
 	>();
 	const churnAcc = new Map<string, { edits: number; sessions: Set<string> }>();
+	// Tooling sessions stay in every total (cost, tokens, sessions, active
+	// time, tool rates, the manifest) but must not pollute the signals that
+	// feed the model's narrative: worst turns, friction, facets merged into
+	// session summaries, and the suggestion-evidence session ids
+	// (worst_cache_sessions). See excludeToolingSessions for the match rule.
+	const isAnalysis = new Set(excludeToolingSessions(metas, excludeProjects).map((m) => m.session_id));
 
 	// Decay weighting: half-life of 10 days for facet-derived charts
 	const latestTs = metas.reduce((max, m) => {
@@ -373,17 +384,21 @@ export function aggregateData(
 			p90Pairs.wall_sec.push({ value: meta.turn_p90.wall_sec, weight: w });
 		}
 		const project = meta.project_path.replace(/.*\//, "") || meta.project_path;
-		for (const t of meta.worst_turns) {
-			turnCorpusCandidates.push({
-				session_id: meta.session_id,
-				project,
-				prompt: t.prompt,
-				llm_round_trips: t.llm_round_trips,
-				tool_calls: t.tool_calls,
-				exploration_before_first_mutation: t.exploration_before_first_mutation,
-				wall_sec: t.wall_sec,
-				cost: t.cost,
-			});
+		// Worst turns feed the "worst turns across the corpus" prompt input;
+		// a tooling session's heavy refactor turns must not crowd it out.
+		if (isAnalysis.has(meta.session_id)) {
+			for (const t of meta.worst_turns) {
+				turnCorpusCandidates.push({
+					session_id: meta.session_id,
+					project,
+					prompt: t.prompt,
+					llm_round_trips: t.llm_round_trips,
+					tool_calls: t.tool_calls,
+					exploration_before_first_mutation: t.exploration_before_first_mutation,
+					wall_sec: t.wall_sec,
+					cost: t.cost,
+				});
+			}
 		}
 		for (const [tool, d] of Object.entries(meta.tool_duration_by_tool)) {
 			let acc = toolDurationAcc.get(tool);
@@ -438,6 +453,12 @@ export function aggregateData(
 		}
 		if (facets) {
 			agg.sessions_with_facets++;
+			// Everything below is narrative-facing (session summaries, friction
+			// counts/details, goal/outcome/satisfaction merges feeding the
+			// section prompts): a tooling session counts toward facet coverage
+			// above, but its facets must not shape what the model is told
+			// happened to the user.
+			if (!isAnalysis.has(meta.session_id)) continue;
 			const w = decayWeight(meta);
 			mergeWeighted(agg.goal_categories, facets.goal_categories, w);
 			if (facets.outcome) {
@@ -519,7 +540,10 @@ export function aggregateData(
 		agg.total_input_tokens + agg.total_cache_read_tokens > 0
 			? agg.total_cache_read_tokens / (agg.total_input_tokens + agg.total_cache_read_tokens)
 			: 0;
+	// Cited as suggestion evidence (session_id), so tooling sessions are
+	// excluded here too, not just from worst_turns_corpus.
 	agg.worst_cache_sessions = metas
+		.filter((m) => isAnalysis.has(m.session_id))
 		.map((m) => {
 			const tokens = m.input_tokens + m.cache_read_tokens;
 			// Derived fresh from the always-reliable persisted token counts

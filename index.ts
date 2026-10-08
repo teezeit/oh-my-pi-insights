@@ -531,15 +531,19 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	]);
 
 	// ── Phase 4: Aggregate + Insight Prompts ─────────────────────────────────────
-	// B11: drop this tool's own dev sessions before any downstream analysis —
-	// see excludeToolingSessions for why this is a full exclude, not a tag.
-	const analyzed = excludeToolingSessions(kept, excludeProjects);
-	scan.excluded_tooling = kept.length - analyzed.length;
-	const agg = aggregateData(analyzed, facetsMap);
-	scan.included = analyzed.length;
+	// Follow-up: tooling sessions (this tool's own dev work) now stay in every
+	// total (cost, tokens, sessions, active time, tool rates, the manifest)
+	// and are excluded only from analysis inputs — worst turns, friction,
+	// facets merged into session summaries/suggestion evidence — inside
+	// aggregateData itself. computeTemporalData's anomaly detection still
+	// needs the pre-filtered list, since nothing there feeds a total.
+	const analysisMetas = excludeToolingSessions(kept, excludeProjects);
+	scan.excluded_tooling = kept.length - analysisMetas.length;
+	const agg = aggregateData(kept, facetsMap, excludeProjects);
+	scan.included = kept.length;
 	scan.facets_analyzed = agg.sessions_with_facets;
-	scan.cost_unavailable = analyzed.filter((m) => m.cost_recorded === false).length;
-	const temporal = computeTemporalData(analyzed, facetsMap);
+	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
+	const temporal = computeTemporalData(analysisMetas, facetsMap);
 	// B9: a separate, config/filesystem-derived "what changed" signal — see
 	// src/harness.ts. Only meaningful once a date range exists to diff against.
 	if (agg.date_range.start && agg.date_range.end) {
@@ -709,7 +713,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 					output_tokens: agg.total_output_tokens,
 				},
 				fact_check: { flags: factFlags, facts },
-				sessions: analyzed.map((m) => ({
+				sessions: kept.map((m) => ({
 					session_id: m.session_id,
 					path: m.session_path,
 					log_signature: m.log_signature,

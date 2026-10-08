@@ -85,7 +85,6 @@ Scanned `/fixture/sessions`: 4 distinct sessions, 1 advisor sidecars, 2 subagent
 | Unparseable | 0 |
 | Below substance floor (<2 user messages or <1 min) | 1 |
 | Outside --since window | 0 |
-| Tooling (this repo's own dev sessions) | 0 |
 | **Included** | **2** |
 
 Facet coverage: 1 of 2 sessions analysed, 1 extraction(s) failed. Sessions without facets still count in every deterministic number above; they are absent only from the LLM-derived sections.
