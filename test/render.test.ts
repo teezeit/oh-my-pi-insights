@@ -176,14 +176,14 @@ test("every copy button has a non-empty title tooltip and never bare 'Copy' text
 	}
 });
 
-test("config addition meta row shows an APPLIES TO label with a mono chip, not a bare path on the title", async () => {
+test("config addition meta row shows an APPLIES TO label with a file target, not a bare path on the title", async () => {
 	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
 	const agg = aggregateData([], new Map());
 	const temporal = computeTemporalData([], new Map());
 	const html = generateHTML(agg, sections, {}, temporal);
 
-	// The chip is a link when the target exists on this machine, plain code otherwise; resolveTargetPath has its own deterministic test.
-	assert.match(html, /<span class="meta-label">APPLIES TO<\/span> <(code|a) class="meta-chip[^"]*"[^>]*>AGENTS\.md/);
+	// A link when the target exists on this machine, plain text otherwise; resolveTargetPath has its own deterministic test.
+	assert.match(html, /<span class="meta-label">APPLIES TO<\/span> <(span|a) class="file-target[^"]*"[^>]*><svg[\s\S]*?<\/svg><span>AGENTS\.md<\/span>/);
 	assert.doesNotMatch(html, /<h3 class="advice-title">[^<]*AGENTS\.md[^<]*<\/h3>/);
 });
 

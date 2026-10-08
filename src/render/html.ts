@@ -163,6 +163,9 @@ function chartTitle(title: string, n: string): string {
 // Why: an outgoing-arrow icon, not a plain file glyph, so it reads as "opens elsewhere".
 const OPEN_ICON = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`;
 
+// Why: a document glyph in front of the name marks it as a file, not a button or a tag.
+const FILE_ICON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`;
+
 /** Evidence row's link to the session log on disk, full path as the hover title. */
 function fileIconLink(href: string, path: string): string {
 	return `<a class="file-icon-link" href="${esc(href)}" target="_blank" title="Open session log: ${esc(path)}" aria-label="Open session log">log ${OPEN_ICON}</a>`;
@@ -181,8 +184,8 @@ export function resolveTargetPath(where: string, agentDir: string = AGENT_DIR, h
 function targetChip(where: string): string {
 	const path = resolveTargetPath(where);
 	return path
-		? `<a class="meta-chip meta-link" href="file://${esc(path)}" target="_blank" title="Open ${esc(path)}">${esc(where)} ${OPEN_ICON}</a>`
-		: `<code class="meta-chip" title="Not found on disk at a known location">${esc(where)}</code>`;
+		? `<a class="file-target file-target-link" href="file://${esc(path)}" target="_blank" title="Open ${esc(path)}">${FILE_ICON}<span>${esc(where)}</span>${OPEN_ICON}</a>`
+		: `<span class="file-target" title="File name only: which ${esc(where)} depends on the project, so it is not linked">${FILE_ICON}<span>${esc(where)}</span></span>`;
 }
 
 /** Evidence line: an `omp -r <id>` replay command, a copy button, then a
@@ -540,8 +543,11 @@ export function generateHTML(
 
   .meta-row { margin-top: 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px; }
   .meta-chip { text-transform: none; letter-spacing: 0; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--text); font-size: 12px; }
-  a.meta-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; }
-  a.meta-link:hover { border-color: var(--accent); text-decoration: underline; }
+  .file-target { display: inline-flex; align-items: center; gap: 5px; text-transform: none; letter-spacing: 0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--dim); }
+  .file-target svg { color: var(--muted); flex-shrink: 0; }
+  a.file-target-link { color: var(--accent); text-decoration: none; }
+  a.file-target-link svg { color: currentColor; }
+  a.file-target-link:hover span { text-decoration: underline; }
 
   .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .cost-table th, .cost-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
