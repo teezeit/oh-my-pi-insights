@@ -43,19 +43,14 @@ function buildFixtureHtml(sessionPaths: Record<string, string> = {}) {
 	});
 }
 
-// ── D16: collapsible sections ──────────────────────────────────────────────
+// ── Sections: plain, never collapsible ─────────────────────────────────────
 
-test("every rpt-section is a <details> with an id; only at-a-glance opens by default (D16)", async () => {
+test("report sections are plain <section> blocks with ids and no toggles anywhere", async () => {
 	const html = await buildFixtureHtml();
-	const sections = [...html.matchAll(/<details class="rpt-section" id="([^"]+)"( open)?>/g)];
-	assert.ok(sections.length >= 9, `found ${sections.length} report sections`);
-
-	const openIds = sections.filter((m) => m[2]).map((m) => m[1]);
-	assert.deepEqual(openIds.sort(), ["at-a-glance"]);
-
-	const closedIds = sections.filter((m) => !m[2]).map((m) => m[1]);
-	for (const id of ["stats", "projects", "style", "what-works", "friction", "suggestions", "horizon", "model-efficiency"])
-		assert.ok(closedIds.includes(id), `${id} should be closed by default`);
+	const ids = [...html.matchAll(/<section class="rpt-section" id="([^"]+)">/g)].map((m) => m[1]);
+	for (const id of ["at-a-glance", "stats", "projects", "style", "what-works", "friction", "suggestions", "horizon", "model-efficiency"])
+		assert.ok(ids.includes(id), `missing section ${id}`);
+	assert.doesNotMatch(html, /<details\b|<summary\b/);
 });
 
 test("changes render as a non-collapsible 'Since Last Report' block inside Summary, not a standalone section", async () => {
@@ -72,15 +67,9 @@ test("changes render as a non-collapsible 'Since Last Report' block inside Summa
 	assert.doesNotMatch(html, /id="what-changed"/);
 });
 
-test("copyable-prompt blocks render inside a nested, closed <details> (D16)", async () => {
+test("copyable prompts are shown directly, not behind a toggle", async () => {
 	const html = await buildFixtureHtml();
-	const nested = [...html.matchAll(/<details class="nested"[^>]*>/g)];
-	assert.ok(nested.length >= 2, `found ${nested.length} nested details`);
-	for (const m of nested) assert.ok(!/\bopen\b/.test(m[0]), `nested details must not be open: ${m[0]}`);
-
-	// The usage-pattern's copyable prompt text is still present in the DOM
-	// (just hidden), so copy-from-box keeps working on a collapsed block.
-	assert.match(html, /Scout src\/render for every call site of generateHTML before editing\./);
+	assert.match(html, /<div class="copy-box">Scout src\/render for every call site of generateHTML before editing\.<\/div>/);
 });
 
 test("no script beyond the existing copy-to-clipboard script is added (D16)", async () => {
@@ -122,49 +111,26 @@ test("an item with no evidence_sessions renders no evidence line", async () => {
 	assert.ok(!slice.includes('class="evidence"'));
 });
 
-// ── D21: demoted charts ─────────────────────────────────────────────────────
+// ── D21: secondary charts ───────────────────────────────────────────────────
 
-test("time-of-day, languages and response-time charts sit inside a collapsed Numbers details (D21)", async () => {
+test("languages, response-time and time-of-day charts follow the primary charts in the Stats section (D21)", async () => {
 	const html = await buildFixtureHtml();
-	const match = html.match(/<details class="nested" id="numbers">([\s\S]*?)<\/details>/);
-	assert.ok(match, "numbers details not found");
-	assert.ok(!/\bopen\b/.test(match![0].split("\n")[0] ?? ""));
-
-	const inside = match![1]!;
+	const numbersIdx = html.indexOf('<div id="numbers">');
+	assert.ok(numbersIdx > -1, "numbers block not found");
+	const inside = html.slice(numbersIdx, html.indexOf("</section>", numbersIdx));
 	for (const title of ["Languages", "Response Times", "Time of Day"]) assert.match(inside, new RegExp(`<h3>${title}`));
-
-	// The other charts stay directly in the Stats section, not demoted.
-	const beforeNumbers = html.slice(0, html.indexOf('<details class="nested" id="numbers">'));
+	const before = html.slice(html.indexOf('id="stats"'), numbersIdx);
 	for (const title of ["Goal Categories", "Outcomes", "Satisfaction", "Top Tools", "Friction Types", "Tool Errors"])
-		assert.match(beforeNumbers, new RegExp(`<h3>${title}`));
+		assert.match(before, new RegExp(`<h3>${title}`));
 });
 
-// ── Budget ───────────────────────────────────────────────────────────────────
-
-function visibleWordCount(html: string): number {
-	const stripped = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "");
-	const tokens = stripped.split(/(<\/?details\b[^>]*>)/gi);
-	const stack: boolean[] = [];
-	let words = 0;
-	for (const tok of tokens) {
-		const open = tok.match(/^<details\b([^>]*)>$/i);
-		if (open) {
-			stack.push(/\bopen\b/.test(open[1]!));
-			continue;
-		}
-		if (/^<\/details>$/i.test(tok)) {
-			stack.pop();
-			continue;
-		}
-		if (stack.some((v) => v === false)) continue;
-		const text = tok.replace(/<[^>]+>/g, " ");
-		words += text.split(/\s+/).filter(Boolean).length;
-	}
-	return words;
-}
-
-test("visible words in the default (collapsed) view stay under 1000 (Budget)", async () => {
-	const html = await buildFixtureHtml();
-	const words = visibleWordCount(html);
-	assert.ok(words < 1000, `visible word count ${words} >= 1000`);
+test("a friction card's type is a pill that links to its row in the Friction Types chart", async () => {
+	const sections = { friction_analysis: { ongoing: [{ category: "Agent Too Slow", description: "d", examples: [] }, { category: "Novel Thing", description: "d", examples: [] }] } };
+	const agg = { ...aggregateData([], new Map()), friction: { agent_too_slow: 4 } };
+	const html = generateHTML(agg, sections, {}, computeTemporalData([], new Map()));
+	assert.match(html, /<div class="bar-row" id="friction-type-agent-too-slow">[\s\S]*?<span class="category-pill friction">Agent Too Slow<\/span>/);
+	assert.match(html, /<a class="category-pill friction" href="#friction-type-agent-too-slow"[^>]*>Agent Too Slow<\/a>/);
+	// A type the chart does not show stays a pill but is not a dead link.
+	assert.match(html, /<span class="category-pill friction">Novel Thing<\/span>/);
+	assert.doesNotMatch(html, /href="#friction-type-novel-thing"/);
 });

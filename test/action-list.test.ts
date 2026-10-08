@@ -26,14 +26,14 @@ test("an empty suggestions section yields an empty action list, not a crash", ()
 	assert.deepEqual(buildActionList({}), []);
 });
 
-test("the action list renders before the first <details> section and before the first section in the HTML (D17)", async () => {
+test("the action list renders before the first report section in the HTML (D17)", async () => {
 	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
 	const agg = aggregateData([], new Map());
 	const temporal = computeTemporalData([], new Map());
 	const html = generateHTML(agg, sections, {}, temporal);
 
 	const actionIdx = html.indexOf('id="action-list"');
-	const firstSectionIdx = html.indexOf('<details class="rpt-section"');
+	const firstSectionIdx = html.indexOf('<section class="rpt-section"');
 	assert.ok(actionIdx > -1, "action list not rendered");
 	assert.ok(actionIdx < firstSectionIdx, "action list must render before the first report section");
 });

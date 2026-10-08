@@ -106,16 +106,6 @@ test("evidence links show the `omp -r <id>` replay command with a copy button", 
 	assert.match(html, /class="evidence-cmd"/);
 });
 
-test("summary elements carry the chevron class with no native details marker", () => {
-	const metas = [meta({ session_id: "s1" })];
-	const agg = aggregateData(metas, new Map());
-	const temporal = computeTemporalData(metas, new Map());
-	const html = generateHTML(agg, {}, {}, temporal);
-	assert.match(html, /<summary class="chevron-summary">/);
-	assert.match(html, /summary\.chevron-summary::-webkit-details-marker \{ display: none; \}/);
-	assert.match(html, /summary\.chevron-summary::after/);
-});
-
 test("cost label switches to API-equivalent when subscription_cost is positive", () => {
 	const metas = [meta({ session_id: "s1" })];
 	const agg = aggregateData(metas, new Map());

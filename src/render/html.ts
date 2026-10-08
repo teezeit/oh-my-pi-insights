@@ -64,7 +64,7 @@ export function wrapP(text: string): string {
 
 export function barChart(
 	data: Record<string, number>,
-	opts: { order?: string[]; limit?: number } = {},
+	opts: { order?: string[]; limit?: number; pillClass?: string; idPrefix?: string } = {},
 ): string {
 	let entries: [string, number][];
 	if (opts.order) {
@@ -80,13 +80,22 @@ export function barChart(
 	return entries
 		.map(([key, val]) => {
 			const pct = max > 0 ? (val / max) * 100 : 0;
-			return `<div class="bar-row">
-  <div class="bar-label">${esc(displayLabel(key))}</div>
+			const label = esc(displayLabel(key));
+			const id = opts.idPrefix ? ` id="${opts.idPrefix}${categorySlug(key)}"` : "";
+			return `<div class="bar-row"${id}>
+  <div class="bar-label"${opts.pillClass ? ` title="${label}"` : ""}>${opts.pillClass ? `<span class="category-pill ${opts.pillClass}">${label}</span>` : label}</div>
   <div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
   <div class="bar-count">${Math.round(val)}</div>
 </div>`;
 		})
 		.join("\n");
+}
+
+/** Shared key for a category across the chart (snake_case keys) and the
+ * cards (display labels): "agent_too_slow" and "Agent Too Slow" both map
+ * to "agent-too-slow", so a card pill can link to its chart row. */
+export function categorySlug(key: string): string {
+	return displayLabel(key).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
 export function timeOfDayChart(hours: number[]): string {
@@ -227,10 +236,8 @@ function adviceCard(opts: {
 	let copyBlock = "";
 	if (opts.copyable) {
 		const { text, kind } = opts.copyable;
-		const box = `<div class="copy-box">${esc(text)}</div><button class="copy-btn" onclick="copyFromBox(this)" title="${esc(copyTooltip(text))}">${copyLabel(kind)}</button>`;
-		copyBlock = text.length > 200
-			? `<details class="nested"><summary class="chevron-summary nested-chevron">Show text</summary>${box}</details>`
-			: box;
+		// Why: copyable text is always shown; a "Show text" toggle added a click for no gain.
+		copyBlock = `<div class="copy-box">${esc(text)}</div><button class="copy-btn" onclick="copyFromBox(this)" title="${esc(copyTooltip(text))}">${copyLabel(kind)}</button>`;
 	}
 	const meta = opts.where
 		? `<div class="meta-row"><span class="meta-label">APPLIES TO</span> ${targetChip(opts.where)}</div>`
@@ -254,6 +261,16 @@ export function generateHTML(
 ): string {
 	const sessionPaths = opts.sessionPaths ?? {};
 	const liveConfig = opts.userCtx?.config_yml_flat ?? {};
+	// Friction-type pill for a card; links to its row in the Friction Types chart when that row is shown.
+	// Why: same top-10 cut as the chart below, so no pill links to a row that is not rendered.
+	const FRICTION_CHART_LIMIT = 10;
+	const chartedFriction = new Set(Object.entries(agg.friction).sort((a, b) => b[1] - a[1]).slice(0, FRICTION_CHART_LIMIT).map(([k]) => categorySlug(k)));
+	const frictionPill = (category: string): string => {
+		const slug = categorySlug(category);
+		return chartedFriction.has(slug)
+			? `<a class="category-pill friction" href="#friction-type-${slug}" title="See this friction type in By the Numbers">${esc(category)}</a>`
+			: `<span class="category-pill friction">${esc(category)}</span>`;
+	};
 	const evidenceHtml = (ids: unknown): string => evidenceHtmlFor(ids, sessionPaths);
 	/** D18: a config.yml-targeted addition that parses as YAML renders as an
 	 * old -> new key diff instead of the raw addition text. */
@@ -441,28 +458,18 @@ export function generateHTML(
 
   .rpt-section { margin-bottom: 48px; display: block; }
   h2 { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
-  .rpt-section > summary.chevron-summary h2 { margin-bottom: 0; border-bottom: none; }
-  .rpt-section[open] > summary.chevron-summary h2 { margin-bottom: 24px; border-bottom: 1px solid var(--border); width: 100%; }
+  /* Category pills: the same pill marks a friction type in the chart and on
+     the friction cards, so a card visibly belongs to a chart row. */
+  .category-pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; line-height: 1.6; white-space: nowrap; text-transform: none; letter-spacing: 0; }
+  .category-pill.friction { background: #fdf3e1; color: #8a5a12; border: 1px solid #f0d9ae; }
+  a.category-pill { text-decoration: none; }
+  a.category-pill:hover { border-color: #d9a94f; }
+  .bar-row:target .category-pill { box-shadow: 0 0 0 2px #f0d9ae; }
+  /* Why: a pill label must shrink with an ellipsis inside its rounded border, not get clipped mid-pill. */
+  .bar-label .category-pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+  .bar-row:has(.category-pill) .bar-label { width: 190px; }
   h3 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
 
-  /* Toggles: hide the native marker, draw a chevron that rotates when
-     open, make the whole header row clickable with a hover background. */
-  summary.chevron-summary {
-    list-style: none; cursor: pointer; display: flex; align-items: center;
-    justify-content: space-between; gap: 10px; width: 100%;
-    padding: 10px 10px; border-radius: var(--radius-sm); transition: background 0.15s;
-  }
-  summary.chevron-summary::-webkit-details-marker { display: none; }
-  summary.chevron-summary::after {
-    content: "\u203A"; font-size: 20px; color: var(--muted); flex-shrink: 0;
-    transition: transform 0.2s ease;
-  }
-  summary.chevron-summary:hover { background: var(--bg3); }
-  details[open] > summary.chevron-summary::after { transform: rotate(90deg); }
-  summary.chevron-summary.nested-chevron { font-size: 12px; color: var(--dim); padding: 6px 8px; }
-  summary.chevron-summary.nested-chevron::after { font-size: 13px; }
-
-  details.nested { margin-top: 10px; }
   .evidence { margin-top: 8px; font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
   .evidence-link { display: flex; align-items: center; gap: 6px; }
   .evidence-cmd { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--accent2); font-size: 11px; }
@@ -608,8 +615,8 @@ export function generateHTML(
 ${actionListHtml}
 
 <!-- ── At a Glance ── -->
-<details class="rpt-section" id="at-a-glance" open>
-<summary class="chevron-summary"><h2>Summary</h2></summary>
+<section class="rpt-section" id="at-a-glance">
+<h2>Summary</h2>
   <div class="at-a-glance">
     ${sinceLastReportHtml}
     <div class="at-a-glance-part">
@@ -629,11 +636,11 @@ ${actionListHtml}
       ${wrapP(synthesis.ambitious_workflows ?? "")}
     </div>
   </div>
-</details>
+</section>
 
 <!-- ── Stats ── -->
-<details class="rpt-section" id="stats">
-<summary class="chevron-summary"><h2>By the Numbers</h2></summary>
+<section class="rpt-section" id="stats">
+<h2>By the Numbers</h2>
   <div class="stat-grid">
     ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`, nSessions, cardTitle("substantive sessions in the report", nSessions))}
     ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`, nSessions, cardTitle("human messages across all sessions", nSessions))}
@@ -673,7 +680,7 @@ ${actionListHtml}
     </div>
     <div class="chart-box">
       ${chartTitle("Friction Types", `n=${agg.sample_sizes.friction_sessions} sessions with friction, decay-weighted`)}
-      ${barChart(agg.friction, { limit: 10 })}
+      ${barChart(agg.friction, { limit: FRICTION_CHART_LIMIT, pillClass: "friction", idPrefix: "friction-type-" })}
     </div>
     <div class="chart-box">
       ${chartTitle("Tool Errors", `n=${agg.total_tool_errors} errors`)}
@@ -681,8 +688,8 @@ ${actionListHtml}
     </div>
   </div>
 
-  <details class="nested" id="numbers">
-  <summary class="chevron-summary nested-chevron">Numbers: languages, time of day, response times</summary>
+  <div id="numbers">
+  <h3 style="margin-top:28px">Languages, time of day, response times</h3>
   <div class="charts-grid" style="margin-top:12px">
     <div class="chart-box">
       ${chartTitle("Languages", `n=${Object.values(agg.languages).reduce((a, b) => a + b, 0)} file touches`)}
@@ -697,12 +704,12 @@ ${actionListHtml}
       ${timeOfDayChart(agg.message_hours)}
     </div>
   </div>
-  </details>
-</details>
+  </div>
+</section>
 
 <!-- ── Project Areas ── -->
-<details class="rpt-section" id="projects">
-<summary class="chevron-summary"><h2>Where You Worked</h2></summary>
+<section class="rpt-section" id="projects">
+<h2>Where You Worked</h2>
   <div class="card-grid ${areas.length > 2 ? "cols2" : ""}">
     ${areas
 			.map(
@@ -713,11 +720,11 @@ ${actionListHtml}
 			)
 			.join("\n")}
   </div>
-</details>
+</section>
 
 <!-- ── Interaction Style ── -->
-<details class="rpt-section" id="style">
-<summary class="chevron-summary"><h2>How You Work</h2></summary>
+<section class="rpt-section" id="style">
+<h2>How You Work</h2>
   <div class="card">
     ${
 			iStyle?.blocks?.length
@@ -738,11 +745,11 @@ ${actionListHtml}
 		}
     ${iStyle?.key_pattern ? `<div style="margin-top:16px;padding:14px 16px;background:var(--bg3);border-radius:var(--radius-sm);border:1px solid var(--border2);color:var(--accent2);font-size:14px;font-style:italic">"${esc(iStyle.key_pattern)}"</div>` : ""}
   </div>
-</details>
+</section>
 
 <!-- ── What's Working ── -->
-<details class="rpt-section" id="what-works">
-<summary class="chevron-summary"><h2>Wins</h2></summary>
+<section class="rpt-section" id="what-works">
+<h2>Wins</h2>
   ${whatWorks?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(whatWorks.intro)}</p>` : ""}
   <div class="card-grid ${(whatWorks?.impressive_workflows?.length ?? 0) > 1 ? "cols2" : ""}">
     ${(whatWorks?.impressive_workflows ?? [])
@@ -754,16 +761,16 @@ ${actionListHtml}
 			)
 			.join("\n")}
   </div>
-</details>
+</section>
 
 <!-- ── Friction ── -->
-<details class="rpt-section" id="friction">
-<summary class="chevron-summary"><h2>Where Things Broke</h2></summary>
+<section class="rpt-section" id="friction">
+<h2>Where Things Broke</h2>
   ${frictionSec?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(frictionSec.intro)}</p>` : ""}
   ${(frictionSec?.resolved?.length || resolvedSinceLastRun.length) ? `<div style="margin-bottom:20px">
     <h3 style="color:var(--green);font-size:13px;margin-bottom:10px">Resolved</h3>
-    ${(frictionSec?.resolved ?? []).map(r => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(r.category)}</strong> \u2014 ${esc(r.note)}</div>`).join("\n")}
-    ${resolvedSinceLastRun.filter(d => !(frictionSec?.resolved ?? []).some(r => r.category === d.category)).map(d => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(d.category)}</strong> \u2014 not in this run's friction list anymore</div>`).join("\n")}
+    ${(frictionSec?.resolved ?? []).map(r => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px">${frictionPill(r.category)} ${esc(r.note)}</div>`).join("\n")}
+    ${resolvedSinceLastRun.filter(d => !(frictionSec?.resolved ?? []).some(r => r.category === d.category)).map(d => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px">${frictionPill(d.category)} not in this run's friction list anymore</div>`).join("\n")}
   </div>` : ""}
   <div class="card-grid ${((frictionSec?.ongoing ?? frictionSec?.categories)?.length ?? 0) > 1 ? "cols2" : ""}">
     ${((frictionSec?.ongoing ?? frictionSec?.categories) ?? [])
@@ -772,19 +779,19 @@ ${actionListHtml}
 				const examples = (cat.examples ?? []).map((ex) => `<div class="example">${esc(ex)}</div>`).join("");
 				return `<div class="friction-card" style="border-left:3px solid var(--yellow)">
       <h3>${esc(title)}${cat.severity ? ` <span class="badge ${cat.severity === "high" ? "red" : cat.severity === "medium" ? "yellow" : "green"}">${cat.severity}</span>` : ""}${diffBadge(cat.category)}</h3>
-      <p>${esc(cat.description)}</p>
+      ${isFillerText(cat.description) ? "" : `<p>${esc(cat.description)}</p>`}
       <div class="examples">${examples}</div>
-      <div class="meta-row"><span class="meta-label">APPLIES TO</span> <code class="meta-chip">${esc(cat.category)}</code></div>
+      <div class="meta-row"><span class="meta-label">FRICTION TYPE</span> ${frictionPill(cat.category)}</div>
       ${evidenceHtml(cat.evidence_sessions)}
     </div>`;
 			})
 			.join("\n")}
   </div>
-</details>
+</section>
 
 <!-- ── Suggestions ── -->
-<details class="rpt-section" id="suggestions">
-<summary class="chevron-summary"><h2>Next Steps</h2></summary>
+<section class="rpt-section" id="suggestions">
+<h2>Next Steps</h2>
 
   ${
 		configAdditions.length
@@ -796,10 +803,7 @@ ${actionListHtml}
 				const title = configAdditionTitle(c);
 				const diffHtml = configAdditionHtml(c);
 				const kind = copyKindForWhere(c.where);
-				const box = `<div class="copy-box">${esc(c.addition)}</div><button class="copy-btn" onclick="copyFromBox(this)" title="${esc(copyTooltip(c.addition))}">${copyLabel(kind)}</button>`;
-				const copyBlock = c.addition.length > 200
-					? `<details class="nested"><summary class="chevron-summary nested-chevron">Show text</summary>${box}</details>`
-					: box;
+				const copyBlock = `<div class="copy-box">${esc(c.addition)}</div><button class="copy-btn" onclick="copyFromBox(this)" title="${esc(copyTooltip(c.addition))}">${copyLabel(kind)}</button>`;
 				return `<div class="advice-card" id="cfg-${i}" style="margin-bottom:10px;border-left-color:var(--accent)">
       <div style="display:flex;align-items:flex-start;gap:10px">
         <input type="checkbox" id="cfg-check-${i}" class="cfg-check" checked data-addition="${esc(c.addition)}" data-where="${esc(c.where)}" aria-label="Include in the copied block" style="margin-top:3px;accent-color:var(--accent);width:15px;height:15px;flex-shrink:0;cursor:pointer">
@@ -871,11 +875,11 @@ ${actionListHtml}
 			sessionPaths,
 		})).join("\n")}
   </div>` : ""}
-</details>
+</section>
 
 <!-- ── On the Horizon ── -->
-<details class="rpt-section" id="horizon">
-<summary class="chevron-summary"><h2>Future Workflows</h2></summary>
+<section class="rpt-section" id="horizon">
+<h2>Future Workflows</h2>
   ${horizonSec?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(horizonSec.intro)}</p>` : ""}
   <div style="display:flex;flex-direction:column;gap:12px">
     ${(horizonSec?.opportunities ?? [])
@@ -884,19 +888,17 @@ ${actionListHtml}
       <h3>${esc(o.title)}</h3>
       <p>${esc(o.whats_possible)}</p>
       <p class="how">${esc(o.how_to_try)}</p>
-      <details class="nested"><summary class="chevron-summary nested-chevron">Show prompt</summary>
       <div class="copy-box">${esc(o.copyable_prompt)}</div>
       <button class="copy-btn" onclick="copyFromBox(this)" title="${esc(copyTooltip(o.copyable_prompt))}">${copyLabel("prompt")}</button>
-      </details>
     </div>`,
 			)
 			.join("\n")}
   </div>
-</details>
+</section>
 
 <!-- ── Model Efficiency ── -->
-<details class="rpt-section" id="model-efficiency">
-<summary class="chevron-summary"><h2>Model Spend</h2></summary>
+<section class="rpt-section" id="model-efficiency">
+<h2>Model Spend</h2>
   ${modelEffSec?.summary ? `<p style="color:var(--muted);margin-bottom:16px">${esc(modelEffSec.summary)}</p>` : ""}
 
   <div class="stat-grid">
@@ -938,7 +940,7 @@ ${actionListHtml}
     ${modelEffSec.potential_savings_note ? `<p style="color:var(--muted);margin-top:6px;font-size:12px;font-style:italic">${esc(modelEffSec.potential_savings_note)}</p>` : ""}
   </div>` : ""}
 
-  ${agg.model_efficiency.length ? `<details class="nested"><summary class="chevron-summary nested-chevron">Flagged Sessions</summary>
+  ${agg.model_efficiency.length ? `<h3 style="margin-top:24px">Flagged Sessions</h3>
   <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
     ${agg.model_efficiency.slice(0, 10).map(e => `<div class="card" style="padding:14px 18px">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -952,8 +954,8 @@ ${actionListHtml}
       <p style="color:var(--muted);font-size:12px;margin-top:4px">${esc(e.goal)}</p>
     </div>`).join("\n")}
   </div>
-  </details>` : ""}
-</details>
+  ` : ""}
+</section>
 
 
 </div>
