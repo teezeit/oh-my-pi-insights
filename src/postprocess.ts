@@ -149,7 +149,14 @@ export function truncateAtSentence(text: string, maxWords: number): string {
 	return `${text.trim().split(/\s+/).slice(0, maxWords).join(" ")}\u2026`;
 }
 
-export type BudgetTarget = { section: string; arrayField?: string; field: string; maxWords: number };
+/** Hard-truncates at a word boundary with no ellipsis; used for short labels
+ * (e.g. `*.title`) where an appended "..." would blow the word budget back
+ * over the cap it exists to enforce. */
+export function truncateAtWord(text: string, maxWords: number): string {
+	return text.trim().split(/\s+/).slice(0, maxWords).join(" ");
+}
+
+export type BudgetTarget = { section: string; arrayField?: string; field: string; maxWords: number; noEllipsis?: boolean };
 
 // Why 40 words: C13's summary-card budget. Workflow descriptions (what_works)
 // get the same numeric cap rather than a separate "2 sentences" code path —
@@ -166,8 +173,12 @@ export const DEFAULT_WORD_BUDGETS: BudgetTarget[] = [
 	// C2: interaction_style's blocks shape (not the legacy narrative shape).
 	{ section: "interaction_style", arrayField: "blocks", field: "body", maxWords: 60 },
 	{ section: "interaction_style", field: "key_pattern", maxWords: 30 },
+	{ section: "suggestions", arrayField: "config_additions", field: "title", maxWords: 10, noEllipsis: true },
+	{ section: "suggestions", arrayField: "features_to_try", field: "title", maxWords: 10, noEllipsis: true },
+	{ section: "suggestions", arrayField: "usage_patterns", field: "title", maxWords: 10, noEllipsis: true },
+	{ section: "suggestions", arrayField: "stop_doing", field: "title", maxWords: 10, noEllipsis: true },
+	{ section: "friction_analysis", arrayField: "ongoing", field: "title", maxWords: 10, noEllipsis: true },
 ];
-
 /**
  * Over-budget fields get exactly one retry through the injected `retry`
  * (the real caller wires this to a model call asking for a shorter
@@ -188,7 +199,7 @@ export async function enforceBudget(
 			const text = item[target.field];
 			if (typeof text !== "string" || wordCount(text) <= target.maxWords) continue;
 			let candidate = await retry(text, target);
-			if (wordCount(candidate) > target.maxWords) candidate = truncateAtSentence(candidate, target.maxWords);
+			if (wordCount(candidate) > target.maxWords) candidate = target.noEllipsis ? truncateAtWord(candidate, target.maxWords) : truncateAtSentence(candidate, target.maxWords);
 			item[target.field] = candidate;
 		}
 	}

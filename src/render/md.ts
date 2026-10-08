@@ -11,6 +11,7 @@ import { top8 } from "../aggregate.ts";
 import { SESSION_SET_PATH } from "../cache.ts";
 import { buildActionList } from "./actions.ts";
 import { diffConfigAddition } from "./configDiff.ts";
+import { itemTitle, stripEmoji } from "./text.ts";
 import type { AggregatedData, ScanSummary, TemporalData, UserContext } from "../types.ts";
 
 export function fmtHours(h: number): string {
@@ -37,37 +38,50 @@ export function generateMarkdown(
 	scan: ScanSummary,
 	userCtx: UserContext,
 ): string {
+	// Why: every rendered text field is LLM-sourced or user-supplied, not
+	// chrome; strip emoji from it the same way the HTML renderer does
+	// rather than trust the model not to decorate a heading or title.
+	const clean = (s: string): string => stripEmoji(s);
 	const lines: string[] = [];
 	lines.push(scan.source === "omp" ? "# omp Insights" : `# Insights (${scan.source})`);
 	lines.push(`> ${agg.date_range.start} to ${agg.date_range.end} | ${agg.total_sessions} sessions | Generated ${new Date().toLocaleDateString()}`);
 	lines.push("");
 	const actionItems = buildActionList(sections);
 	if (actionItems.length) {
-		lines.push("## \u2705 Top Actions");
-		actionItems.forEach((item, i) => lines.push(`${i + 1}. **${item.label}**${item.where ? ` (\`${item.where}\`)` : ""}: ${item.detail}`));
+		lines.push("## Top Actions");
+		actionItems.forEach((item, i) => {
+			lines.push(`${i + 1}. **${clean(item.title)}**${item.where ? ` (\`${item.where}\`)` : ""}`);
+			lines.push(`   ${clean(item.reason)}`);
+			if (item.instead) lines.push(`   ${item.instead.label}: ${clean(item.instead.text)}`);
+			if (item.copyable) {
+				lines.push("   ```");
+				lines.push(`   ${item.copyable.text}`);
+				lines.push("   ```");
+			}
+		});
 		lines.push("");
 	}
 
 	if (temporal.diff_headlines.length || temporal.major_transition || temporal.harness_changes?.length) {
-		lines.push(`## \u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}`);
-		for (const h of temporal.diff_headlines) lines.push(`- ${h}`);
-		if (temporal.major_transition) lines.push(`- **Major shift (${temporal.major_transition.when}):** ${temporal.major_transition.what}. ${temporal.major_transition.impact}`);
+		lines.push(`## What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}`);
+		for (const h of temporal.diff_headlines) lines.push(`- ${clean(h)}`);
+		if (temporal.major_transition) lines.push(`- **Major shift (${temporal.major_transition.when}):** ${clean(temporal.major_transition.what)}. ${clean(temporal.major_transition.impact)}`);
 		for (const c of temporal.harness_changes ?? []) {
-			lines.push(`- **Harness change (${c.when.slice(0, 10)}):** ${c.detail}${c.too_recent ? " _(too recent to assess impact)_" : ""}`);
+			lines.push(`- **Harness change (${c.when.slice(0, 10)}):** ${clean(c.detail)}${c.too_recent ? " _(too recent to assess impact)_" : ""}`);
 		}
 		lines.push("");
 	}
 
 	if (synthesis.whats_working || synthesis.whats_hindering || synthesis.quick_wins || synthesis.ambitious_workflows) {
-		lines.push("## \u26A1 Summary");
-		if (synthesis.whats_working) lines.push(`**What's working:** ${synthesis.whats_working}`);
-		if (synthesis.whats_hindering) lines.push(`\n**What's hindering you:** ${synthesis.whats_hindering}`);
-		if (synthesis.quick_wins) lines.push(`\n**Quick wins:** ${synthesis.quick_wins}`);
-		if (synthesis.ambitious_workflows) lines.push(`\n**Ambitious workflows:** ${synthesis.ambitious_workflows}`);
+		lines.push("## Summary");
+		if (synthesis.whats_working) lines.push(`**What's working:** ${clean(synthesis.whats_working)}`);
+		if (synthesis.whats_hindering) lines.push(`\n**What's hindering you:** ${clean(synthesis.whats_hindering)}`);
+		if (synthesis.quick_wins) lines.push(`\n**Quick wins:** ${clean(synthesis.quick_wins)}`);
+		if (synthesis.ambitious_workflows) lines.push(`\n**Ambitious workflows:** ${clean(synthesis.ambitious_workflows)}`);
 		lines.push("");
 	}
 
-	lines.push("## \u{1F4CA} By the Numbers");
+	lines.push("## By the Numbers");
 	lines.push(`| Metric | Value |`);
 	lines.push(`|--------|-------|`);
 	lines.push(`| Sessions | ${agg.total_sessions} (${agg.days_active} active days) |`);
@@ -92,7 +106,7 @@ export function generateMarkdown(
 	lines.push(`| Parallel Sessions | ${agg.concurrent_sessions.overlap_events} overlap events across ${agg.concurrent_sessions.sessions_involved} sessions |`);
 	lines.push("");
 
-	lines.push("## \u{1F6A6} Interruptions and Failures");
+	lines.push("## Interruptions and Failures");
 	lines.push(`| Metric | Value |`);
 	lines.push(`|--------|-------|`);
 	lines.push(`| Interruption rate | ${(agg.interruption_rate * 100).toFixed(1)}% of human messages |`);
@@ -130,7 +144,7 @@ export function generateMarkdown(
 	}
 
 	if (agg.total_turns > 0) {
-		lines.push("## \u{1F501} Worst Turns");
+		lines.push("## Worst Turns");
 		lines.push(`A turn is one human message up to the next. ${agg.total_turns} turns across ${agg.total_sessions} sessions.`);
 		lines.push("");
 		lines.push(`| Prompt | Round Trips | Tool Calls | Exploration-before-edit | Wall Clock | Cost |`);
@@ -150,7 +164,7 @@ export function generateMarkdown(
 	// Cost attribution. Advisor and subagent logs are separate sessions with
 	// their own spend; omitting them undercounts badly, so they are folded
 	// into the total and shown separately.
-	lines.push("## \u{1F4B0} Where the Money Went");
+	lines.push("## Where the Money Went");
 	lines.push(`| Bucket | Cost | Share |`);
 	lines.push(`|--------|------|-------|`);
 	const share = (v: number) => (agg.total_cost > 0 ? `${((v / agg.total_cost) * 100).toFixed(1)}%` : "0%");
@@ -187,7 +201,7 @@ export function generateMarkdown(
 		lines.push("");
 	}
 
-	lines.push("## \u{1F527} Tools");
+	lines.push("## Tools");
 	lines.push(`| Tool | Calls |`);
 	lines.push(`|------|-------|`);
 	for (const [tool, count] of top8(agg.tool_counts)) lines.push(`| ${tool} | ${count} |`);
@@ -223,7 +237,7 @@ export function generateMarkdown(
 	}
 
 	if (Object.keys(agg.languages).length) {
-		lines.push("## \u{1F4C1} Languages and Projects");
+		lines.push("## Languages and Projects");
 		lines.push(`Languages: ${top8(agg.languages).map(([l, c]) => `${l} (${c})`).join(", ")}`);
 		lines.push("");
 		lines.push(`| Project | Sessions |`);
@@ -234,7 +248,7 @@ export function generateMarkdown(
 
 	// Provenance: what the scan actually looked at, so the numbers above can
 	// be reconciled against the logs rather than trusted.
-	lines.push("## \u{1F50D} Corpus");
+	lines.push("## Corpus");
 	lines.push(`Scanned \`${scan.sessions_dir}\`: ${scan.primary_logs} distinct sessions, ${scan.advisor_logs} advisor sidecars, ${scan.subagent_logs} subagent sidecars${scan.duplicate_logs ? `, ${scan.duplicate_logs} duplicate log(s) dropped` : ""}.`);
 	lines.push("");
 	lines.push(`| Excluded | Sessions |`);
@@ -258,7 +272,7 @@ export function generateMarkdown(
 	if (scan.excluded_tooling) {
 		lines.push("");
 		lines.push(
-			`_${scan.excluded_tooling} of ${scan.included} sessions are this tool's own development work (matched against the tooling exclude list). They count in every total above — cost, tokens, active time, tool rates — but are left out of friction, worst-turn and suggestion-evidence analysis, so this tool's own build sessions never get mistaken for the user's work._`,
+			`_${scan.excluded_tooling} of ${scan.included} sessions are this tool's own development work (matched against the tooling exclude list). They count in every total above - cost, tokens, active time, tool rates - but are left out of friction, worst-turn and suggestion-evidence analysis, so this tool's own build sessions never get mistaken for the user's work._`,
 		);
 	}
 	if (scan.reused_stale_sections) {
@@ -271,7 +285,7 @@ export function generateMarkdown(
 	lines.push(`Session set and per-session cost: \`${SESSION_SET_PATH}\``);
 	lines.push("");
 
-	lines.push("## \u2699\uFE0F Your Setup");
+	lines.push("## Your Setup");
 	lines.push(`- Default model: \`${userCtx.default_model || "not set"}\``);
 	if (Object.keys(userCtx.model_roles).length)
 		lines.push(`- Model roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => `${r}=\`${m}\``).join(", ")}`);
@@ -286,8 +300,8 @@ export function generateMarkdown(
 
 	const areas = (sections.project_areas as { areas?: Array<{ name: string; session_count: number; description: string }> })?.areas ?? [];
 	if (areas.length) {
-		lines.push("## \u{1F5C2}\uFE0F Where You Worked");
-		for (const a of areas) lines.push(`- **${a.name}** (${a.session_count} sessions): ${a.description}`);
+		lines.push("## Where You Worked");
+		for (const a of areas) lines.push(`- **${clean(a.name)}** (${a.session_count} sessions): ${clean(a.description)}`);
 		lines.push("");
 	}
 
@@ -295,77 +309,91 @@ export function generateMarkdown(
 		| { narrative?: string; key_pattern?: string; blocks?: Array<{ title: string; body: string; evidence_sessions?: string[] }> }
 		| undefined;
 	if (iStyle?.blocks?.length) {
-		lines.push("## \u{1F3AF} How You Work");
-		for (const b of iStyle.blocks) lines.push(`- **${b.title}**: ${b.body}`);
-		if (iStyle.key_pattern) lines.push(`\n> ${iStyle.key_pattern}`);
+		lines.push("## How You Work");
+		for (const b of iStyle.blocks) lines.push(`- **${clean(b.title)}**: ${clean(b.body)}`);
+		if (iStyle.key_pattern) lines.push(`\n> ${clean(iStyle.key_pattern)}`);
 		lines.push("");
 	} else if (iStyle?.narrative) {
-		lines.push("## \u{1F3AF} How You Work");
-		lines.push(iStyle.narrative);
-		if (iStyle.key_pattern) lines.push(`\n> ${iStyle.key_pattern}`);
+		lines.push("## How You Work");
+		lines.push(clean(iStyle.narrative));
+		if (iStyle.key_pattern) lines.push(`\n> ${clean(iStyle.key_pattern)}`);
 		lines.push("");
 	}
 
 	const whatWorks = sections.what_works as { impressive_workflows?: Array<{ title: string; description: string }> } | undefined;
 	if (whatWorks?.impressive_workflows?.length) {
-		lines.push("## \u2728 Wins");
-		for (const w of whatWorks.impressive_workflows) lines.push(`- **${w.title}**: ${w.description}`);
+		lines.push("## Wins");
+		for (const w of whatWorks.impressive_workflows) lines.push(`- **${clean(w.title)}**: ${clean(w.description)}`);
 		lines.push("");
 	}
 
-	const frictionSec = sections.friction_analysis as { intro?: string; resolved?: Array<{ category: string; note: string }>; ongoing?: Array<{ category: string; description: string; examples: string[] }>; categories?: Array<{ category: string; description: string; examples: string[] }> } | undefined;
+	const frictionSec = sections.friction_analysis as
+		| {
+				intro?: string;
+				resolved?: Array<{ category: string; note: string }>;
+				ongoing?: Array<{ title?: string; category: string; description: string; examples: string[] }>;
+				categories?: Array<{ title?: string; category: string; description: string; examples: string[] }>;
+		  }
+		| undefined;
 	if (frictionSec) {
-		lines.push("## \u26A0\uFE0F Where Things Broke");
-		if (frictionSec.intro) lines.push(frictionSec.intro);
+		lines.push("## Where Things Broke");
+		if (frictionSec.intro) lines.push(clean(frictionSec.intro));
 		if (frictionSec.resolved?.length) {
 			lines.push("\n**Resolved:**");
-			for (const r of frictionSec.resolved) lines.push(`- \u2705 ${r.category}: ${r.note}`);
+			for (const r of frictionSec.resolved) lines.push(`- ${clean(r.category)}: ${clean(r.note)}`);
 		}
 		const ongoing = frictionSec.ongoing ?? frictionSec.categories ?? [];
 		if (ongoing.length) {
 			lines.push("\n**Ongoing:**");
 			for (const o of ongoing) {
-				lines.push(`- **${o.category}**: ${o.description}`);
-				for (const ex of o.examples ?? []) lines.push(`  - ${ex}`);
+				lines.push(`- **${clean(itemTitle(o.title, o.category, o.description))}**: ${clean(o.description)}`);
+				for (const ex of o.examples ?? []) lines.push(`  - ${clean(ex)}`);
 			}
 		}
 		lines.push("");
 	}
 
-	const suggSec = sections.suggestions as { config_additions?: Array<{ addition: string; why: string; where: string }>; features_to_try?: Array<{ feature: string; why_for_you: string; example: string }>; usage_patterns?: Array<{ title: string; detail: string; copyable_prompt: string }>; stop_doing?: Array<{ what: string; why: string; alternative: string }> } | undefined;
+	const suggSec = sections.suggestions as
+		| {
+				config_additions?: Array<{ title?: string; addition: string; why: string; where: string }>;
+				features_to_try?: Array<{ title?: string; feature: string; why_for_you: string; example: string }>;
+				usage_patterns?: Array<{ title: string; detail: string; copyable_prompt: string }>;
+				stop_doing?: Array<{ title?: string; what: string; why: string; alternative: string }>;
+		  }
+		| undefined;
 	if (suggSec) {
-		lines.push("## \u{1F4A1} Next Steps");
+		lines.push("## Next Steps");
 		if (suggSec.config_additions?.length) {
 			lines.push("**Config additions:**");
 			for (const c of suggSec.config_additions) {
 				const diff = c.where.includes("config.yml") ? diffConfigAddition(userCtx.config_yml_flat, c.addition) : null;
 				const body = diff ? diff.map((d) => `${d.key}: ${d.from} -> ${d.to}`).join("; ") : c.addition;
-				lines.push(`- \`${c.where}\`: ${body} (${c.why})`);
+				lines.push(`- \`${c.where}\`: ${body} (${clean(c.why)})`);
 			}
 		}
 		if (suggSec.features_to_try?.length) {
 			lines.push("\n**Features to try:**");
-			for (const f of suggSec.features_to_try) lines.push(`- **${f.feature}**: ${f.why_for_you}\n  \`\`\`\n  ${f.example}\n  \`\`\``);
+			for (const f of suggSec.features_to_try) lines.push(`- **${clean(itemTitle(f.title, f.feature, f.why_for_you))}**: ${clean(f.why_for_you)}\n  \`\`\`\n  ${f.example}\n  \`\`\``);
 		}
 		if (suggSec.usage_patterns?.length) {
 			lines.push("\n**Usage patterns:**");
-			for (const p of suggSec.usage_patterns) lines.push(`- **${p.title}**: ${p.detail}\n  \`\`\`\n  ${p.copyable_prompt}\n  \`\`\``);
+			for (const p of suggSec.usage_patterns) lines.push(`- **${clean(p.title)}**: ${clean(p.detail)}\n  \`\`\`\n  ${p.copyable_prompt}\n  \`\`\``);
 		}
 		if (suggSec.stop_doing?.length) {
-			lines.push("\n**\u{1F6D1} Stop doing:**");
-			for (const s of suggSec.stop_doing) lines.push(`- **${s.what}**: ${s.why}. Instead: ${s.alternative}`);
+			lines.push("\n**Stop doing:**");
+			for (const s of suggSec.stop_doing) lines.push(`- **${clean(itemTitle(s.title, s.what, s.why))}**: ${clean(s.why)}. Instead: ${clean(s.alternative)}`);
 		}
 		lines.push("");
 	}
 
 	const horizonSec = sections.on_the_horizon as { opportunities?: Array<{ title: string; whats_possible: string; copyable_prompt: string }> } | undefined;
 	if (horizonSec?.opportunities?.length) {
-		lines.push("## \u{1F680} Future Workflows");
-		for (const o of horizonSec.opportunities) lines.push(`- **${o.title}**: ${o.whats_possible}\n  \`\`\`\n  ${o.copyable_prompt}\n  \`\`\``);
+		lines.push("## Future Workflows");
+		for (const o of horizonSec.opportunities) lines.push(`- **${clean(o.title)}**: ${clean(o.whats_possible)}\n  \`\`\`\n  ${o.copyable_prompt}\n  \`\`\``);
 		lines.push("");
 	}
 
-	lines.push("## \u{1F4B8} Model Spend");
+	lines.push("## Model Spend");
 	// Claude Code's cost-state carries no per-model message count, so the
 	// column reports tokens where counts are unavailable rather than "0".
 	const haveMessageCounts = Object.values(agg.model_usage).some((u) => u.message_count > 0);

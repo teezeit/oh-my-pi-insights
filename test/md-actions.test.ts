@@ -51,7 +51,7 @@ test("generateMarkdown starts with the action list as a numbered list (not `- [ 
 	const md = generateMarkdown(agg, sections, {}, temporal, scan, userCtx);
 
 	const headings = [...md.matchAll(/^## .+$/gm)].map((m) => m[0]);
-	assert.equal(headings[0], "## \u2705 Top Actions");
+	assert.equal(headings[0], "## Top Actions");
 
 	const actionBlock = md.slice(md.indexOf(headings[0]!), md.indexOf(headings[1]!));
 	assert.ok(!actionBlock.includes("- [ ]"), "action list must not use checkbox markdown");
@@ -65,4 +65,23 @@ test("an empty suggestions section renders no Top Actions heading", async () => 
 	const temporal = computeTemporalData([], new Map());
 	const md = generateMarkdown(agg, {}, {}, temporal, scan, userCtx);
 	assert.ok(!md.includes("Top Actions"));
+});
+
+test("rendered Markdown report contains no emoji/pictograph characters anywhere", async () => {
+	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
+	const agg = aggregateData([], new Map());
+	const temporal = computeTemporalData([], new Map());
+	const synthesis = { whats_working: "Fast iteration \u{1F680} on small edits." };
+	const md = generateMarkdown(agg, { ...sections, fun_ending: { headline: "Nice \u2705 run" } }, synthesis, temporal, scan, userCtx);
+	const emojiMatch = md.match(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
+	assert.equal(emojiMatch, null, `found emoji character: ${emojiMatch?.[0]}`);
+});
+
+test("Top Actions renders as `1. **Title**` with the reason and copyable text as a fenced block", async () => {
+	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
+	const agg = aggregateData([], new Map());
+	const temporal = computeTemporalData([], new Map());
+	const md = generateMarkdown(agg, sections, {}, temporal, scan, userCtx);
+	assert.match(md, /1\. \*\*Never commit without running the changed test file first\.\*\*/);
+	assert.match(md, /```\n {3}Never commit without running the changed test file first\.\n {3}```/);
 });

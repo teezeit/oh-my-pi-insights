@@ -13,6 +13,7 @@ import { buildActionList, type ActionItem } from "./actions.ts";
 import { buildEvidenceLinks } from "./evidence.ts";
 import { diffReports, type ReportDiffEntry } from "./reportDiff.ts";
 import { diffConfigAddition } from "./configDiff.ts";
+import { type CopyKind, configAdditionTitle, copyKindForWhere, copyLabel, copyTooltip, isFillerText, itemTitle, stripEmoji } from "./text.ts";
 import type { AggregatedData, TemporalData, UserContext } from "../types.ts";
 
 export const SATISFACTION_ORDER = [
@@ -33,8 +34,12 @@ export const OUTCOME_ORDER = [
 	"unclear_from_transcript",
 ];
 
+/** Every rendered string funnels through here: HTML-escaped and stripped
+ * of emoji/pictograph codepoints, so a model emitting a decorative icon
+ * in a title or description can't reintroduce what the redesign removed
+ * from the surrounding chrome. */
 export function esc(s: unknown): string {
-	return String(s ?? "")
+	return stripEmoji(String(s ?? ""))
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
@@ -102,21 +107,21 @@ export function timeOfDayChart(hours: number[]): string {
 
 export function responseTimeChart(times: number[]): string {
 	const buckets: Record<string, number> = {
-		"2–10s": 0,
-		"10–30s": 0,
-		"30s–1m": 0,
-		"1–2m": 0,
-		"2–5m": 0,
-		"5–15m": 0,
+		"2-10s": 0,
+		"10-30s": 0,
+		"30s-1m": 0,
+		"1-2m": 0,
+		"2-5m": 0,
+		"5-15m": 0,
 		">15m": 0,
 	};
 	for (const t of times) {
-		if (t < 10) buckets["2–10s"]!++;
-		else if (t < 30) buckets["10–30s"]!++;
-		else if (t < 60) buckets["30s–1m"]!++;
-		else if (t < 120) buckets["1–2m"]!++;
-		else if (t < 300) buckets["2–5m"]!++;
-		else if (t < 900) buckets["5–15m"]!++;
+		if (t < 10) buckets["2-10s"]!++;
+		else if (t < 30) buckets["10-30s"]!++;
+		else if (t < 60) buckets["30s-1m"]!++;
+		else if (t < 120) buckets["1-2m"]!++;
+		else if (t < 300) buckets["2-5m"]!++;
+		else if (t < 900) buckets["5-15m"]!++;
 		else buckets[">15m"]!++;
 	}
 	const max = Math.max(...Object.values(buckets));
@@ -151,18 +156,67 @@ function chartTitle(title: string, n: string): string {
 	return `<h3>${esc(title)} <span style="text-transform:none;font-weight:400;color:var(--muted)">${esc(n)}</span></h3>`;
 }
 
-/** D18/D22-style: render an `omp -r <id>` replay command with its own copy
- * button next to the file:// link, so the reader never has to retype the
- * session id to reopen it in omp. */
+/** 14px outline file icon: links the evidence row's copy command to the
+ * actual session log on disk, with the full path as the hover title. */
+function fileIconLink(href: string, path: string): string {
+	return `<a class="file-icon-link" href="${esc(href)}" title="${esc(path)}" aria-label="Open session log"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></a>`;
+}
+
+/** Evidence line: an `omp -r <id>` replay command, a copy button, then a
+ * file icon linking to the session log (only when its path is known; an
+ * id with no known path is dropped, not linked to a dead href). */
 function evidenceHtmlFor(ids: unknown, sessionPaths: Record<string, string>): string {
 	const links = buildEvidenceLinks(ids, sessionPaths);
 	if (!links.length) return "";
-	return `<div class="evidence">Evidence: ${links
+	// Why: one session per row; inline comma-separated rows wrapped mid-command and read as noise.
+	return `<div class="evidence"><span class="meta-label">EVIDENCE</span>${links
 		.map((l) => {
 			const cmd = `omp -r ${l.id}`;
-			return `<span class="evidence-link"><a href="${esc(l.href)}">${esc(l.id.slice(0, 8))}</a> <code class="evidence-cmd">${esc(cmd)}</code><button class="copy-btn tiny" onclick="copyFromBox(this)">\u{1F4CB}</button></span>`;
+			return `<div class="evidence-link"><code class="evidence-cmd">${esc(cmd)}</code> <button class="copy-btn tiny" onclick="copyFromBox(this)" title="${esc(copyTooltip(cmd))}">${copyLabel("command")}</button> ${fileIconLink(l.href, l.path)}</div>`;
 		})
-		.join(", ")}</div>`;
+		.join("")}</div>`;
+}
+
+/** Shared card for every advice item (Top Actions, config additions,
+ * features to try, usage patterns, stop-doing, ongoing friction): a
+ * semibold title, an optional muted reason line, an optional accent
+ * "Instead"/"Do" line, the full copyable text in a collapsible mono
+ * block, and a labeled meta row. A 3px left border colors the item by
+ * type. Filler placeholder text ("See X for details.") is dropped rather
+ * than rendered. */
+function adviceCard(opts: {
+	borderColor: string;
+	title: string;
+	reason?: string;
+	instead?: { label: string; text: string };
+	copyable?: { text: string; kind: CopyKind };
+	where?: string;
+	evidenceSessions?: unknown;
+	sessionPaths: Record<string, string>;
+}): string {
+	const reason = opts.reason && !isFillerText(opts.reason) ? `<p class="advice-reason">${esc(opts.reason)}</p>` : "";
+	const instead = opts.instead && !isFillerText(opts.instead.text)
+		? `<p class="advice-instead"><strong>${esc(opts.instead.label)}:</strong> ${esc(opts.instead.text)}</p>`
+		: "";
+	let copyBlock = "";
+	if (opts.copyable) {
+		const { text, kind } = opts.copyable;
+		const box = `<div class="copy-box">${esc(text)}</div><button class="copy-btn" onclick="copyFromBox(this)" title="${esc(copyTooltip(text))}">${copyLabel(kind)}</button>`;
+		copyBlock = text.length > 200
+			? `<details class="nested"><summary class="chevron-summary nested-chevron">Show text</summary>${box}</details>`
+			: box;
+	}
+	const meta = opts.where
+		? `<div class="meta-row"><span class="meta-label">APPLIES TO</span> <code class="meta-chip">${esc(opts.where)}</code></div>`
+		: "";
+	return `<div class="advice-card" style="border-left-color:${opts.borderColor}">
+      <h3 class="advice-title">${esc(opts.title)}</h3>
+      ${reason}
+      ${instead}
+      ${copyBlock}
+      ${meta}
+      ${evidenceHtmlFor(opts.evidenceSessions, opts.sessionPaths)}
+    </div>`;
 }
 
 export function generateHTML(
@@ -186,7 +240,7 @@ export function generateHTML(
 					.join("\n")}</div>`;
 			}
 		}
-		return `<h3>${esc(c.addition)}</h3>`;
+		return "";
 	};
 	const reportDiff: ReportDiffEntry[] = opts.prevSections ? diffReports(opts.prevSections, sections) : [];
 	const diffStatus = (category: string): ReportDiffEntry["status"] | undefined =>
@@ -224,17 +278,17 @@ export function generateHTML(
 	const frictionSec = sections.friction_analysis as
 		| {
 				intro?: string;
-				categories?: Array<{ category: string; description: string; examples: string[]; severity?: string; evidence_sessions?: string[] }>;
+				categories?: Array<{ title?: string; category: string; description: string; examples: string[]; severity?: string; evidence_sessions?: string[] }>;
 				resolved?: Array<{ category: string; note: string }>;
-				ongoing?: Array<{ category: string; description: string; examples: string[]; severity?: string; evidence_sessions?: string[] }>;
+				ongoing?: Array<{ title?: string; category: string; description: string; examples: string[]; severity?: string; evidence_sessions?: string[] }>;
 		  }
 		| undefined;
 	const suggSec = sections.suggestions as
 		| {
-				config_additions?: Array<{ addition: string; why: string; where: string; evidence_sessions?: string[] }>;
-				features_to_try?: Array<{ feature: string; one_liner: string; why_for_you: string; example: string; evidence_sessions?: string[] }>;
+				config_additions?: Array<{ title?: string; addition: string; why: string; where: string; evidence_sessions?: string[] }>;
+				features_to_try?: Array<{ title?: string; feature: string; one_liner: string; why_for_you: string; example: string; evidence_sessions?: string[] }>;
 				usage_patterns?: Array<{ title: string; suggestion: string; detail: string; copyable_prompt: string; evidence_sessions?: string[] }>;
-				stop_doing?: Array<{ what: string; why: string; alternative: string; evidence_sessions?: string[] }>;
+				stop_doing?: Array<{ title?: string; what: string; why: string; alternative: string; evidence_sessions?: string[] }>;
 		  }
 		| undefined;
 	const horizonSec = sections.on_the_horizon as
@@ -267,17 +321,22 @@ export function generateHTML(
 	const actionItems: ActionItem[] = buildActionList(sections);
 	const actionListHtml = actionItems.length
 		? `<div class="card" id="action-list">
-  <h3 style="margin-bottom:12px">\u2705 Top Actions</h3>
+  <h3 style="margin-bottom:12px">Top Actions</h3>
   <ol class="action-list">
   ${actionItems
-			.map(
-				(item) => `<li class="action-item">
-    <div class="action-copy-src" style="display:none">${esc(item.label)}</div>
-    <strong>${esc(item.label)}</strong>${item.where ? ` <span class="tag" style="font-size:10px">${esc(item.where)}</span>` : ""}
-    <button class="copy-btn tiny" onclick="copyFromBox(this)">\u{1F4CB} Copy</button>
-    <div class="action-detail">${esc(item.detail)}</div>${evidenceHtml(item.evidence_sessions)}
-  </li>`,
-			)
+			.map((item) => {
+				const borderColor = item.source === "stop_doing" ? "var(--red)" : item.source === "usage_patterns" ? "var(--accent)" : "var(--green)";
+				return `<li class="action-item">${adviceCard({
+					borderColor,
+					title: item.title,
+					reason: item.reason,
+					instead: item.instead,
+					copyable: item.copyable,
+					where: item.where,
+					evidenceSessions: item.evidence_sessions,
+					sessionPaths,
+				})}</li>`;
+			})
 			.join("\n  ")}
   </ol>
 </div>`
@@ -327,38 +386,37 @@ export function generateHTML(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>omp Insights — ${esc(agg.date_range.start)} to ${esc(agg.date_range.end)}</title>
+<title>omp Insights - ${esc(agg.date_range.start)} to ${esc(agg.date_range.end)}</title>
 <style>
   :root {
-    --bg: #faf8f4; --bg2: #fffdf9; --bg3: #f3efe6;
-    --border: #e3ddd0; --border2: #d1c9b8;
-    --text: #1f2328; --dim: #55606b; --muted: #8a93a0;
-    --accent: #2f6f9e; --accent2: #0f9b8e;
-    --green: #1f8a4c; --yellow: #a9790a; --red: #c0392b;
-    --purple: #7c4dbd; --teal: #0f9b8e;
+    --bg: #faf8f4; --bg2: #ffffff; --bg3: #f3f1ec;
+    --border: #e4e7eb; --border2: #d3d8de;
+    --text: #1f2933; --dim: #3e4c59; --muted: #616e7c;
+    --accent: #2f6f9e; --accent2: #0f6e8c;
+    --green: #2f7a4f; --yellow: #a9790a; --red: #b84b43;
+    --purple: #5d5fa0; --teal: #0f6e8c;
     --radius: 10px; --radius-sm: 6px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, 'Segoe UI', sans-serif; font-size: 16px; line-height: 1.7; }
+  body { background: var(--bg); color: var(--text); font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; font-weight: 400; line-height: 1.6; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   strong { font-weight: 600; }
 
   .container { max-width: 1040px; margin: 0 auto; padding: 40px 24px 80px; }
-  header { text-align: center; padding: 48px 0 40px; border-bottom: 1px solid var(--border); margin-bottom: 40px; }
-  header h1 { font-size: 38px; font-weight: 700; color: var(--text); letter-spacing: -0.5px; }
-  header .subtitle { color: var(--dim); margin-top: 8px; font-size: 14px; }
+  header { text-align: center; padding: 40px 0 32px; border-bottom: 1px solid var(--border); margin-bottom: 40px; }
+  header h1 { font-size: 28px; font-weight: 600; color: var(--text); letter-spacing: -0.3px; }
+  header .subtitle { color: var(--muted); margin-top: 8px; font-size: 13px; }
 
   nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 40px; }
   nav a { background: var(--bg3); border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px; color: var(--dim); font-size: 13px; transition: all 0.15s; }
   nav a:hover { color: var(--text); border-color: var(--border2); text-decoration: none; background: var(--bg2); }
 
   .rpt-section { margin-bottom: 48px; display: block; }
-  h2 { font-size: 24px; font-weight: 700; color: var(--text); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  h2 { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
   .rpt-section > summary.chevron-summary h2 { margin-bottom: 0; border-bottom: none; }
   .rpt-section[open] > summary.chevron-summary h2 { margin-bottom: 24px; border-bottom: 1px solid var(--border); width: 100%; }
-  h2 .emoji { font-size: 18px; }
-  h3 { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+  h3 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
 
   /* Toggles: hide the native marker, draw a chevron that rotates when
      open, make the whole header row clickable with a hover background. */
@@ -378,10 +436,11 @@ export function generateHTML(
   summary.chevron-summary.nested-chevron::after { font-size: 13px; }
 
   details.nested { margin-top: 10px; }
-  .evidence { margin-top: 6px; font-size: 11px; color: var(--muted); }
-  .evidence-link { display: inline-flex; align-items: center; gap: 4px; }
+  .evidence { margin-top: 8px; font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+  .evidence-link { display: flex; align-items: center; gap: 6px; }
   .evidence-cmd { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--accent2); font-size: 11px; }
-  .evidence a { color: var(--accent2); }
+  .file-icon-link { color: var(--muted); display: inline-flex; align-items: center; }
+  .file-icon-link:hover { color: var(--accent); }
   .config-diff { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
   .config-diff-row { margin-top: 4px; color: var(--text); }
   .config-diff-row code { color: var(--accent2); }
@@ -396,64 +455,69 @@ export function generateHTML(
 
   .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
   .stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; text-align: center; }
-  .stat-value { font-size: 26px; font-weight: 700; color: var(--accent); }
-  .stat-label { font-size: 12px; color: var(--dim); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .stat-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .stat-value { font-size: 24px; font-weight: 600; color: var(--accent); }
+  .stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
   .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 14px; }
   .bar-row.compact { margin-bottom: 2px; }
   .bar-label { width: 140px; flex-shrink: 0; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .bar-track { flex: 1; height: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
-  .bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 5px; transition: width 0.4s ease; }
+  .bar-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
   .bar-count { width: 40px; text-align: right; color: var(--muted); flex-shrink: 0; }
 
   .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
   .chart-box { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .chart-box h3 { font-size: 13px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; }
+  .chart-box h3 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; }
 
   .at-a-glance { background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius); overflow: hidden; }
   .at-a-glance-part { padding: 20px 24px; border-bottom: 1px solid var(--border); }
   .at-a-glance-part:last-child { border-bottom: none; }
   .at-a-glance-part h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--accent); margin-bottom: 10px; }
-  .at-a-glance-part p { color: var(--text); line-height: 1.7; }
+  .at-a-glance-part p { color: var(--text); line-height: 1.6; }
   .at-a-glance-part.since-last-report { background: var(--bg3); }
   .at-a-glance-part.since-last-report h3 { color: var(--accent2); }
 
   .area-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .area-card h3 { color: var(--accent2); font-size: 17px; }
+  .area-card h3 { color: var(--text); font-size: 15px; }
   .area-card .count { color: var(--muted); font-size: 12px; margin-left: 8px; }
-  .area-card p { color: var(--dim); margin-top: 8px; font-size: 14px; }
+  .area-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
 
   .workflow-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .workflow-card h3 { color: var(--green); font-size: 17px; }
-  .workflow-card p { color: var(--dim); margin-top: 8px; font-size: 14px; }
+  .workflow-card h3 { color: var(--text); font-size: 15px; }
+  .workflow-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
 
   .style-block-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
-  .style-block-card h3 { color: var(--accent2); font-size: 15px; }
-  .style-block-card p { color: var(--dim); margin-top: 6px; font-size: 14px; }
+  .style-block-card h3 { color: var(--text); font-size: 15px; }
+  .style-block-card p { color: var(--muted); margin-top: 6px; font-size: 14px; }
 
   .friction-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .friction-card h3 { color: var(--yellow); font-size: 17px; }
-  .friction-card p { color: var(--dim); margin-top: 8px; font-size: 14px; }
+  .friction-card h3 { color: var(--text); font-size: 15px; }
+  .friction-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
   .friction-card .examples { margin-top: 10px; }
   .friction-card .example { font-size: 13px; color: var(--muted); padding: 4px 0 4px 14px; border-left: 2px solid var(--border2); margin-top: 6px; }
 
-  .sugg-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .sugg-card .tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; margin-bottom: 8px; background: var(--bg3); color: var(--dim); border: 1px solid var(--border2); }
-  .sugg-card h3 { font-size: 14px; color: var(--text); }
-  .sugg-card p { color: var(--dim); font-size: 13px; margin-top: 6px; }
-  .sugg-card .why { color: var(--muted); font-size: 12px; margin-top: 6px; font-style: italic; }
-  .sugg-card label { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
-  .sugg-card input[type=checkbox] { margin-top: 3px; accent-color: var(--accent); width: 15px; height: 15px; flex-shrink: 0; }
+  /* Advice cards: the one layout shared by Top Actions, config
+     additions, features to try, usage patterns, stop-doing and ongoing
+     friction, colored by type with a thin left border. */
+  .advice-card { background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 16px 20px; }
+  .advice-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 0; }
+  .advice-reason { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .advice-instead { color: var(--accent); font-size: 13px; margin-top: 6px; }
+  .advice-instead strong { color: var(--text); }
 
   .action-list { list-style: decimal; padding-left: 22px; }
   .action-item { margin-bottom: 14px; }
+  .action-item::marker { color: var(--muted); }
   .action-item:last-child { margin-bottom: 0; }
-  .action-detail { color: var(--dim); font-size: 13px; margin-top: 4px; }
+  .action-item .advice-card { padding: 14px 18px; }
+
+  .meta-row { margin-top: 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px; }
+  .meta-chip { text-transform: none; letter-spacing: 0; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--text); font-size: 12px; }
 
   .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .cost-table th, .cost-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
-  .cost-table th { color: var(--dim); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.4px; }
+  .cost-table th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.4px; }
 
   .copy-box { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--teal); white-space: pre-wrap; word-break: break-all; margin-top: 10px; }
   .copy-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--bg3); border: 1px solid var(--border2); color: var(--dim); font-size: 12px; padding: 5px 12px; border-radius: var(--radius-sm); cursor: pointer; margin-top: 8px; transition: all 0.15s; }
@@ -463,15 +527,15 @@ export function generateHTML(
   .copy-all-btn:hover { opacity: 0.85; }
 
   .horizon-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; }
-  .horizon-card h3 { color: var(--purple); font-size: 15px; }
-  .horizon-card p { color: var(--dim); margin-top: 8px; font-size: 14px; }
+  .horizon-card h3 { color: var(--text); font-size: 15px; }
+  .horizon-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
   .horizon-card .how { color: var(--muted); font-size: 13px; margin-top: 8px; }
 
   .muted { color: var(--muted); font-size: 14px; }
   .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
-  .badge.green { background: rgba(31,138,76,0.12); color: var(--green); }
+  .badge.green { background: rgba(47,122,79,0.12); color: var(--green); }
   .badge.yellow { background: rgba(169,121,10,0.12); color: var(--yellow); }
-  .badge.red { background: rgba(192,57,43,0.12); color: var(--red); }
+  .badge.red { background: rgba(184,75,67,0.12); color: var(--red); }
 
   @media (max-width: 700px) {
     .card-grid.cols2, .card-grid.cols3 { grid-template-columns: 1fr; }
@@ -484,9 +548,9 @@ export function generateHTML(
 <div class="container">
 
 <header>
-  <h1>🔍 omp Insights</h1>
+  <h1>omp Insights</h1>
   <div class="subtitle">
-    ${esc(agg.date_range.start)} – ${esc(agg.date_range.end)}
+    ${esc(agg.date_range.start)} - ${esc(agg.date_range.end)}
     &nbsp;·&nbsp;
     ${agg.total_sessions} sessions
     &nbsp;·&nbsp;
@@ -510,7 +574,7 @@ ${actionListHtml}
 
 <!-- ── At a Glance ── -->
 <details class="rpt-section" id="at-a-glance" open>
-<summary class="chevron-summary"><h2><span class="emoji">⚡</span> Summary</h2></summary>
+<summary class="chevron-summary"><h2>Summary</h2></summary>
   <div class="at-a-glance">
     ${sinceLastReportHtml}
     <div class="at-a-glance-part">
@@ -534,7 +598,7 @@ ${actionListHtml}
 
 <!-- ── Stats ── -->
 <details class="rpt-section" id="stats">
-<summary class="chevron-summary"><h2><span class="emoji">📊</span> By the Numbers</h2></summary>
+<summary class="chevron-summary"><h2>By the Numbers</h2></summary>
   <div class="stat-grid">
     ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`, nSessions, cardTitle("substantive sessions in the report", nSessions))}
     ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`, nSessions, cardTitle("human messages across all sessions", nSessions))}
@@ -603,7 +667,7 @@ ${actionListHtml}
 
 <!-- ── Project Areas ── -->
 <details class="rpt-section" id="projects">
-<summary class="chevron-summary"><h2><span class="emoji">🗂️</span> Where You Worked</h2></summary>
+<summary class="chevron-summary"><h2>Where You Worked</h2></summary>
   <div class="card-grid ${areas.length > 2 ? "cols2" : ""}">
     ${areas
 			.map(
@@ -618,7 +682,7 @@ ${actionListHtml}
 
 <!-- ── Interaction Style ── -->
 <details class="rpt-section" id="style">
-<summary class="chevron-summary"><h2><span class="emoji">🎯</span> How You Work</h2></summary>
+<summary class="chevron-summary"><h2>How You Work</h2></summary>
   <div class="card">
     ${
 			iStyle?.blocks?.length
@@ -634,7 +698,7 @@ ${actionListHtml}
 				.join("\n")}
     </div>`
 				: iStyle?.narrative
-					? `<div style="line-height:1.8">${renderMarkdown(esc(iStyle.narrative))}</div>`
+					? `<div style="line-height:1.6">${renderMarkdown(esc(iStyle.narrative))}</div>`
 					: "<p class='muted'>No data</p>"
 		}
     ${iStyle?.key_pattern ? `<div style="margin-top:16px;padding:14px 16px;background:var(--bg3);border-radius:var(--radius-sm);border:1px solid var(--border2);color:var(--accent2);font-size:14px;font-style:italic">"${esc(iStyle.key_pattern)}"</div>` : ""}
@@ -643,8 +707,8 @@ ${actionListHtml}
 
 <!-- ── What's Working ── -->
 <details class="rpt-section" id="what-works">
-<summary class="chevron-summary"><h2><span class="emoji">✨</span> Wins</h2></summary>
-  ${whatWorks?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(whatWorks.intro)}</p>` : ""}
+<summary class="chevron-summary"><h2>Wins</h2></summary>
+  ${whatWorks?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(whatWorks.intro)}</p>` : ""}
   <div class="card-grid ${(whatWorks?.impressive_workflows?.length ?? 0) > 1 ? "cols2" : ""}">
     ${(whatWorks?.impressive_workflows ?? [])
 			.map(
@@ -659,32 +723,33 @@ ${actionListHtml}
 
 <!-- ── Friction ── -->
 <details class="rpt-section" id="friction">
-<summary class="chevron-summary"><h2><span class="emoji">⚠️</span> Where Things Broke</h2></summary>
-  ${frictionSec?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(frictionSec.intro)}</p>` : ""}
+<summary class="chevron-summary"><h2>Where Things Broke</h2></summary>
+  ${frictionSec?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(frictionSec.intro)}</p>` : ""}
   ${(frictionSec?.resolved?.length || resolvedSinceLastRun.length) ? `<div style="margin-bottom:20px">
-    <h3 style="color:var(--green);font-size:14px;margin-bottom:10px">\u2705 Resolved</h3>
-    ${(frictionSec?.resolved ?? []).map(r => `<div style="padding:6px 14px;color:var(--dim);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(r.category)}</strong> \u2014 ${esc(r.note)}</div>`).join("\n")}
-    ${resolvedSinceLastRun.filter(d => !(frictionSec?.resolved ?? []).some(r => r.category === d.category)).map(d => `<div style="padding:6px 14px;color:var(--dim);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(d.category)}</strong> \u2014 not in this run's friction list anymore</div>`).join("\n")}
+    <h3 style="color:var(--green);font-size:13px;margin-bottom:10px">Resolved</h3>
+    ${(frictionSec?.resolved ?? []).map(r => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(r.category)}</strong> \u2014 ${esc(r.note)}</div>`).join("\n")}
+    ${resolvedSinceLastRun.filter(d => !(frictionSec?.resolved ?? []).some(r => r.category === d.category)).map(d => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(d.category)}</strong> \u2014 not in this run's friction list anymore</div>`).join("\n")}
   </div>` : ""}
   <div class="card-grid ${((frictionSec?.ongoing ?? frictionSec?.categories)?.length ?? 0) > 1 ? "cols2" : ""}">
     ${((frictionSec?.ongoing ?? frictionSec?.categories) ?? [])
-			.map(
-				(cat) => `<div class="friction-card">
-      <h3>${esc(cat.category)}${cat.severity ? ` <span class="badge ${cat.severity === "high" ? "red" : cat.severity === "medium" ? "yellow" : "green"}">${cat.severity}</span>` : ""}${diffBadge(cat.category)}</h3>
+			.map((cat) => {
+				const title = itemTitle(cat.title, cat.category, cat.description);
+				const examples = (cat.examples ?? []).map((ex) => `<div class="example">${esc(ex)}</div>`).join("");
+				return `<div class="friction-card" style="border-left:3px solid var(--yellow)">
+      <h3>${esc(title)}${cat.severity ? ` <span class="badge ${cat.severity === "high" ? "red" : cat.severity === "medium" ? "yellow" : "green"}">${cat.severity}</span>` : ""}${diffBadge(cat.category)}</h3>
       <p>${esc(cat.description)}</p>
-      <div class="examples">
-        ${(cat.examples ?? []).map((ex) => `<div class="example">${esc(ex)}</div>`).join("")}
-      </div>
+      <div class="examples">${examples}</div>
+      <div class="meta-row"><span class="meta-label">APPLIES TO</span> <code class="meta-chip">${esc(cat.category)}</code></div>
       ${evidenceHtml(cat.evidence_sessions)}
-    </div>`,
-			)
+    </div>`;
+			})
 			.join("\n")}
   </div>
 </details>
 
 <!-- ── Suggestions ── -->
 <details class="rpt-section" id="suggestions">
-<summary class="chevron-summary"><h2><span class="emoji">💡</span> Next Steps</h2></summary>
+<summary class="chevron-summary"><h2>Next Steps</h2></summary>
 
   ${
 		configAdditions.length
@@ -692,28 +757,34 @@ ${actionListHtml}
   <p style="color:var(--muted);font-size:13px;margin-bottom:16px">Select the ones you want, then copy them all at once.</p>
   <div id="config-list">
     ${configAdditions
-			.map(
-				(
-					c,
-					i,
-				) => `<div class="sugg-card" id="cfg-${i}" style="margin-bottom:10px">
-      <label>
-        <input type="checkbox" class="cfg-check" checked data-addition="${esc(c.addition)}" data-where="${esc(c.where)}">
-        <div>
-          <div class="tag">${esc(c.where)}</div>
-          ${configAdditionHtml(c)}
-          <p class="why">Why: ${esc(c.why)}</p>
+			.map((c, i) => {
+				const title = configAdditionTitle(c);
+				const diffHtml = configAdditionHtml(c);
+				const kind = copyKindForWhere(c.where);
+				const box = `<div class="copy-box">${esc(c.addition)}</div><button class="copy-btn" onclick="copyFromBox(this)" title="${esc(copyTooltip(c.addition))}">${copyLabel(kind)}</button>`;
+				const copyBlock = c.addition.length > 200
+					? `<details class="nested"><summary class="chevron-summary nested-chevron">Show text</summary>${box}</details>`
+					: box;
+				return `<div class="advice-card" id="cfg-${i}" style="margin-bottom:10px;border-left-color:var(--accent)">
+      <div style="display:flex;align-items:flex-start;gap:10px">
+        <input type="checkbox" id="cfg-check-${i}" class="cfg-check" checked data-addition="${esc(c.addition)}" data-where="${esc(c.where)}" aria-label="Include in the copied block" style="margin-top:3px;accent-color:var(--accent);width:15px;height:15px;flex-shrink:0;cursor:pointer">
+        <div style="flex:1">
+          <label for="cfg-check-${i}" style="cursor:pointer"><h3 class="advice-title">${esc(title)}</h3></label>
+          ${diffHtml}
+          ${isFillerText(c.why) ? "" : `<p class="advice-reason">${esc(c.why)}</p>`}
+          ${copyBlock}
+          <div class="meta-row"><span class="meta-label">APPLIES TO</span> <code class="meta-chip">${esc(c.where)}</code></div>
           ${evidenceHtml(c.evidence_sessions)}
         </div>
-      </label>
-    </div>`,
-			)
+      </div>
+    </div>`;
+			})
 			.join("\n")}
   </div>
-  <button class="copy-all-btn" onclick="copyAllConfig()">Copy Selected as AGENTS.md Block</button>
+  <button class="copy-all-btn" onclick="copyAllConfig()" title="Collect the checked additions into one block below, ready to copy">Copy Selected as AGENTS.md Block</button>
   <div id="copy-all-output" style="display:none;margin-top:10px">
     <div class="copy-box" id="copy-all-text"></div>
-    <button class="copy-btn" onclick="copyText('copy-all-text')">📋 Copy</button>
+    <button class="copy-btn" onclick="copyText('copy-all-text')" title="Copy the selected config additions as one AGENTS.md block">Copy block</button>
   </div>`
 			: ""
 	}
@@ -723,18 +794,14 @@ ${actionListHtml}
 			? `<h3 style="margin:24px 0 12px">Features to Try</h3>
   <div class="card-grid ${featuresToTry.length > 1 ? "cols2" : ""}">
     ${featuresToTry
-			.map(
-				(f) => `<div class="sugg-card">
-      <div class="tag">${esc(f.feature)}</div>
-      <h3>${esc(f.one_liner)}</h3>
-      <p>${esc(f.why_for_you)}</p>
-      <details class="nested"><summary class="chevron-summary nested-chevron">Show example</summary>
-      <div class="copy-box">${esc(f.example)}</div>
-      <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
-      </details>
-      ${evidenceHtml(f.evidence_sessions)}
-    </div>`,
-			)
+			.map((f) => adviceCard({
+				borderColor: "var(--accent)",
+				title: itemTitle(f.title, f.feature, f.one_liner),
+				reason: f.why_for_you,
+				copyable: { text: f.example, kind: "prompt" },
+				evidenceSessions: f.evidence_sessions,
+				sessionPaths,
+			}))
 			.join("\n")}
   </div>`
 			: ""
@@ -745,38 +812,36 @@ ${actionListHtml}
 			? `<h3 style="margin:24px 0 12px">Usage Patterns</h3>
   <div style="display:flex;flex-direction:column;gap:12px">
     ${usagePatterns
-			.map(
-				(p) => `<div class="sugg-card">
-      <h3>${esc(p.title)}</h3>
-      <p>${esc(p.suggestion)}</p>
-      <p style="margin-top:8px;font-size:13px;color:var(--muted)">${esc(p.detail)}</p>
-      <details class="nested"><summary class="chevron-summary nested-chevron">Show prompt</summary>
-      <div class="copy-box">${esc(p.copyable_prompt)}</div>
-      <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
-      </details>
-      ${evidenceHtml(p.evidence_sessions)}
-    </div>`,
-			)
+			.map((p) => adviceCard({
+				borderColor: "var(--accent)",
+				title: p.title,
+				reason: p.suggestion,
+				copyable: { text: p.copyable_prompt, kind: "prompt" },
+				evidenceSessions: p.evidence_sessions,
+				sessionPaths,
+			}))
 			.join("\n")}
   </div>`
 			: ""
 	}
 
-  ${(suggSec?.stop_doing?.length) ? `<h3 style="margin:24px 0 12px;color:var(--red)">\u{1F6D1} Consider Stopping</h3>
+  ${(suggSec?.stop_doing?.length) ? `<h3 style="margin:24px 0 12px;color:var(--red)">Consider Stopping</h3>
   <div style="display:flex;flex-direction:column;gap:12px">
-    ${suggSec.stop_doing.map(s => `<div class="card" style="border-left:3px solid var(--red)">
-      <h3 style="color:var(--red);font-size:14px">${esc(s.what)}</h3>
-      <p style="color:var(--dim);margin-top:6px;font-size:13px">${esc(s.why)}</p>
-      <p style="color:var(--green);margin-top:6px;font-size:13px"><strong>Instead:</strong> ${esc(s.alternative)}</p>
-      ${evidenceHtml(s.evidence_sessions)}
-    </div>`).join("\n")}
+    ${suggSec.stop_doing.map(s => adviceCard({
+			borderColor: "var(--red)",
+			title: itemTitle(s.title, s.what, s.why),
+			reason: s.why,
+			instead: { label: "Instead", text: s.alternative },
+			evidenceSessions: s.evidence_sessions,
+			sessionPaths,
+		})).join("\n")}
   </div>` : ""}
 </details>
 
 <!-- ── On the Horizon ── -->
 <details class="rpt-section" id="horizon">
-<summary class="chevron-summary"><h2><span class="emoji">🚀</span> Future Workflows</h2></summary>
-  ${horizonSec?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(horizonSec.intro)}</p>` : ""}
+<summary class="chevron-summary"><h2>Future Workflows</h2></summary>
+  ${horizonSec?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(horizonSec.intro)}</p>` : ""}
   <div style="display:flex;flex-direction:column;gap:12px">
     ${(horizonSec?.opportunities ?? [])
 			.map(
@@ -786,7 +851,7 @@ ${actionListHtml}
       <p class="how">${esc(o.how_to_try)}</p>
       <details class="nested"><summary class="chevron-summary nested-chevron">Show prompt</summary>
       <div class="copy-box">${esc(o.copyable_prompt)}</div>
-      <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
+      <button class="copy-btn" onclick="copyFromBox(this)" title="${esc(copyTooltip(o.copyable_prompt))}">${copyLabel("prompt")}</button>
       </details>
     </div>`,
 			)
@@ -796,8 +861,8 @@ ${actionListHtml}
 
 <!-- ── Model Efficiency ── -->
 <details class="rpt-section" id="model-efficiency">
-<summary class="chevron-summary"><h2><span class="emoji">💸</span> Model Spend</h2></summary>
-  ${modelEffSec?.summary ? `<p style="color:var(--dim);margin-bottom:16px">${esc(modelEffSec.summary)}</p>` : ""}
+<summary class="chevron-summary"><h2>Model Spend</h2></summary>
+  ${modelEffSec?.summary ? `<p style="color:var(--muted);margin-bottom:16px">${esc(modelEffSec.summary)}</p>` : ""}
 
   <div class="stat-grid">
     ${statCard("Estimated Waste", fmtCost(agg.estimated_waste), "from model mismatch", `n=${agg.sessions_with_facets} sessions with facets`, cardTitle("heuristic model-mismatch waste over flagged sessions", `n=${agg.sessions_with_facets} sessions with facets`))}
@@ -819,22 +884,22 @@ ${actionListHtml}
 
   ${modelEffSec?.overspend_pattern ? `<div class="card" style="margin-top:16px;border-left:3px solid var(--yellow)">
     <h3 style="color:var(--yellow);font-size:14px">Overspend Pattern</h3>
-    <p style="color:var(--dim);margin-top:8px">${esc(modelEffSec.overspend_pattern)}</p>
+    <p style="color:var(--muted);margin-top:8px">${esc(modelEffSec.overspend_pattern)}</p>
   </div>` : ""}
 
   ${modelEffSec?.underspend_pattern ? `<div class="card" style="margin-top:12px;border-left:3px solid var(--red)">
     <h3 style="color:var(--red);font-size:14px">Underspend Pattern</h3>
-    <p style="color:var(--dim);margin-top:8px">${esc(modelEffSec.underspend_pattern)}</p>
+    <p style="color:var(--muted);margin-top:8px">${esc(modelEffSec.underspend_pattern)}</p>
   </div>` : ""}
 
   ${modelEffSec?.quota_pressure ? `<div class="card" style="margin-top:12px;border-left:3px solid var(--accent)">
     <h3 style="color:var(--accent);font-size:14px">Subscription Quota Pressure</h3>
-    <p style="color:var(--dim);margin-top:8px">${esc(modelEffSec.quota_pressure)}</p>
+    <p style="color:var(--muted);margin-top:8px">${esc(modelEffSec.quota_pressure)}</p>
   </div>` : ""}
 
   ${modelEffSec?.recommendation ? `<div class="card" style="margin-top:12px;border-left:3px solid var(--green)">
     <h3 style="color:var(--green);font-size:14px">Recommendation</h3>
-    <p style="color:var(--dim);margin-top:8px">${esc(modelEffSec.recommendation)}</p>
+    <p style="color:var(--muted);margin-top:8px">${esc(modelEffSec.recommendation)}</p>
     ${modelEffSec.potential_savings_note ? `<p style="color:var(--muted);margin-top:6px;font-size:12px;font-style:italic">${esc(modelEffSec.potential_savings_note)}</p>` : ""}
   </div>` : ""}
 
@@ -844,11 +909,11 @@ ${actionListHtml}
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
           <span class="badge ${e.flag === "overspend" ? "yellow" : "red"}">${esc(e.flag)}</span>
-          <span style="color:var(--dim);font-size:13px;margin-left:8px">${esc(e.date)} · ${esc(e.model)}</span>
+          <span style="color:var(--muted);font-size:13px;margin-left:8px">${esc(e.date)} · ${esc(e.model)}</span>
         </div>
         <span style="color:var(--accent);font-weight:600;font-size:14px">${fmtCost(e.cost)}</span>
       </div>
-      <p style="color:var(--dim);font-size:13px;margin-top:6px">${esc(e.reason)}</p>
+      <p style="color:var(--muted);font-size:13px;margin-top:6px">${esc(e.reason)}</p>
       <p style="color:var(--muted);font-size:12px;margin-top:4px">${esc(e.goal)}</p>
     </div>`).join("\n")}
   </div>
@@ -858,24 +923,24 @@ ${actionListHtml}
 
 </div>
 <script>
-export function copyText(id) {
+function copyText(id) {
   const el = document.getElementById(id);
   if (!el) return;
   navigator.clipboard.writeText(el.textContent).then(() => {
     const btn = el.nextElementSibling;
-    if (btn) { btn.textContent = '✅ Copied'; setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000); }
+    if (btn) { const label = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = label; }, 2000); }
   });
 }
-export function copyFromBox(btn) {
+function copyFromBox(btn) {
   const box = btn.previousElementSibling;
   if (!box) return;
   navigator.clipboard.writeText(box.textContent).then(() => {
     const label = btn.textContent;
-    btn.textContent = '✅';
+    btn.textContent = 'Copied';
     setTimeout(() => { btn.textContent = label; }, 2000);
   });
 }
-export function copyAllConfig() {
+function copyAllConfig() {
   const checks = document.querySelectorAll('.cfg-check:checked');
   const lines = ['# omp AGENTS.md additions (generated by /insights)', ''];
   for (const ch of checks) {

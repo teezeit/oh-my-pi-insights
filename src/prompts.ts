@@ -228,12 +228,12 @@ ${memoryFeatureBlock(ctx)}
    - Good for: team conventions and per-path rules the agent always follows`;
 }
 
-export type ConfigAddition = { addition: string; why: string; where: string; evidence_sessions: string[] };
-export type FeatureToTry = { feature: string; one_liner: string; why_for_you: string; example: string; evidence_sessions: string[] };
+export type ConfigAddition = { addition: string; why: string; where: string; evidence_sessions: string[]; title?: string };
+export type FeatureToTry = { feature: string; one_liner: string; why_for_you: string; example: string; evidence_sessions: string[]; title?: string };
 export type UsagePattern = { title: string; suggestion: string; detail: string; copyable_prompt: string; evidence_sessions: string[] };
-export type StopDoingItem = { what: string; why: string; alternative: string; evidence_sessions: string[] };
+export type StopDoingItem = { what: string; why: string; alternative: string; evidence_sessions: string[]; title?: string };
 /** friction_analysis's "ongoing" items; carries evidence_sessions like the suggestion item types (B10), but is not run through filterByEvidence — the fix design filters stop_doing/suggestions only. */
-export type OngoingFrictionItem = { category: string; description: string; examples: string[]; severity: string; evidence_sessions: string[] };
+export type OngoingFrictionItem = { category: string; description: string; examples: string[]; severity: string; evidence_sessions: string[]; title?: string };
 
 export type SuggestionSections = {
 	config_additions?: ConfigAddition[];
@@ -434,7 +434,8 @@ EVIDENCE: every "ongoing" item must include evidence_sessions, an array of
 the session ids (the "[id]" from SESSION SUMMARIES, or session_id from
 worst_turns_corpus/worst_cache_sessions in the data below) that actually show
 this pattern. Cite real ids only; never invent one.
-
+Never use emojis in any field. Titles are plain text: no bold, no markdown
+emphasis, no trailing period.
 RESPOND WITH ONLY A VALID JSON OBJECT:
 {
   "intro": "1 sentence summarizing friction trajectory (improving/worsening/stable)",
@@ -447,6 +448,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "ongoing": [
     {
       "category": "concrete category name",
+      "title": "short title (<= 10 words, imperative, no trailing period, no emoji, plain text only)",
       "description": "1-2 sentences. Use 'you' not 'the user'.",
       "examples": ["specific example with consequence", "another example"],
       "severity": "high|medium|low",
@@ -477,7 +479,8 @@ DISTINCT session ids (the "[id]" from SESSION SUMMARIES, or session_id from
 worst_turns_corpus/worst_cache_sessions in the data below) that actually
 support it. Cite real ids only, never invent one. If you cannot name two
 different sessions backing an item, drop the item instead of writing it.
-
+Never use emojis in any field. Titles are plain text: no bold, no markdown
+emphasis, no trailing period.
 RESPOND WITH ONLY A VALID JSON OBJECT:
 {
   "config_additions": [
@@ -485,6 +488,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
       "addition": "a specific rule NOT already in their AGENTS.md",
       "why": "1 sentence referencing actual ongoing friction",
       "where": "AGENTS.md | ~/.omp/agent/config.yml | ~/.omp/agent/extensions/ | ~/.omp/agent/managed-skills/ | ~/.omp/agent/hooks/",
+      "title": "short title (<= 10 words, imperative, no trailing period, no emoji, plain text only)",
       "evidence_sessions": ["session id", "another session id"]
     }
   ],
@@ -494,12 +498,13 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
       "one_liner": "what it does",
       "why_for_you": "why this helps YOUR ongoing friction patterns",
       "example": "actual command or config referencing their real projects",
+      "title": "short title (<= 10 words, imperative, no trailing period, no emoji, plain text only)",
       "evidence_sessions": ["session id", "another session id"]
     }
   ],
   "usage_patterns": [
     {
-      "title": "short title",
+      "title": "short title (<= 10 words, no trailing period, no emoji, plain text only)",
       "suggestion": "1-2 sentence summary",
       "detail": "3-4 sentences referencing actual projects and patterns",
       "copyable_prompt": "specific prompt using their model, projects, tools",
@@ -511,6 +516,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
       "what": "something to stop or remove",
       "why": "evidence from sessions",
       "alternative": "what to do instead",
+      "title": "short title (<= 10 words, imperative, e.g. 'Gate edits during planning turns', no trailing period, no emoji, plain text only)",
       "evidence_sessions": ["session id", "another session id"]
     }
   ]

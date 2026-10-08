@@ -1,7 +1,7 @@
 # omp Insights
 > 2026-09-01 to 2026-09-02 | 2 sessions | Generated <date>
 
-## 📊 By the Numbers
+## By the Numbers
 | Metric | Value |
 |--------|-------|
 | Sessions | 2 (2 active days) |
@@ -25,7 +25,7 @@
 | Median Reply Wait | 60s |
 | Parallel Sessions | 0 overlap events across 0 sessions |
 
-## 🚦 Interruptions and Failures
+## Interruptions and Failures
 | Metric | Value |
 |--------|-------|
 | Interruption rate | 11.8% of human messages |
@@ -35,7 +35,7 @@
 | TTSR rule injections | 0 |
 | Context reset boundaries | 0 |
 
-## 💰 Where the Money Went
+## Where the Money Went
 | Bucket | Cost | Share |
 |--------|------|-------|
 | Primary sessions | $7.00 | 70.0% |
@@ -53,7 +53,7 @@ Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that tot
 | jar | 0.0% | 500k | $4.00 |
 | webapp | 96.4% | 41.5M | $6.00 |
 
-## 🔧 Tools
+## Tools
 | Tool | Calls |
 |------|-------|
 | bash | 50 |
@@ -67,7 +67,7 @@ Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that tot
 - Edit Failed: 1
 - Read Failed: 1
 
-## 📁 Languages and Projects
+## Languages and Projects
 Languages: TypeScript (12), Go (5), Markdown (4)
 
 | Project | Sessions |
@@ -75,7 +75,7 @@ Languages: TypeScript (12), Go (5), Markdown (4)
 | webapp | 1 |
 | jar | 1 |
 
-## 🔍 Corpus
+## Corpus
 Scanned `/fixture/sessions`: 4 distinct sessions, 1 advisor sidecars, 2 subagent sidecars, 1 duplicate log(s) dropped.
 
 | Excluded | Sessions |
@@ -91,7 +91,7 @@ Facet coverage: 1 of 2 sessions analysed, 1 extraction(s) failed. Sessions witho
 
 Session set and per-session cost: `<data-dir>/session-set.json`
 
-## ⚙️ Your Setup
+## Your Setup
 - Default model: `anthropic/claude-opus-5`
 - Model roles: default=`anthropic/claude-opus-5`, smol=`anthropic/claude-haiku-4-5`
 - Fallback chains: default: anthropic/claude-opus-5 → github-copilot/gpt-5.6-terra
@@ -101,7 +101,7 @@ Session set and per-session cost: `<data-dir>/session-set.json`
 - MCP servers: atlassian, outline
 - Global instruction rules read: 1
 
-## 💸 Model Spend
+## Model Spend
 | Model | Cost | Messages | List $/Mtok in / out |
 |-------|------|----------|----------------------|
 | claude-opus-5 | $9.50 | 60 | unknown |

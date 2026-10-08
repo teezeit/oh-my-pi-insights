@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { dedupeIncidents, dedupeRecommendations, enforceBudget } from "../index.ts";
+import { DEFAULT_WORD_BUDGETS, truncateAtWord } from "../src/postprocess.ts";
 
 // C12: the same incident (same evidence session id) written up in multiple
 // sections collapses to one full write-up, in precedence order
@@ -123,6 +124,43 @@ test("enforceBudget truncates an over-budget field at a sentence boundary after 
 	assert.ok(description.split(/\s+/).length <= 40, `still over budget: ${description}`);
 	// Truncated at a sentence boundary: only the first sentence survives a 40-word cap.
 	assert.equal(description, longSentence("one"));
+});
+
+// title budget: maxWords=10, truncated at a word boundary with no ellipsis
+// (a short label does not need one, and appending "..." would blow the
+// 10-word cap back over the limit it exists to enforce).
+test("enforceBudget truncates an 18-word title to 10 words with no ellipsis", async () => {
+	const eighteenWordTitle = "Stop Retrying The Same Failing Tool Call Over And Over Without Asking First For Clarification From The User";
+	assert.equal(eighteenWordTitle.split(/\s+/).length, 18, "fixture must start at 18 words");
+
+	const sections = {
+		suggestions: {
+			stop_doing: [{ what: "w", why: "y", alternative: "a", title: eighteenWordTitle, evidence_sessions: [] }],
+		},
+	};
+
+	const result = (await enforceBudget(
+		sections,
+		[{ section: "suggestions", arrayField: "stop_doing", field: "title", maxWords: 10, noEllipsis: true }],
+	)) as typeof sections;
+
+	const title = result.suggestions.stop_doing[0]!.title;
+	assert.equal(title.split(/\s+/).length, 10);
+	assert.equal(title, "Stop Retrying The Same Failing Tool Call Over And Over");
+	assert.doesNotMatch(title, /\u2026|\.\.\.$/);
+});
+
+test("truncateAtWord cuts at a word boundary with no ellipsis", () => {
+	assert.equal(truncateAtWord("one two three four five", 3), "one two three");
+});
+
+test("DEFAULT_WORD_BUDGETS includes a maxWords:10 title budget for each of the five item types", () => {
+	const titleBudgets = DEFAULT_WORD_BUDGETS.filter((b) => b.field === "title");
+	assert.equal(titleBudgets.length, 5);
+	for (const budget of titleBudgets) {
+		assert.equal(budget.maxWords, 10);
+		assert.equal(budget.noEllipsis, true);
+	}
 });
 
 test("enforceBudget leaves fields already within budget untouched and never calls retry", async () => {

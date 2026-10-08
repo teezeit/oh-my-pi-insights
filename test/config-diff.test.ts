@@ -110,7 +110,7 @@ test("the HTML report renders a config.yml addition as a key diff when it parses
 	const html = generateHTML(agg, sections, {}, temporal, { userCtx });
 
 	assert.match(html, /<div class="config-diff-row"><code>modelRoles\.plan<\/code>: <span class="config-diff-old">anthropic\/claude-opus-5<\/span> . <span class="config-diff-new">anthropic\/claude-opus-5-5<\/span><\/div>/);
-	assert.ok(!/<h3>modelRoles:/.test(html), "the raw YAML snippet must not also render as the card heading");
+	assert.ok(!/<h3[^>]*>modelRoles:/.test(html), "the raw YAML snippet must not also render as the card heading");
 });
 
 test("the HTML report falls back to the raw addition text when it isn't YAML-shaped, or where isn't config.yml (D18)", () => {
@@ -127,8 +127,10 @@ test("the HTML report falls back to the raw addition text when it isn't YAML-sha
 	const temporal = computeTemporalData([], new Map());
 	const html = generateHTML(agg, sections, {}, temporal, { userCtx });
 
-	assert.match(html, /<h3>Never commit without running the changed test file first\.<\/h3>/);
-	assert.match(html, /<h3>modelRoles:\n  plan: anthropic\/claude-opus-5-5<\/h3>/);
+	assert.match(html, /<h3 class="advice-title">Never commit without running the changed test file first\.<\/h3>/);
+	// A code-shaped addition without a title is named after its target, never used as the heading itself.
+	assert.match(html, /<h3 class="advice-title">Change in ~\/\.omp\/agent\/extensions\/<\/h3>/);
+	assert.doesNotMatch(html, /<h3[^>]*>modelRoles:/);
 	assert.ok(!html.includes('class="config-diff"'));
 });
 

@@ -107,8 +107,9 @@ test("every stat card carries a title with a definition, n and window (D19)", as
 test("evidence_sessions on a friction/config/suggestion item links known ids to file://<session_path> (D19)", async () => {
 	const html = await buildFixtureHtml({ "s-aaa111": "/sessions/proj/log0.jsonl" });
 
-	// s-aaa111 has a known path: rendered as a link.
-	assert.match(html, /<a href="file:\/\/\/sessions\/proj\/log0\.jsonl">s-aaa111<\/a>/);
+	// s-aaa111 has a known path: rendered as the omp -r command plus a file icon link.
+	assert.match(html, /omp -r s-aaa111/);
+	assert.match(html, /<a class="file-icon-link" href="file:\/\/\/sessions\/proj\/log0\.jsonl"/);
 	// s-bbb222 has no known path: dropped, not linked to a dead href.
 	assert.ok(!html.includes("s-bbb222"));
 });

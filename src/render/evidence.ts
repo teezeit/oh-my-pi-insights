@@ -8,7 +8,7 @@
 // linked to nowhere; the field itself is optional and absent on sections
 // written before this contract, so callers see an empty list, not an error.
 
-export type EvidenceLink = { id: string; href: string };
+export type EvidenceLink = { id: string; href: string; path: string };
 
 export function buildEvidenceLinks(
 	ids: unknown,
@@ -19,7 +19,7 @@ export function buildEvidenceLinks(
 	for (const id of ids) {
 		if (typeof id !== "string") continue;
 		const path = sessionPaths[id];
-		if (path) links.push({ id, href: `file://${path}` });
+		if (path) links.push({ id, href: `file://${path}`, path });
 	}
 	return links;
 }

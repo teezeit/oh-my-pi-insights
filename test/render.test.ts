@@ -3,6 +3,8 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { aggregateData, computeTemporalData, generateHTML, type SessionFacets } from "../index.ts";
 import { meta } from "./helpers.ts";
 
@@ -141,4 +143,63 @@ test("How You Work renders C2 blocks and still accepts the legacy narrative shap
 		interaction_style: { narrative: "You iterate quickly.", key_pattern: "Fast." },
 	}, {}, temporal);
 	assert.match(htmlNarrative, /You iterate quickly\./);
+});
+
+const FIXTURE = join(import.meta.dirname, "fixtures", "d-sections.json");
+
+test("rendered HTML report contains no emoji/pictograph characters anywhere", async () => {
+	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
+	const metas = [meta({ session_id: "s1" })];
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	const synthesis = {
+		whats_working: "Fast iteration \u{1F680} on small edits.",
+		whats_hindering: "Stale context \u2728 reloads.",
+	};
+	const html = generateHTML(agg, { ...sections, fun_ending: { headline: "Nice \u2705 run" } }, synthesis, temporal);
+	const emojiMatch = html.match(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u);
+	assert.equal(emojiMatch, null, `found emoji character: ${emojiMatch?.[0]}`);
+});
+
+test("every copy button has a non-empty title tooltip and never bare 'Copy' text", async () => {
+	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
+	const agg = aggregateData([], new Map());
+	const temporal = computeTemporalData([], new Map());
+	const html = generateHTML(agg, sections, {}, temporal, { sessionPaths: { "s-aaa111": "/sessions/proj/log0.jsonl" } });
+
+	const buttons = [...html.matchAll(/<button class="copy-btn[^"]*"([^>]*)>([^<]*)<\/button>/g)];
+	assert.ok(buttons.length >= 3, `found ${buttons.length} copy buttons`);
+	for (const [, attrs, text] of buttons) {
+		assert.notEqual(text!.trim(), "Copy", `bare "Copy" button text: ${text}`);
+		assert.match(attrs!, /\btitle="[^"]+"/, `copy button missing a non-empty title: ${attrs}`);
+	}
+});
+
+test("config addition meta row shows an APPLIES TO label with a mono chip, not a bare path on the title", async () => {
+	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
+	const agg = aggregateData([], new Map());
+	const temporal = computeTemporalData([], new Map());
+	const html = generateHTML(agg, sections, {}, temporal);
+
+	assert.match(html, /<span class="meta-label">APPLIES TO<\/span> <code class="meta-chip">AGENTS\.md<\/code>/);
+	assert.doesNotMatch(html, /<h3 class="advice-title">[^<]*AGENTS\.md[^<]*<\/h3>/);
+});
+
+test("evidence line orders the replay command, then the copy button, then the file icon link, with no bare short-id anchor", async () => {
+	const agg = aggregateData([], new Map());
+	const temporal = computeTemporalData([], new Map());
+	const sections = {
+		friction_analysis: {
+			ongoing: [{ category: "Flaky tool", description: "desc", examples: [], evidence_sessions: ["sess-evidence-1"] }],
+		},
+	};
+	const sessionPaths = { "sess-evidence-1": "/fixture/sessions/sess-evidence-1.jsonl" };
+	const html = generateHTML(agg, sections, {}, temporal, { sessionPaths });
+
+	const evidenceBlock = html.slice(html.indexOf('<div class="evidence">'), html.indexOf("</div>", html.indexOf('<div class="evidence">')) + 6);
+	const cmdIdx = evidenceBlock.indexOf("omp -r sess-evidence-1");
+	const btnIdx = evidenceBlock.indexOf("Copy command");
+	const iconIdx = evidenceBlock.indexOf("file-icon-link");
+	assert.ok(cmdIdx >= 0 && btnIdx > cmdIdx && iconIdx > btnIdx, `expected command < button < icon order, got ${cmdIdx}, ${btnIdx}, ${iconIdx}`);
+	assert.ok(!/<a href="file:\/\/[^"]*">sess-evidence-1<\/a>/.test(html), "bare short-id anchor must not be rendered");
 });

@@ -189,6 +189,21 @@ test("buildSectionPrompts: interaction_style prompt specifies the C2 blocks cont
 	assert.doesNotMatch(prompts.interaction_style, /\*\*bold\*\*/);
 });
 
+// title field (<= 10 words, no trailing period) on each of the five item
+// types that get it: suggestions' config_additions/features_to_try/
+// usage_patterns/stop_doing, and friction_analysis.ongoing.
+test("buildSectionPrompts: suggestions and friction_analysis prompts carry a title field for every suggestion item type", () => {
+	const agg = aggregateData([], new Map());
+	const temporal = computeTemporalData([], new Map());
+	const prompts = buildSectionPrompts("DATA", temporal, ctx(), agg);
+
+	const suggestionsTitleCount = (prompts.suggestions.match(/"title"/g) || []).length;
+	assert.ok(suggestionsTitleCount >= 4, `expected a title field for config_additions, features_to_try, usage_patterns and stop_doing, got ${suggestionsTitleCount}`);
+	assert.match(prompts.suggestions, /no emoji/i);
+	assert.match(prompts.friction_analysis, /"title"/);
+	assert.match(prompts.friction_analysis, /no emoji/i);
+});
+
 // model_efficiency: C1 (cost_by_provider/billed_cost/subscription_cost).
 // Subscription-auth providers must never see a dollar-savings allowance;
 // api_key-auth providers must.
