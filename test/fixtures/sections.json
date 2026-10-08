@@ -1,0 +1,37 @@
+{
+  "sections": {
+    "interaction_style": {
+      "narrative": "You steer often: 22% of your messages interrupt the agent mid-flight. Correction: the measured interruption rate is 7% of human messages.",
+      "key_pattern": "Parallel sessions across two projects."
+    },
+    "what_works": {
+      "intro": "86% of sessions reached their goal, and the outcome chart agrees at 94% achieved.",
+      "impressive_workflows": [
+        { "title": "Ticket pipeline", "description": "Cache reads covered 93% of input, near the 92.5% measured ratio." }
+      ]
+    },
+    "friction_analysis": {
+      "intro": "Errors fell 43% after the model switch while cost dropped 15%.",
+      "ongoing": [
+        {
+          "category": "Browser automation",
+          "description": "Browser calls failed 18/58 = 31% of the time; measured across all browser calls the rate is 7.3%.",
+          "examples": ["Relay could not find tab ACME-0000"]
+        }
+      ]
+    },
+    "suggestions": {
+      "stop_doing": [
+        { "what": "Retrying stale sessions", "why": "Errors are down 70% since the switch; per-session errors fell 37%.", "alternative": "Start fresh." }
+      ]
+    },
+    "model_efficiency": {
+      "summary": "You spent $123.45 overall, about $124 rounded, and $999.00 on a single ticket.",
+      "potential_savings_note": "No blended per-token savings estimate."
+    }
+  },
+  "synthesis": {
+    "whats_working": "Cost is down 15% per session (window 2026-09-01..2026-09-10 vs 2026-09-11..2026-09-20).",
+    "whats_hindering": "Interruptions stay near 8% of messages."
+  }
+}

@@ -9,6 +9,7 @@
 
 import { top8 } from "./aggregate.ts";
 import { displayLabel } from "./stats.ts";
+import { formatFactsForPrompt, type Fact } from "./facts.ts";
 import type { AggregatedData, TemporalData, UserContext } from "./types.ts";
 
 export const CHUNK_SUMMARIZE_PROMPT = `Summarize this portion of a session transcript. Focus on:
@@ -58,8 +59,14 @@ CRITICAL GUIDELINES:
 SESSION:
 `;
 
-export function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData, userCtx: UserContext): string {
+export function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData, userCtx: UserContext, facts: Fact[]): string {
 	return (
+		// Why first: the facts are the only numbers the prose may quote as a
+		// percentage or dollar amount; checkFacts flags anything else.
+		`FACTS (read-only; the ONLY percentages and dollar amounts you may write. Quote a fact's value as given, with its n and window where it helps. Never compute a new percentage, ratio, before/after delta or savings estimate yourself, never divide two numbers from the data below. If the number you want is not a fact, describe it in words or as a raw count):
+${formatFactsForPrompt(facts)}
+
+` +
 		JSON.stringify(
 			{
 				sessions: agg.total_sessions,
@@ -71,7 +78,8 @@ export function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData
 				cost_usd: agg.total_cost.toFixed(2),
 				top_tools: top8(agg.tool_counts),
 				top_goals: top8(agg.goal_categories),
-				outcomes: agg.outcomes,
+				outcomes_decay_weighted: agg.outcomes,
+				outcome_counts: agg.outcome_counts,
 				satisfaction: agg.satisfaction,
 				friction: agg.friction,
 				success: agg.success,
@@ -132,7 +140,7 @@ ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
 		`\n\nPER-TOOL WALL CLOCK (startedAt paired with the matching toolResult by toolCallId; "intent" is absent for sessions after 2026-10-07 since tools.intentTracing was disabled, so it is never shown):\n${agg.tool_time_share.slice(0, 8).map(t => `${t.tool}: ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}` +
 		`\n\nCACHE EFFICIENCY:\nOverall cache hit ratio: ${(agg.cache_hit_ratio * 100).toFixed(1)}% (cacheRead / (input + cacheRead)). A low ratio on a large prompt is the resumed-stale-session tax: money and latency burned re-reading context.\nWorst sessions by ratio (>=50k input+cacheRead tokens): ${agg.worst_cache_sessions.map(s => `${s.project} (${s.tokens} tok, $${s.cost.toFixed(2)}): ${(s.ratio * 100).toFixed(1)}%`).join("; ") || "none"}` +
 		`\n\nEDIT CHURN (same file edited repeatedly across the corpus = the model did not understand it the first time):\n${agg.most_churned_files.map(f => `${f.path}: ${f.edits} edits across ${f.sessions} session(s)`).join("; ") || "none"}` +
-		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "What changed this week: " + temporal.diff_headlines.join("; ") : "No significant weekly changes."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
+		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "Before/after delta (the only one in the report; quote it with its windows, never compute another): " + temporal.diff_headlines.join("; ") : "No significant before/after change."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
 	);
 }
 

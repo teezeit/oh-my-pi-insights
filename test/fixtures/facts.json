@@ -1,0 +1,10 @@
+[
+  { "id": "interruption_rate", "value": 7, "unit": "pct", "definition": "(mid-session aborts + steering) / human messages", "n": 400, "population": "human messages", "window": "2026-09-01..2026-09-20" },
+  { "id": "success_rate", "value": 94, "unit": "pct", "definition": "fully or mostly achieved / sessions with an outcome facet", "n": 32, "population": "sessions with facets", "window": "2026-09-01..2026-09-20" },
+  { "id": "cache_hit_ratio", "value": 92.5, "unit": "pct", "definition": "cacheRead / (input + cacheRead)", "n": 40, "population": "sessions", "window": "2026-09-01..2026-09-20" },
+  { "id": "tool_error_rate.browser", "value": 7.3, "unit": "pct", "definition": "failed / calls for browser", "n": 245, "population": "browser calls", "window": "2026-09-01..2026-09-20" },
+  { "id": "delta.errors_per_session", "value": -37, "unit": "pct", "definition": "change in mean tool errors per session", "n": 20, "population": "sessions", "window": "2026-09-01..2026-09-10 vs 2026-09-11..2026-09-20" },
+  { "id": "delta.cost_per_session", "value": -15, "unit": "pct", "definition": "change in mean cost per session", "n": 20, "population": "sessions", "window": "2026-09-01..2026-09-10 vs 2026-09-11..2026-09-20" },
+  { "id": "total_cost", "value": 123.45, "unit": "usd", "definition": "sum of recorded cost", "n": 40, "population": "sessions", "window": "2026-09-01..2026-09-20" },
+  { "id": "sessions", "value": 40, "unit": "count", "definition": "substantive sessions", "n": 40, "population": "sessions", "window": "2026-09-01..2026-09-20" }
+]

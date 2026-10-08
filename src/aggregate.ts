@@ -186,6 +186,7 @@ export function aggregateData(
 		projects: {},
 		goal_categories: {},
 		outcomes: {},
+		outcome_counts: {},
 		satisfaction: {},
 		helpfulness: {},
 		session_types: {},
@@ -416,8 +417,10 @@ export function aggregateData(
 			agg.sessions_with_facets++;
 			const w = decayWeight(meta);
 			mergeWeighted(agg.goal_categories, facets.goal_categories, w);
-			if (facets.outcome)
+			if (facets.outcome) {
 				agg.outcomes[facets.outcome] = (agg.outcomes[facets.outcome] ?? 0) + w;
+				agg.outcome_counts[facets.outcome] = (agg.outcome_counts[facets.outcome] ?? 0) + 1;
+			}
 			mergeWeighted(agg.satisfaction, facets.user_satisfaction_counts, w);
 			if (facets.assistant_helpfulness)
 				agg.helpfulness[facets.assistant_helpfulness] =

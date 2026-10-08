@@ -186,6 +186,8 @@ export type AggregatedData = {
 	projects: Record<string, number>;
 	goal_categories: Record<string, number>;
 	outcomes: Record<string, number>;
+	/** Unweighted outcome counts; `outcomes` is decay-weighted for the chart. */
+	outcome_counts: Record<string, number>;
 	satisfaction: Record<string, number>;
 	helpfulness: Record<string, number>;
 	session_types: Record<string, number>;

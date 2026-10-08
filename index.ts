@@ -64,6 +64,7 @@ import {
 import { callModel, createLimiter, parseJsonFromResponse } from "./src/model.ts";
 import { generateMarkdown } from "./src/render/md.ts";
 import { generateHTML } from "./src/render/html.ts";
+import { buildFacts, checkFacts, type Fact } from "./src/facts.ts";
 import {
 	buildSessionMeta,
 	extractSessionStats,
@@ -488,7 +489,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	scan.facets_analyzed = agg.sessions_with_facets;
 	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
 	const temporal = computeTemporalData(kept, facetsMap);
-	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx);
+	const facts = buildFacts(agg, temporal);
+	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx, facts);
 	const sectionPrompts = buildSectionPrompts(dataBlock, temporal, userCtx, agg);
 
 	// Keyed on the prompt inputs, not the clock: the same corpus and the same
@@ -564,6 +566,17 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		}
 	}
 
+	// Why: the prompts are told to quote facts only; this catches the prose
+	// that derived its own percentage or dollar amount anyway.
+	const factFlags = checkFacts({ ...sectionResults, at_a_glance: synthesis }, facts);
+	if (factFlags.length) {
+		const pct = factFlags.filter((f) => f.unit === "pct").length;
+		ctx.ui.notify(
+			`Fact check: ${pct} percentage(s) and ${factFlags.length - pct} dollar amount(s) in the prose match no computed fact (see fact_check in ${SESSION_SET_PATH})`,
+			"warning",
+		);
+	}
+
 	// ── Phase 5: Render HTML ──────────────────────────────────────────────────────
 	ctx.ui.setWidget("insights", [
 		"",
@@ -593,6 +606,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 					input_tokens: agg.total_input_tokens,
 					output_tokens: agg.total_output_tokens,
 				},
+				fact_check: { flags: factFlags, facts },
 				sessions: kept.map((m) => ({
 					session_id: m.session_id,
 					path: m.session_path,
@@ -673,6 +687,8 @@ export {
 	gatherUserContext,
 	generateHTML,
 	generateMarkdown,
+	buildFacts,
+	checkFacts,
 	isMetaSession,
 	parseSimpleYaml,
 	readUsage,
@@ -684,9 +700,11 @@ export type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ScanSummary,
+	SessionFacets,
 	SessionMeta,
 	SessionRef,
 	SessionSource,
 	TemporalData,
+	Fact,
 	UserContext,
 };
