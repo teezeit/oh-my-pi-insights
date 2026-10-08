@@ -68,7 +68,7 @@ export function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData
 		`FACTS (read-only; the ONLY percentages and dollar amounts you may write. Quote a fact's value as given, with its n and window where it helps. Never compute a new percentage, ratio, before/after delta or savings estimate yourself, never divide two numbers from the data below. If the number you want is not a fact, describe it in words or as a raw count):
 ${formatFactsForPrompt(facts)}
 
-` +
+${agg.subscription_cost > 0 ? `NOTE: cost_usd below is API-equivalent cost (the list-price value of tokens used), not money spent, because some usage runs on a subscription plan rather than billed API keys. billed_cost_usd is money actually spent via API keys; subscription_cost_usd is list-price equivalent only, never money spent. Say "API-equivalent cost" for the total, never "spend" or "spent".\n\n` : ""}` +
 		JSON.stringify(
 			{
 				sessions: agg.total_sessions,
@@ -78,6 +78,9 @@ ${formatFactsForPrompt(facts)}
 				hours: Math.round(agg.total_duration_hours),
 				commits: agg.git_commits,
 				cost_usd: agg.total_cost.toFixed(2),
+				cost_by_provider: agg.cost_by_provider,
+				billed_cost_usd: agg.billed_cost.toFixed(2),
+				subscription_cost_usd: agg.subscription_cost.toFixed(2),
 				top_tools: top8(agg.tool_counts),
 				top_goals: top8(agg.goal_categories),
 				outcomes_decay_weighted: agg.outcomes,
@@ -362,12 +365,30 @@ DATA:
 ${data}`,
 
 		interaction_style: `Analyze this usage data and describe your interaction style with omp.
+Use second person ("you"). Write plain sentences; no bold, no walls of text.
+
+Pick the 3-4 most distinctive facets of how you work, drawn from: how you
+delegate tasks, how you steer or interrupt the assistant, how you tune your
+setup (models, config, skills), how you verify results. Only include a facet
+that has real evidence in the data below; do not force all four if fewer
+stand out.
 
 RESPOND WITH ONLY A VALID JSON OBJECT:
 {
-  "narrative": "2-3 paragraphs analyzing HOW you interact. Use second person 'you'. Describe patterns: do they iterate quickly or write detailed specs upfront? Do they interrupt often or let it run? Include specific examples. Use **bold** for key insights.",
-  "key_pattern": "one sentence summary of the most distinctive interaction style"
+  "blocks": [
+    {
+      "title": "short theme title (3-6 words)",
+      "body": "2-4 plain sentences on this facet, <= 60 words. Use 'you'. Include a specific example.",
+      "evidence_sessions": ["session id", "another session id"]
+    }
+  ],
+  "key_pattern": "one sentence (<= 30 words) summary of the most distinctive interaction style"
 }
+
+Include 3-4 blocks. evidence_sessions is optional per block: include it only
+when you can cite real session ids (the "[id]" from SESSION SUMMARIES, or
+session_id from worst_turns_corpus/worst_cache_sessions in the data below)
+backing that block; never invent one.
 
 DATA:
 ${data}`,
@@ -523,6 +544,10 @@ ${data}`,
 				const price = u.list_price ? `list price $${u.list_price.input_per_mtok}/Mtok input, $${u.list_price.output_per_mtok}/Mtok output` : "list price unknown";
 				return `- ${m.replace(/.*\//, "")}: ${u.sessions} sessions, $${u.cost.toFixed(2)} total, ${u.message_count} msgs, tier=${u.tier || "mid"}, ${price}`;
 			}).join("\n");
+			const subscriptionProviders = (agg.cost_by_provider ?? []).filter((p) => p.auth === "subscription");
+			const apiKeyProviders = (agg.cost_by_provider ?? []).filter((p) => p.auth === "api_key");
+			const unknownProviders = (agg.cost_by_provider ?? []).filter((p) => p.auth === "unknown");
+			const providerLines = (agg.cost_by_provider ?? []).map((p) => `- ${p.provider}: $${p.cost.toFixed(2)} (${p.auth})`).join("\n") || "none";
 			return `Analyze this model usage data and identify efficiency issues.
 
 IMPORTANT CONTEXT:
@@ -536,6 +561,12 @@ IMPORTANT CONTEXT:
 - For subscription models: suggest using lighter models within the same plan for trivial tasks, reserving the heavy model for complex work.
 - For PAYG models: optimize for dollar cost as usual.
 - Cache hit ratio (cacheRead / (input + cacheRead)) is ${(agg.cache_hit_ratio * 100).toFixed(1)}% overall. A low ratio on a large prompt is the resumed-stale-session tax: the context gets re-read from scratch instead of hitting cache, burning both money and latency. Worst sessions by ratio: ${agg.worst_cache_sessions.map(s => `${s.project} (${s.tokens} tok): ${(s.ratio * 100).toFixed(1)}%`).join(", ") || "none"}.
+- Per-provider cost basis (auth from the actual credential used, not inferred from price):
+${providerLines}
+Billed cost (money actually spent via API keys): $${(agg.billed_cost ?? 0).toFixed(2)}. Subscription cost (API list-price equivalent for subscription/OAuth providers, NOT money spent): $${(agg.subscription_cost ?? 0).toFixed(2)}.
+${subscriptionProviders.length ? `- Subscription providers (${subscriptionProviders.map((p) => p.provider).join(", ")}): their cost is an API-equivalent list-price value, not money spent. NEVER quote a dollar savings figure for them; frame any recommendation about them purely as rate-limit/quota headroom and speed.` : ""}
+${apiKeyProviders.length ? `- API-key (billed) providers (${apiKeyProviders.map((p) => p.provider).join(", ")}): dollar savings claims are allowed here, backed by the billed cost above.` : ""}
+${unknownProviders.length ? `- Providers with unknown auth (${unknownProviders.map((p) => p.provider).join(", ")}): say the cost basis is unknown for them; do not claim dollar savings or quota framing.` : ""}
 
 The user's models from their sessions (derived from actual usage data):
 ${modelLines}

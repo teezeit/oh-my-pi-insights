@@ -73,3 +73,21 @@ test("facts carry the report's own numbers with n and window", () => {
 	// A sentence quoting these exact numbers passes the checker.
 	assert.deepEqual(checkFacts({ s: { t: "4.4% interrupted, 94% succeeded, $32.00 spent" } }, facts), []);
 });
+
+test("facts expose billed/subscription split and per-provider cost", () => {
+	const metas = [
+		meta({ session_id: "p1", total_cost: 5, cost_primary: 5, cost_by_provider: { anthropic: 5 } }),
+		meta({ session_id: "p2", total_cost: 3, cost_primary: 3, cost_by_provider: { openai: 3 } }),
+	];
+	const agg = aggregateData(metas, new Map(), [], { anthropic: "subscription", openai: "api_key" });
+	const facts = buildFacts(agg, computeTemporalData(metas, new Map()));
+	const byId = new Map(facts.map((f) => [f.id, f]));
+
+	assert.equal(byId.get("billed_cost")!.value, 3);
+	assert.equal(byId.get("billed_cost")!.unit, "usd");
+	assert.equal(byId.get("subscription_cost")!.value, 5);
+	assert.equal(byId.get("cost_by_provider.anthropic")!.value, 5);
+	assert.match(byId.get("cost_by_provider.anthropic")!.definition, /not billed/);
+	assert.equal(byId.get("cost_by_provider.openai")!.value, 3);
+	assert.match(byId.get("cost_by_provider.openai")!.definition, /actually billed/);
+});

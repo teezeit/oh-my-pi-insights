@@ -104,3 +104,31 @@ test("interruption card and rate share one numerator with an aborted/steered bre
 	assert.equal(card[1], "4");
 	assert.match(card[2]!, /aborted 2 \/ steered 2/);
 });
+
+test("cost_by_provider sums per-provider cost across sessions and splits billed vs subscription by auth", () => {
+	const metas = [
+		meta({ session_id: "a", cost_by_provider: { anthropic: 2, openai: 3 } }),
+		meta({ session_id: "b", cost_by_provider: { anthropic: 1, "mistral": 0.5 } }),
+	];
+	const providerAuth = { anthropic: "subscription", openai: "api_key" } as const;
+
+	const agg = aggregateData(metas, new Map(), [], providerAuth);
+
+	assert.deepEqual(agg.cost_by_provider, [
+		{ provider: "anthropic", cost: 3, auth: "subscription" },
+		{ provider: "openai", cost: 3, auth: "api_key" },
+		{ provider: "mistral", cost: 0.5, auth: "unknown" },
+	]);
+	assert.equal(agg.billed_cost, 3);
+	assert.equal(agg.subscription_cost, 3);
+});
+
+test("a provider absent from the credential map reads as unknown auth, never a false billed/subscription split", () => {
+	const metas = [meta({ session_id: "a", cost_by_provider: { "some-provider": 5 } })];
+
+	const agg = aggregateData(metas, new Map(), [], {});
+
+	assert.deepEqual(agg.cost_by_provider, [{ provider: "some-provider", cost: 5, auth: "unknown" }]);
+	assert.equal(agg.billed_cost, 0);
+	assert.equal(agg.subscription_cost, 0);
+});

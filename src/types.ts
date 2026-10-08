@@ -94,6 +94,8 @@ export type SessionMeta = {
 	cost_primary: number;
 	cost_advisor: number;
 	cost_subagent: number;
+	/** Cost by message/model_usage provider (raw $, unweighted); key "unknown" when the record carried no provider. Folds in sidecar (advisor/subagent) spend attributed to the provider that actually served the call. */
+	cost_by_provider: Record<string, number>;
 	cache_read_tokens: number;
 	cache_write_tokens: number;
 	utility_cost: number;
@@ -234,6 +236,19 @@ export type AggregatedData = {
 	total_cost_primary: number;
 	total_cost_advisor: number;
 	total_cost_subagent: number;
+	/**
+	 * Per-provider cost, sorted by cost desc, attributed by the message's
+	 * provider (primary + advisor + subagent spend). `auth` comes from
+	 * reading omp's own credential store: "subscription" (OAuth; API
+	 * list-price equivalent, not what was actually billed), "api_key"
+	 * (pay-as-you-go, billed), or "unknown" when the provider has no
+	 * credential entry (or the credential store could not be read).
+	 */
+	cost_by_provider: Array<{ provider: string; cost: number; auth: "subscription" | "api_key" | "unknown" }>;
+	/** Sum of cost_by_provider entries where auth === "api_key": real spend. */
+	billed_cost: number;
+	/** Sum of cost_by_provider entries where auth === "subscription": API list-price equivalent covered by a plan, never actually billed per call. */
+	subscription_cost: number;
 	total_utility_cost: number;
 	total_cache_read_tokens: number;
 	total_cache_write_tokens: number;
@@ -503,6 +518,7 @@ export type SidecarUsage = {
 	totals: UsageRecord;
 	utility_cost: number;
 	model_usage: ModelUsageMap;
+	cost_by_provider: Record<string, number>;
 	tool_calls: number;
 	tool_errors: number;
 };

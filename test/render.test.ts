@@ -56,3 +56,89 @@ test("every stat card and chart in the HTML report states its sample size", () =
 	assert.equal(cardN("Tool Errors"), "25");
 	assert.equal(cardN("Total Cost"), "5");
 });
+
+test("the action list is a numbered <ol> with no checkbox inputs", () => {
+	const metas = [meta({ session_id: "s1" })];
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	const sections = {
+		suggestions: {
+			config_additions: [{ addition: "Add a rule", why: "because", where: "AGENTS.md" }],
+			stop_doing: [{ what: "Retrying", why: "wastes time", alternative: "Start fresh" }],
+		},
+	};
+	const html = generateHTML(agg, sections, {}, temporal);
+	const actionListBlock = html.slice(html.indexOf('id="action-list"'), html.indexOf("</ol>"));
+	assert.match(actionListBlock, /<ol class="action-list">/);
+	assert.ok(!/type="checkbox"/.test(actionListBlock), "action list must not contain checkboxes");
+});
+
+test("Summary has no standalone what-changed section; 'Since Last Report' only renders when temporal changes exist", () => {
+	const metas = [meta({ session_id: "s1" })];
+	const agg = aggregateData(metas, new Map());
+	const temporalNoChange = computeTemporalData(metas, new Map());
+	const htmlNoChange = generateHTML(agg, {}, {}, temporalNoChange);
+	assert.ok(!htmlNoChange.includes("Since Last Report"));
+	assert.ok(!htmlNoChange.includes('id="what-changed"'));
+	assert.ok(!htmlNoChange.includes(">What Changed<"));
+
+	const temporalWithChange = { ...temporalNoChange, diff_headlines: ["Cost dropped 20%"] };
+	const htmlWithChange = generateHTML(agg, {}, {}, temporalWithChange);
+	assert.ok(htmlWithChange.includes("Since Last Report"));
+	assert.match(htmlWithChange, /Cost dropped 20%/);
+});
+
+test("evidence links show the `omp -r <id>` replay command with a copy button", () => {
+	const metas = [meta({ session_id: "sess-evidence-1" })];
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	const sections = {
+		friction_analysis: {
+			ongoing: [{ category: "Flaky tool", description: "desc", examples: [], evidence_sessions: ["sess-evidence-1"] }],
+		},
+	};
+	const sessionPaths = { "sess-evidence-1": "/fixture/sessions/sess-evidence-1.jsonl" };
+	const html = generateHTML(agg, sections, {}, temporal, { sessionPaths });
+	assert.match(html, /omp -r sess-evidence-1/);
+	assert.match(html, /class="evidence-cmd"/);
+});
+
+test("summary elements carry the chevron class with no native details marker", () => {
+	const metas = [meta({ session_id: "s1" })];
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	const html = generateHTML(agg, {}, {}, temporal);
+	assert.match(html, /<summary class="chevron-summary">/);
+	assert.match(html, /summary\.chevron-summary::-webkit-details-marker \{ display: none; \}/);
+	assert.match(html, /summary\.chevron-summary::after/);
+});
+
+test("cost label switches to API-equivalent when subscription_cost is positive", () => {
+	const metas = [meta({ session_id: "s1" })];
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	const aggWithSub = { ...agg, subscription_cost: 2.5, billed_cost: 0.5 };
+	const html = generateHTML(aggWithSub, {}, {}, temporal);
+	assert.match(html, /API-equivalent Cost/);
+	assert.match(html, /billed: \$0\.50/);
+});
+
+test("How You Work renders C2 blocks and still accepts the legacy narrative shape", () => {
+	const metas = [meta({ session_id: "s1" })];
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	const htmlBlocks = generateHTML(agg, {
+		interaction_style: {
+			blocks: [{ title: "Fast iterator", body: "Short loops." }, { title: "Heavy steerer", body: "Steers often." }],
+			key_pattern: "Iterate then steer.",
+		},
+	}, {}, temporal);
+	assert.match(htmlBlocks, /style-block-card/);
+	assert.match(htmlBlocks, /Fast iterator/);
+	assert.match(htmlBlocks, /Iterate then steer\./);
+
+	const htmlNarrative = generateHTML(agg, {
+		interaction_style: { narrative: "You iterate quickly.", key_pattern: "Fast." },
+	}, {}, temporal);
+	assert.match(htmlNarrative, /You iterate quickly\./);
+});

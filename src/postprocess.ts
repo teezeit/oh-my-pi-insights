@@ -163,6 +163,9 @@ export const DEFAULT_WORD_BUDGETS: BudgetTarget[] = [
 	{ section: "suggestions", arrayField: "features_to_try", field: "why_for_you", maxWords: 40 },
 	{ section: "suggestions", arrayField: "usage_patterns", field: "detail", maxWords: 40 },
 	{ section: "on_the_horizon", arrayField: "opportunities", field: "whats_possible", maxWords: 40 },
+	// C2: interaction_style's blocks shape (not the legacy narrative shape).
+	{ section: "interaction_style", arrayField: "blocks", field: "body", maxWords: 60 },
+	{ section: "interaction_style", field: "key_pattern", maxWords: 30 },
 ];
 
 /**

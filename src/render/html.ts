@@ -151,6 +151,20 @@ function chartTitle(title: string, n: string): string {
 	return `<h3>${esc(title)} <span style="text-transform:none;font-weight:400;color:var(--muted)">${esc(n)}</span></h3>`;
 }
 
+/** D18/D22-style: render an `omp -r <id>` replay command with its own copy
+ * button next to the file:// link, so the reader never has to retype the
+ * session id to reopen it in omp. */
+function evidenceHtmlFor(ids: unknown, sessionPaths: Record<string, string>): string {
+	const links = buildEvidenceLinks(ids, sessionPaths);
+	if (!links.length) return "";
+	return `<div class="evidence">Evidence: ${links
+		.map((l) => {
+			const cmd = `omp -r ${l.id}`;
+			return `<span class="evidence-link"><a href="${esc(l.href)}">${esc(l.id.slice(0, 8))}</a> <code class="evidence-cmd">${esc(cmd)}</code><button class="copy-btn tiny" onclick="copyFromBox(this)">\u{1F4CB}</button></span>`;
+		})
+		.join(", ")}</div>`;
+}
+
 export function generateHTML(
 	agg: AggregatedData,
 	sections: Record<string, unknown>,
@@ -160,11 +174,7 @@ export function generateHTML(
 ): string {
 	const sessionPaths = opts.sessionPaths ?? {};
 	const liveConfig = opts.userCtx?.config_yml_flat ?? {};
-	const evidenceHtml = (ids: unknown): string => {
-		const links = buildEvidenceLinks(ids, sessionPaths);
-		if (!links.length) return "";
-		return `<div class="evidence">Evidence: ${links.map((l) => `<a href="${esc(l.href)}">${esc(l.id.slice(0, 8))}</a>`).join(", ")}</div>`;
-	};
+	const evidenceHtml = (ids: unknown): string => evidenceHtmlFor(ids, sessionPaths);
 	/** D18: a config.yml-targeted addition that parses as YAML renders as an
 	 * old -> new key diff instead of the raw addition text. */
 	const configAdditionHtml = (c: { addition: string; where: string }): string => {
@@ -199,7 +209,11 @@ export function generateHTML(
 			}
 		)?.areas ?? [];
 	const iStyle = sections.interaction_style as
-		| { narrative?: string; key_pattern?: string }
+		| {
+				narrative?: string;
+				key_pattern?: string;
+				blocks?: Array<{ title: string; body: string; evidence_sessions?: string[] }>;
+		  }
 		| undefined;
 	const whatWorks = sections.what_works as
 		| {
@@ -254,16 +268,59 @@ export function generateHTML(
 	const actionListHtml = actionItems.length
 		? `<div class="card" id="action-list">
   <h3 style="margin-bottom:12px">\u2705 Top Actions</h3>
+  <ol class="action-list">
   ${actionItems
 			.map(
-				(item, i) => `<label style="display:flex;align-items:flex-start;gap:10px;${i === actionItems.length - 1 ? "" : "margin-bottom:10px;"}cursor:pointer">
-    <input type="checkbox" style="margin-top:3px;accent-color:var(--accent);width:15px;height:15px;flex-shrink:0">
-    <span><strong>${esc(item.label)}</strong>${item.where ? ` <span class="tag" style="font-size:10px">${esc(item.where)}</span>` : ""}<br><span style="color:var(--dim);font-size:13px">${esc(item.detail)}</span>${evidenceHtml(item.evidence_sessions)}</span>
-  </label>`,
+				(item) => `<li class="action-item">
+    <div class="action-copy-src" style="display:none">${esc(item.label)}</div>
+    <strong>${esc(item.label)}</strong>${item.where ? ` <span class="tag" style="font-size:10px">${esc(item.where)}</span>` : ""}
+    <button class="copy-btn tiny" onclick="copyFromBox(this)">\u{1F4CB} Copy</button>
+    <div class="action-detail">${esc(item.detail)}</div>${evidenceHtml(item.evidence_sessions)}
+  </li>`,
 			)
 			.join("\n  ")}
+  </ol>
 </div>`
 		: "";
+
+	// Since-last-report delta, folded into the Summary card instead of a
+	// standalone section: temporal diff headlines, the one major transition
+	// and harness-level changes, capped at 3 lines and only shown when any
+	// of the three actually produced something.
+	const sinceLastReportLines: string[] = [];
+	if (temporal.diff_headlines.length) sinceLastReportLines.push(temporal.diff_headlines.join(" \u00b7 "));
+	if (temporal.major_transition) sinceLastReportLines.push(`Major shift (${temporal.major_transition.when}): ${temporal.major_transition.what}. Impact: ${temporal.major_transition.impact}`);
+	if (temporal.harness_changes?.length) sinceLastReportLines.push(`Harness: ${temporal.harness_changes.map((c) => c.detail).join("; ")}`);
+	const sinceLastReportHtml = sinceLastReportLines.length
+		? `<div class="at-a-glance-part since-last-report">
+      <h3>Since Last Report${temporal.delta ? ` <span style="text-transform:none;font-weight:400">(${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})</span>` : ""}</h3>
+      <p>${sinceLastReportLines.slice(0, 3).map((l) => esc(l)).join("<br>")}</p>
+    </div>`
+		: "";
+
+	const costByProvider = agg.cost_by_provider ?? [];
+	const providerAuthLabel = (auth: string): string =>
+		auth === "subscription" ? "subscription (list-price equivalent, not billed)" : auth === "api_key" ? "billed" : "unknown";
+	const costByProviderHtml = costByProvider.length
+		? `<div class="card" style="margin-bottom:20px">
+    <h3 style="margin-bottom:10px">Cost by Provider</h3>
+    <table class="cost-table">
+      <thead><tr><th>Provider</th><th>Cost</th><th>Basis</th></tr></thead>
+      <tbody>
+        ${costByProvider.map((p) => `<tr><td>${esc(p.provider)}</td><td>${esc(fmtCost(p.cost))}</td><td>${esc(providerAuthLabel(p.auth))}</td></tr>`).join("\n        ")}
+      </tbody>
+    </table>
+  </div>`
+		: "";
+	const costLabel = agg.subscription_cost > 0 ? "API-equivalent Cost" : "Total Cost";
+	// Why: unknown-basis cost (e.g. an API key in an env var omp never stored) may well be billed; hiding it behind "billed: $0" understates real spend.
+	const unknownCost = agg.total_cost - agg.billed_cost - agg.subscription_cost;
+	const costSub = agg.subscription_cost > 0
+		? `billed: ${fmtCost(agg.billed_cost)}${unknownCost >= 0.01 ? ` · unknown basis: ${fmtCost(unknownCost)}` : ""}`
+		: "";
+	const costTitle = agg.subscription_cost > 0
+		? cardTitle("sum of recorded cost (primary + advisor + subagent); omp's list-price equivalent for every call, including ones paid via a subscription rather than billed per-token", nSessions)
+		: cardTitle("sum of recorded cost (primary + advisor + subagent)", nSessions);
 
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -273,12 +330,12 @@ export function generateHTML(
 <title>omp Insights — ${esc(agg.date_range.start)} to ${esc(agg.date_range.end)}</title>
 <style>
   :root {
-    --bg: #0d0f12; --bg2: #161a1f; --bg3: #1e2329;
-    --border: #2a2f38; --border2: #343b47;
-    --text: #e4e8ef; --dim: #8892a0; --muted: #4e5866;
-    --accent: #4f9cf9; --accent2: #38bdf8;
-    --green: #4ade80; --yellow: #fbbf24; --red: #f87171;
-    --purple: #c084fc; --teal: #2dd4bf;
+    --bg: #faf8f4; --bg2: #fffdf9; --bg3: #f3efe6;
+    --border: #e3ddd0; --border2: #d1c9b8;
+    --text: #1f2328; --dim: #55606b; --muted: #8a93a0;
+    --accent: #2f6f9e; --accent2: #0f9b8e;
+    --green: #1f8a4c; --yellow: #a9790a; --red: #c0392b;
+    --purple: #7c4dbd; --teal: #0f9b8e;
     --radius: 10px; --radius-sm: 6px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -297,18 +354,33 @@ export function generateHTML(
   nav a:hover { color: var(--text); border-color: var(--border2); text-decoration: none; background: var(--bg2); }
 
   .rpt-section { margin-bottom: 48px; display: block; }
-  .rpt-section > summary { cursor: pointer; list-style: revert; }
-  .rpt-section > summary::-webkit-details-marker { margin-right: 8px; }
-  .rpt-section > summary h2 { display: inline-flex; }
   h2 { font-size: 24px; font-weight: 700; color: var(--text); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
-  .rpt-section > summary h2 { margin-bottom: 0; border-bottom: none; }
-  .rpt-section[open] > summary h2 { margin-bottom: 24px; border-bottom: 1px solid var(--border); width: 100%; }
+  .rpt-section > summary.chevron-summary h2 { margin-bottom: 0; border-bottom: none; }
+  .rpt-section[open] > summary.chevron-summary h2 { margin-bottom: 24px; border-bottom: 1px solid var(--border); width: 100%; }
   h2 .emoji { font-size: 18px; }
   h3 { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
 
+  /* Toggles: hide the native marker, draw a chevron that rotates when
+     open, make the whole header row clickable with a hover background. */
+  summary.chevron-summary {
+    list-style: none; cursor: pointer; display: flex; align-items: center;
+    justify-content: space-between; gap: 10px; width: 100%;
+    padding: 10px 10px; border-radius: var(--radius-sm); transition: background 0.15s;
+  }
+  summary.chevron-summary::-webkit-details-marker { display: none; }
+  summary.chevron-summary::after {
+    content: "\u203A"; font-size: 20px; color: var(--muted); flex-shrink: 0;
+    transition: transform 0.2s ease;
+  }
+  summary.chevron-summary:hover { background: var(--bg3); }
+  details[open] > summary.chevron-summary::after { transform: rotate(90deg); }
+  summary.chevron-summary.nested-chevron { font-size: 12px; color: var(--dim); padding: 6px 8px; }
+  summary.chevron-summary.nested-chevron::after { font-size: 13px; }
+
   details.nested { margin-top: 10px; }
-  details.nested > summary { cursor: pointer; color: var(--dim); font-size: 12px; }
   .evidence { margin-top: 6px; font-size: 11px; color: var(--muted); }
+  .evidence-link { display: inline-flex; align-items: center; gap: 4px; }
+  .evidence-cmd { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--accent2); font-size: 11px; }
   .evidence a { color: var(--accent2); }
   .config-diff { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
   .config-diff-row { margin-top: 4px; color: var(--text); }
@@ -331,7 +403,7 @@ export function generateHTML(
   .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 14px; }
   .bar-row.compact { margin-bottom: 2px; }
   .bar-label { width: 140px; flex-shrink: 0; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .bar-track { flex: 1; height: 10px; background: var(--bg3); border-radius: 5px; overflow: hidden; }
+  .bar-track { flex: 1; height: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
   .bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 5px; transition: width 0.4s ease; }
   .bar-count { width: 40px; text-align: right; color: var(--muted); flex-shrink: 0; }
 
@@ -344,6 +416,8 @@ export function generateHTML(
   .at-a-glance-part:last-child { border-bottom: none; }
   .at-a-glance-part h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--accent); margin-bottom: 10px; }
   .at-a-glance-part p { color: var(--text); line-height: 1.7; }
+  .at-a-glance-part.since-last-report { background: var(--bg3); }
+  .at-a-glance-part.since-last-report h3 { color: var(--accent2); }
 
   .area-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
   .area-card h3 { color: var(--accent2); font-size: 17px; }
@@ -353,6 +427,10 @@ export function generateHTML(
   .workflow-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
   .workflow-card h3 { color: var(--green); font-size: 17px; }
   .workflow-card p { color: var(--dim); margin-top: 8px; font-size: 14px; }
+
+  .style-block-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
+  .style-block-card h3 { color: var(--accent2); font-size: 15px; }
+  .style-block-card p { color: var(--dim); margin-top: 6px; font-size: 14px; }
 
   .friction-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
   .friction-card h3 { color: var(--yellow); font-size: 17px; }
@@ -368,9 +446,19 @@ export function generateHTML(
   .sugg-card label { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
   .sugg-card input[type=checkbox] { margin-top: 3px; accent-color: var(--accent); width: 15px; height: 15px; flex-shrink: 0; }
 
+  .action-list { list-style: decimal; padding-left: 22px; }
+  .action-item { margin-bottom: 14px; }
+  .action-item:last-child { margin-bottom: 0; }
+  .action-detail { color: var(--dim); font-size: 13px; margin-top: 4px; }
+
+  .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .cost-table th, .cost-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  .cost-table th { color: var(--dim); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.4px; }
+
   .copy-box { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--teal); white-space: pre-wrap; word-break: break-all; margin-top: 10px; }
   .copy-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--bg3); border: 1px solid var(--border2); color: var(--dim); font-size: 12px; padding: 5px 12px; border-radius: var(--radius-sm); cursor: pointer; margin-top: 8px; transition: all 0.15s; }
   .copy-btn:hover { color: var(--text); border-color: var(--accent); background: var(--bg2); }
+  .copy-btn.tiny { padding: 2px 8px; margin-top: 0; font-size: 11px; }
   .copy-all-btn { background: var(--accent); color: #fff; font-weight: 600; border: none; padding: 8px 18px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; margin-top: 16px; transition: opacity 0.15s; }
   .copy-all-btn:hover { opacity: 0.85; }
 
@@ -381,9 +469,9 @@ export function generateHTML(
 
   .muted { color: var(--muted); font-size: 14px; }
   .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
-  .badge.green { background: rgba(74,222,128,0.15); color: var(--green); }
-  .badge.yellow { background: rgba(251,191,36,0.15); color: var(--yellow); }
-  .badge.red { background: rgba(248,113,113,0.15); color: var(--red); }
+  .badge.green { background: rgba(31,138,76,0.12); color: var(--green); }
+  .badge.yellow { background: rgba(169,121,10,0.12); color: var(--yellow); }
+  .badge.red { background: rgba(192,57,43,0.12); color: var(--red); }
 
   @media (max-width: 700px) {
     .card-grid.cols2, .card-grid.cols3 { grid-template-columns: 1fr; }
@@ -408,7 +496,6 @@ export function generateHTML(
 
 <nav>
   <a href="#at-a-glance">Summary</a>
-  ${temporal.diff_headlines.length || temporal.major_transition ? `<a href="#what-changed">What Changed</a>` : ""}
   <a href="#stats">Numbers</a>
   <a href="#projects">Where You Worked</a>
   <a href="#style">How You Work</a>
@@ -419,26 +506,13 @@ export function generateHTML(
   <a href="#model-efficiency">Model Spend</a>
 </nav>
 
-${(temporal.diff_headlines.length || temporal.major_transition || temporal.harness_changes?.length) ? `
-<details class="rpt-section" id="what-changed" open>
-<summary><h3 style="color:var(--accent2);font-size:13px;text-transform:uppercase;letter-spacing:0.5px;display:inline">\u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}</h3></summary>
-<div style="background:linear-gradient(135deg,#1a2332,#1e2a3a);border:1px solid var(--border2);border-radius:var(--radius);padding:24px 28px;margin-top:14px">
-  <div style="display:flex;flex-wrap:wrap;gap:10px">
-    ${temporal.diff_headlines.map(h => `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 14px;font-size:14px;color:var(--text)">${esc(h)}</div>`).join("\n    ")}
-  </div>
-  ${temporal.major_transition ? `<div style="margin-top:14px;padding:10px 14px;background:var(--bg);border-radius:var(--radius-sm);border-left:3px solid var(--purple);font-size:13px;color:var(--dim)"><strong style="color:var(--purple)">Major shift (${esc(temporal.major_transition.when)}):</strong> ${esc(temporal.major_transition.what)}. Impact: ${esc(temporal.major_transition.impact)}</div>` : ""}
-  ${temporal.harness_changes?.length ? `<div style="margin-top:14px;display:flex;flex-direction:column;gap:6px">
-    ${temporal.harness_changes.map(c => `<div style="padding:8px 14px;background:var(--bg);border-radius:var(--radius-sm);border-left:3px solid var(--accent2);font-size:13px;color:var(--dim)"><strong style="color:var(--accent2)">Harness change (${esc(c.when.slice(0, 10))}):</strong> ${esc(c.detail)}${c.too_recent ? ` <em>(too recent to assess impact)</em>` : ""}</div>`).join("\n    ")}
-  </div>` : ""}
-</div>
-</details>` : ""}
-
 ${actionListHtml}
 
 <!-- ── At a Glance ── -->
 <details class="rpt-section" id="at-a-glance" open>
-<summary><h2><span class="emoji">⚡</span> Summary</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">⚡</span> Summary</h2></summary>
   <div class="at-a-glance">
+    ${sinceLastReportHtml}
     <div class="at-a-glance-part">
       <h3>What's Working</h3>
       ${wrapP(synthesis.whats_working ?? "")}
@@ -460,14 +534,14 @@ ${actionListHtml}
 
 <!-- ── Stats ── -->
 <details class="rpt-section" id="stats">
-<summary><h2><span class="emoji">📊</span> By the Numbers</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">📊</span> By the Numbers</h2></summary>
   <div class="stat-grid">
     ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`, nSessions, cardTitle("substantive sessions in the report", nSessions))}
     ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`, nSessions, cardTitle("human messages across all sessions", nSessions))}
     ${statCard("Active Time", fmtHours(agg.total_duration_hours), `${(agg.total_duration_hours / Math.max(Object.keys(agg.active_hours_by_day).length, 1)).toFixed(1)}h/day, parallel sessions counted once`, `n=${Object.keys(agg.active_hours_by_day).length} active days`, cardTitle("union of session intervals per day; parallel sessions counted once", `n=${Object.keys(agg.active_hours_by_day).length} active days`))}
     ${statCard("Tokens In", fmtTokens(agg.total_input_tokens), "", nSessions, cardTitle("total input tokens recorded across all model calls", nSessions))}
     ${statCard("Tokens Out", fmtTokens(agg.total_output_tokens), "", nSessions, cardTitle("total output tokens recorded across all model calls", nSessions))}
-    ${statCard("Total Cost", fmtCost(agg.total_cost), "", nSessions, cardTitle("sum of recorded cost (primary + advisor + subagent)", nSessions))}
+    ${statCard(costLabel, fmtCost(agg.total_cost), costSub, nSessions, costTitle)}
     ${statCard("Lines Added", fmtTokens(agg.total_lines_added), "", nSessions, cardTitle("lines added across all file edits", nSessions))}
     ${statCard("Lines Removed", fmtTokens(agg.total_lines_removed), "", nSessions, cardTitle("lines removed across all file edits", nSessions))}
     ${statCard("Git Commits", String(agg.git_commits), `${agg.git_pushes} pushes`, nSessions, cardTitle("git commit tool calls across sessions", nSessions))}
@@ -478,6 +552,8 @@ ${actionListHtml}
     ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "", nSessions, cardTitle("sessions that used an MCP tool", nSessions)) : ""}
     ${agg.concurrent_sessions.overlap_events ? statCard("Parallel Sessions", String(agg.concurrent_sessions.overlap_events), "overlap events", nSessions, cardTitle("overlap events between interleaved sessions", nSessions)) : ""}
   </div>
+
+  ${costByProviderHtml}
 
   <div class="charts-grid">
     <div class="chart-box">
@@ -507,7 +583,7 @@ ${actionListHtml}
   </div>
 
   <details class="nested" id="numbers">
-  <summary>Numbers: languages, time of day, response times</summary>
+  <summary class="chevron-summary nested-chevron">Numbers: languages, time of day, response times</summary>
   <div class="charts-grid" style="margin-top:12px">
     <div class="chart-box">
       ${chartTitle("Languages", `n=${Object.values(agg.languages).reduce((a, b) => a + b, 0)} file touches`)}
@@ -527,7 +603,7 @@ ${actionListHtml}
 
 <!-- ── Project Areas ── -->
 <details class="rpt-section" id="projects">
-<summary><h2><span class="emoji">🗂️</span> Where You Worked</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">🗂️</span> Where You Worked</h2></summary>
   <div class="card-grid ${areas.length > 2 ? "cols2" : ""}">
     ${areas
 			.map(
@@ -542,16 +618,32 @@ ${actionListHtml}
 
 <!-- ── Interaction Style ── -->
 <details class="rpt-section" id="style">
-<summary><h2><span class="emoji">🎯</span> How You Work</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">🎯</span> How You Work</h2></summary>
   <div class="card">
-    ${iStyle?.narrative ? `<div style="line-height:1.8">${renderMarkdown(esc(iStyle.narrative))}</div>` : "<p class='muted'>No data</p>"}
+    ${
+			iStyle?.blocks?.length
+				? `<div class="card-grid ${iStyle.blocks.length > 1 ? "cols2" : ""}">
+      ${iStyle.blocks
+				.map(
+					(b) => `<div class="style-block-card">
+        <h3>${esc(b.title)}</h3>
+        <p>${esc(b.body)}</p>
+        ${evidenceHtml(b.evidence_sessions)}
+      </div>`,
+				)
+				.join("\n")}
+    </div>`
+				: iStyle?.narrative
+					? `<div style="line-height:1.8">${renderMarkdown(esc(iStyle.narrative))}</div>`
+					: "<p class='muted'>No data</p>"
+		}
     ${iStyle?.key_pattern ? `<div style="margin-top:16px;padding:14px 16px;background:var(--bg3);border-radius:var(--radius-sm);border:1px solid var(--border2);color:var(--accent2);font-size:14px;font-style:italic">"${esc(iStyle.key_pattern)}"</div>` : ""}
   </div>
 </details>
 
 <!-- ── What's Working ── -->
 <details class="rpt-section" id="what-works">
-<summary><h2><span class="emoji">✨</span> Wins</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">✨</span> Wins</h2></summary>
   ${whatWorks?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(whatWorks.intro)}</p>` : ""}
   <div class="card-grid ${(whatWorks?.impressive_workflows?.length ?? 0) > 1 ? "cols2" : ""}">
     ${(whatWorks?.impressive_workflows ?? [])
@@ -567,7 +659,7 @@ ${actionListHtml}
 
 <!-- ── Friction ── -->
 <details class="rpt-section" id="friction">
-<summary><h2><span class="emoji">⚠️</span> Where Things Broke</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">⚠️</span> Where Things Broke</h2></summary>
   ${frictionSec?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(frictionSec.intro)}</p>` : ""}
   ${(frictionSec?.resolved?.length || resolvedSinceLastRun.length) ? `<div style="margin-bottom:20px">
     <h3 style="color:var(--green);font-size:14px;margin-bottom:10px">\u2705 Resolved</h3>
@@ -592,7 +684,7 @@ ${actionListHtml}
 
 <!-- ── Suggestions ── -->
 <details class="rpt-section" id="suggestions">
-<summary><h2><span class="emoji">💡</span> Next Steps</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">💡</span> Next Steps</h2></summary>
 
   ${
 		configAdditions.length
@@ -636,7 +728,7 @@ ${actionListHtml}
       <div class="tag">${esc(f.feature)}</div>
       <h3>${esc(f.one_liner)}</h3>
       <p>${esc(f.why_for_you)}</p>
-      <details class="nested"><summary>Show example</summary>
+      <details class="nested"><summary class="chevron-summary nested-chevron">Show example</summary>
       <div class="copy-box">${esc(f.example)}</div>
       <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
       </details>
@@ -658,7 +750,7 @@ ${actionListHtml}
       <h3>${esc(p.title)}</h3>
       <p>${esc(p.suggestion)}</p>
       <p style="margin-top:8px;font-size:13px;color:var(--muted)">${esc(p.detail)}</p>
-      <details class="nested"><summary>Show prompt</summary>
+      <details class="nested"><summary class="chevron-summary nested-chevron">Show prompt</summary>
       <div class="copy-box">${esc(p.copyable_prompt)}</div>
       <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
       </details>
@@ -683,7 +775,7 @@ ${actionListHtml}
 
 <!-- ── On the Horizon ── -->
 <details class="rpt-section" id="horizon">
-<summary><h2><span class="emoji">🚀</span> Future Workflows</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">🚀</span> Future Workflows</h2></summary>
   ${horizonSec?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(horizonSec.intro)}</p>` : ""}
   <div style="display:flex;flex-direction:column;gap:12px">
     ${(horizonSec?.opportunities ?? [])
@@ -692,7 +784,7 @@ ${actionListHtml}
       <h3>${esc(o.title)}</h3>
       <p>${esc(o.whats_possible)}</p>
       <p class="how">${esc(o.how_to_try)}</p>
-      <details class="nested"><summary>Show prompt</summary>
+      <details class="nested"><summary class="chevron-summary nested-chevron">Show prompt</summary>
       <div class="copy-box">${esc(o.copyable_prompt)}</div>
       <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
       </details>
@@ -704,7 +796,7 @@ ${actionListHtml}
 
 <!-- ── Model Efficiency ── -->
 <details class="rpt-section" id="model-efficiency">
-<summary><h2><span class="emoji">💸</span> Model Spend</h2></summary>
+<summary class="chevron-summary"><h2><span class="emoji">💸</span> Model Spend</h2></summary>
   ${modelEffSec?.summary ? `<p style="color:var(--dim);margin-bottom:16px">${esc(modelEffSec.summary)}</p>` : ""}
 
   <div class="stat-grid">
@@ -735,8 +827,8 @@ ${actionListHtml}
     <p style="color:var(--dim);margin-top:8px">${esc(modelEffSec.underspend_pattern)}</p>
   </div>` : ""}
 
-  ${modelEffSec?.quota_pressure ? `<div class="card" style="margin-top:12px;border-left:3px solid var(--blue)">
-    <h3 style="color:var(--blue);font-size:14px">Subscription Quota Pressure</h3>
+  ${modelEffSec?.quota_pressure ? `<div class="card" style="margin-top:12px;border-left:3px solid var(--accent)">
+    <h3 style="color:var(--accent);font-size:14px">Subscription Quota Pressure</h3>
     <p style="color:var(--dim);margin-top:8px">${esc(modelEffSec.quota_pressure)}</p>
   </div>` : ""}
 
@@ -746,7 +838,7 @@ ${actionListHtml}
     ${modelEffSec.potential_savings_note ? `<p style="color:var(--muted);margin-top:6px;font-size:12px;font-style:italic">${esc(modelEffSec.potential_savings_note)}</p>` : ""}
   </div>` : ""}
 
-  ${agg.model_efficiency.length ? `<details class="nested"><summary>Flagged Sessions</summary>
+  ${agg.model_efficiency.length ? `<details class="nested"><summary class="chevron-summary nested-chevron">Flagged Sessions</summary>
   <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
     ${agg.model_efficiency.slice(0, 10).map(e => `<div class="card" style="padding:14px 18px">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -778,8 +870,9 @@ export function copyFromBox(btn) {
   const box = btn.previousElementSibling;
   if (!box) return;
   navigator.clipboard.writeText(box.textContent).then(() => {
-    btn.textContent = '✅ Copied';
-    setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
+    const label = btn.textContent;
+    btn.textContent = '✅';
+    setTimeout(() => { btn.textContent = label; }, 2000);
   });
 }
 export function copyAllConfig() {

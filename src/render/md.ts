@@ -44,7 +44,7 @@ export function generateMarkdown(
 	const actionItems = buildActionList(sections);
 	if (actionItems.length) {
 		lines.push("## \u2705 Top Actions");
-		for (const item of actionItems) lines.push(`- [ ] **${item.label}**${item.where ? ` (\`${item.where}\`)` : ""}: ${item.detail}`);
+		actionItems.forEach((item, i) => lines.push(`${i + 1}. **${item.label}**${item.where ? ` (\`${item.where}\`)` : ""}: ${item.detail}`));
 		lines.push("");
 	}
 
@@ -159,6 +159,21 @@ export function generateMarkdown(
 	lines.push(`| Subagent sidecars (${agg.subagent_logs} ${agg.subagent_logs === 1 ? "log" : "logs"}) | $${agg.total_cost_subagent.toFixed(2)} | ${share(agg.total_cost_subagent)} |`);
 	lines.push(`| **Total** | **$${agg.total_cost.toFixed(2)}** | 100% |`);
 	lines.push("");
+	if (agg.subscription_cost > 0) {
+		const unknownCost = agg.total_cost - agg.billed_cost - agg.subscription_cost;
+		lines.push(`API-equivalent cost: $${agg.total_cost.toFixed(2)} (billed: $${agg.billed_cost.toFixed(2)}${unknownCost >= 0.01 ? `, unknown basis: $${unknownCost.toFixed(2)}` : ""}, subscription list-price equivalent: $${agg.subscription_cost.toFixed(2)}).`);
+		lines.push("");
+	}
+	if (agg.cost_by_provider?.length) {
+		lines.push("**Cost by provider:**");
+		lines.push(`| Provider | Cost | Basis |`);
+		lines.push(`|----------|------|-------|`);
+		for (const p of agg.cost_by_provider) {
+			const basis = p.auth === "subscription" ? "subscription (list-price equivalent, not billed)" : p.auth === "api_key" ? "billed" : "unknown";
+			lines.push(`| ${p.provider} | $${p.cost.toFixed(2)} | ${basis} |`);
+		}
+		lines.push("");
+	}
 	lines.push(`Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that total: $${agg.total_utility_cost.toFixed(2)}. ${agg.sessions_with_sidecars} of ${agg.total_sessions} sessions had at least one sidecar.`);
 	lines.push("");
 	lines.push(`**Cache efficiency:** ${(agg.cache_hit_ratio * 100).toFixed(1)}% overall hit ratio (cacheRead / (input + cacheRead)). A low ratio on a large prompt is the resumed-stale-session tax: context re-read from scratch instead of hitting cache, burning money and latency.`);
@@ -276,8 +291,15 @@ export function generateMarkdown(
 		lines.push("");
 	}
 
-	const iStyle = sections.interaction_style as { narrative?: string; key_pattern?: string } | undefined;
-	if (iStyle?.narrative) {
+	const iStyle = sections.interaction_style as
+		| { narrative?: string; key_pattern?: string; blocks?: Array<{ title: string; body: string; evidence_sessions?: string[] }> }
+		| undefined;
+	if (iStyle?.blocks?.length) {
+		lines.push("## \u{1F3AF} How You Work");
+		for (const b of iStyle.blocks) lines.push(`- **${b.title}**: ${b.body}`);
+		if (iStyle.key_pattern) lines.push(`\n> ${iStyle.key_pattern}`);
+		lines.push("");
+	} else if (iStyle?.narrative) {
 		lines.push("## \u{1F3AF} How You Work");
 		lines.push(iStyle.narrative);
 		if (iStyle.key_pattern) lines.push(`\n> ${iStyle.key_pattern}`);

@@ -58,7 +58,7 @@ test("every rpt-section is a <details> with an id; only at-a-glance opens by def
 		assert.ok(closedIds.includes(id), `${id} should be closed by default`);
 });
 
-test("the What Changed block opens by default when present (D16)", async () => {
+test("changes render as a non-collapsible 'Since Last Report' block inside Summary, not a standalone section", async () => {
 	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
 	const temporal = {
 		diff_headlines: ["Cost per session down 20%"],
@@ -68,7 +68,8 @@ test("the What Changed block opens by default when present (D16)", async () => {
 	} as any;
 	const agg = aggregateData([], new Map());
 	const html = generateHTML(agg, sections, {}, temporal);
-	assert.match(html, /<details class="rpt-section" id="what-changed" open>/);
+	assert.match(html, /since-last-report[\s\S]*Cost per session down 20%/);
+	assert.doesNotMatch(html, /id="what-changed"/);
 });
 
 test("copyable-prompt blocks render inside a nested, closed <details> (D16)", async () => {

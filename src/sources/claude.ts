@@ -313,6 +313,10 @@ export function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMe
 		cost_primary: stats.totals.cost,
 		cost_advisor: 0,
 		cost_subagent: 0,
+		// Why "claude" not "anthropic": Claude Code's own provider string
+		// would collide with omp's "anthropic" if ever merged into one
+		// corpus, so the source is tagged explicitly instead of guessing.
+		cost_by_provider: { claude: stats.totals.cost },
 		cache_read_tokens: stats.totals.cacheRead,
 		cache_write_tokens: stats.totals.cacheWrite,
 		utility_cost: 0,

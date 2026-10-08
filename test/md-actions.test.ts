@@ -44,7 +44,7 @@ const userCtx: UserContext = {
 	config_yml_flat: {},
 };
 
-test("generateMarkdown starts with the action list as `- [ ]` items (D22)", async () => {
+test("generateMarkdown starts with the action list as a numbered list (not `- [ ]`)", async () => {
 	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
 	const agg = aggregateData([], new Map());
 	const temporal = computeTemporalData([], new Map());
@@ -54,8 +54,10 @@ test("generateMarkdown starts with the action list as `- [ ]` items (D22)", asyn
 	assert.equal(headings[0], "## \u2705 Top Actions");
 
 	const actionBlock = md.slice(md.indexOf(headings[0]!), md.indexOf(headings[1]!));
-	const checkboxLines = actionBlock.split("\n").filter((l) => l.startsWith("- [ ]"));
-	assert.equal(checkboxLines.length, 5);
+	assert.ok(!actionBlock.includes("- [ ]"), "action list must not use checkbox markdown");
+	const numberedLines = actionBlock.split("\n").filter((l) => /^\d+\. /.test(l));
+	assert.equal(numberedLines.length, 5);
+	assert.ok(numberedLines[0]!.startsWith("1. "));
 });
 
 test("an empty suggestions section renders no Top Actions heading", async () => {

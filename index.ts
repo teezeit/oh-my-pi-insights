@@ -32,6 +32,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { platform } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { createClaudeSessionSource } from "./src/sources/claude.ts";
@@ -57,6 +58,7 @@ import {
 } from "./src/cache.ts";
 import { computeTemporalData } from "./src/temporal.ts";
 import { aggregateData, detectConcurrentSessions, excludeToolingSessions } from "./src/aggregate.ts";
+import { readProviderAuth } from "./src/auth.ts";
 import {
 	detectHarnessChanges,
 	gatherHarnessSnapshot,
@@ -557,7 +559,13 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	// needs the pre-filtered list, since nothing there feeds a total.
 	const analysisMetas = excludeToolingSessions(kept, excludeProjects);
 	scan.excluded_tooling = kept.length - analysisMetas.length;
-	const agg = aggregateData(kept, facetsMap, excludeProjects);
+	// Why read here, not in aggregate.ts: the credential store is I/O
+	// (sqlite), so it is read once per run and the result injected into the
+	// otherwise-pure aggregateData fold. Any read failure (missing/locked
+	// db, no sqlite driver) yields {}, which reads downstream as "unknown"
+	// auth for every provider, never a false subscription/billed split.
+	const providerAuth = await readProviderAuth(join(AGENT_DIR, "agent.db"));
+	const agg = aggregateData(kept, facetsMap, excludeProjects, providerAuth);
 	scan.included = kept.length;
 	scan.facets_analyzed = agg.sessions_with_facets;
 	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
@@ -856,6 +864,7 @@ export {
 	loadHarnessSnapshot,
 	parseSimpleYaml,
 	readUsage,
+	readProviderAuth,
 	resolveAgentDir,
 	resolveLimit,
 	resolveProjectList,

@@ -216,6 +216,30 @@ upstream verbatim; every entry below is a diff against it.
   generic model names instead of a real run's costs, dates and model ids.
 - Personal project names and anecdotes scrubbed from `src/prompts.ts`
   comments and test fixtures, replaced with neutral examples.
+- **Cost is now split by how it is actually paid for.** `AggregatedData`
+  gained `cost_by_provider` (per-provider cost, sorted desc, tagged with
+  `auth: "subscription" | "api_key" | "unknown"`), plus `billed_cost` (sum
+  where `auth === "api_key"`: real spend) and `subscription_cost` (sum
+  where `auth === "subscription"`: the API list-price equivalent of calls
+  covered by a plan, never actually billed per call). Auth is read
+  read-only from omp's own `agent.db` (`auth_credentials.provider` /
+  `.credential_type`, via `src/auth.ts#readProviderAuth`); a provider with
+  no credential entry (or an unreadable `agent.db`) reads as `"unknown"`,
+  never a false split. New facts: `billed_cost`, `subscription_cost`,
+  `cost_by_provider.<provider>`.
+- The cost stat card reads "API-equivalent Cost" when any subscription
+  provider is present, with billed and unknown-basis amounts underneath, and
+  a "Cost by Provider" table (HTML and Markdown). Prompts never quote dollar
+  savings for subscription providers; they frame those as quota and speed.
+- Report theme is light (off-white background). Sections toggle with a CSS
+  chevron instead of the native marker.
+- "What Changed" is a non-collapsible "Since Last Report" block inside the
+  Summary card instead of a standalone section at the top.
+- The top action list is numbered with a copy button per item, not
+  checkboxes; the Markdown export uses `1.` items.
+- Evidence links also show `omp -r <session-id>` with a copy button.
+- "How You Work" renders 3-4 short titled blocks (body <= 60 words) plus the
+  key pattern; cached sections with the old single narrative still render.
 
 ### Removed
 

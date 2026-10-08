@@ -94,6 +94,12 @@ export function buildFacts(agg: AggregatedData, temporal: TemporalData): Fact[] 
 	add("cost_share.primary", share(agg.total_cost_primary, agg.total_cost), "pct", "primary cost / total cost", sessions, "sessions");
 	add("cost_share.advisor", share(agg.total_cost_advisor, agg.total_cost), "pct", "advisor cost / total cost", sessions, "sessions");
 	add("cost_share.subagent", share(agg.total_cost_subagent, agg.total_cost), "pct", "subagent cost / total cost", sessions, "sessions");
+	add("billed_cost", agg.billed_cost, "usd", "sum of cost_by_provider where auth is api_key: actually charged, not covered by a plan", sessions, "sessions");
+	add("subscription_cost", agg.subscription_cost, "usd", "sum of cost_by_provider where auth is subscription: API list-price equivalent covered by a plan, not actually billed", sessions, "sessions");
+	for (const p of agg.cost_by_provider) {
+		const basis = p.auth === "subscription" ? "API list-price equivalent, not billed" : p.auth === "api_key" ? "actually billed" : "auth unknown";
+		add(`cost_by_provider.${p.provider}`, p.cost, "usd", `cost attributed to ${p.provider} (${basis})`, sessions, "sessions");
+	}
 	for (const [model, u] of Object.entries(agg.model_usage)) {
 		add(`model_cost.${model}`, u.cost, "usd", `recorded cost on ${model}`, u.sessions, "sessions using the model");
 		add(`model_cost_share.${model}`, share(u.cost, agg.total_cost), "pct", `${model} cost / total cost`, u.sessions, "sessions using the model");

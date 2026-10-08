@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildFeaturesReference, filterSuggestions, type UserContext } from "../index.ts";
+import { aggregateData, buildFacts, buildSectionPrompts, buildSharedDataBlock, computeTemporalData, type AggregatedData } from "../index.ts";
 
 function ctx(overrides: Partial<UserContext> = {}): UserContext {
 	return {
@@ -166,4 +167,66 @@ test("filterSuggestions keeps unrelated skill suggestions", () => {
 	};
 	const filtered = filterSuggestions(suggestions, userCtx);
 	assert.equal(filtered.stop_doing!.length, 1);
+});
+
+// C2: interaction_style's prompt must spell out the blocks contract (3-4
+// blocks of {title, body <= 60 words, evidence_sessions?} plus a one-sentence
+// key_pattern), not the old single narrative field.
+
+test("buildSectionPrompts: interaction_style prompt specifies the C2 blocks contract", () => {
+	const agg = aggregateData([], new Map());
+	const temporal = computeTemporalData([], new Map());
+	const prompts = buildSectionPrompts("DATA", temporal, ctx(), agg);
+
+	assert.match(prompts.interaction_style, /"blocks"/);
+	assert.match(prompts.interaction_style, /"title"/);
+	assert.match(prompts.interaction_style, /"body"/);
+	assert.match(prompts.interaction_style, /evidence_sessions/);
+	assert.match(prompts.interaction_style, /"key_pattern"/);
+	assert.match(prompts.interaction_style, /3-4/);
+	assert.match(prompts.interaction_style, /60 words/);
+	assert.doesNotMatch(prompts.interaction_style, /"narrative"/);
+	assert.doesNotMatch(prompts.interaction_style, /\*\*bold\*\*/);
+});
+
+// model_efficiency: C1 (cost_by_provider/billed_cost/subscription_cost).
+// Subscription-auth providers must never see a dollar-savings allowance;
+// api_key-auth providers must.
+
+function aggWithProviders(
+	providers: Array<{ provider: string; cost: number; auth: "subscription" | "api_key" | "unknown" }>,
+	billed_cost: number,
+	subscription_cost: number,
+): AggregatedData {
+	const base = aggregateData([], new Map());
+	return { ...base, cost_by_provider: providers, billed_cost, subscription_cost };
+}
+
+test("model_efficiency prompt forbids dollar savings for an all-subscription agg", () => {
+	const agg = aggWithProviders([{ provider: "anthropic", cost: 12.5, auth: "subscription" }], 0, 12.5);
+	const temporal = computeTemporalData([], new Map());
+	const prompts = buildSectionPrompts("DATA", temporal, ctx(), agg);
+
+	assert.match(prompts.model_efficiency, /NEVER quote a dollar savings figure/);
+	assert.doesNotMatch(prompts.model_efficiency, /dollar savings claims are allowed/);
+});
+
+test("model_efficiency prompt allows dollar savings for an api_key agg", () => {
+	const agg = aggWithProviders([{ provider: "openai", cost: 8.25, auth: "api_key" }], 8.25, 0);
+	const temporal = computeTemporalData([], new Map());
+	const prompts = buildSectionPrompts("DATA", temporal, ctx(), agg);
+
+	assert.match(prompts.model_efficiency, /dollar savings claims are allowed/);
+	assert.doesNotMatch(prompts.model_efficiency, /NEVER quote a dollar savings figure/);
+});
+
+test("shared data block says API-equivalent cost, not spend, when subscription_cost > 0", () => {
+	const agg = aggWithProviders([{ provider: "anthropic", cost: 5, auth: "subscription" }], 0, 5);
+	const temporal = computeTemporalData([], new Map());
+	const facts = buildFacts(agg, temporal);
+	const data = buildSharedDataBlock(agg, temporal, ctx(), facts);
+
+	assert.match(data, /API-equivalent cost/);
+	assert.match(data, /"billed_cost_usd": "0\.00"/);
+	assert.match(data, /"subscription_cost_usd": "5\.00"/);
 });

@@ -193,6 +193,11 @@ export function aggregateData(
 	metas: SessionMeta[],
 	facetsMap: Map<string, SessionFacets>,
 	excludeProjects: string[] = [],
+	// Why a parameter, not an import: the credential read is I/O (sqlite),
+	// so index.ts does it once per run and injects the result here, keeping
+	// this function a pure fold over its inputs (matches the DI pattern
+	// AGENTS.md calls out for resolveAgentDir/createOmpSessionSource).
+	providerAuth: Record<string, "subscription" | "api_key"> = {},
 ): AggregatedData {
 	const agg: AggregatedData = {
 		total_sessions: metas.length,
@@ -244,6 +249,9 @@ export function aggregateData(
 		total_cost_primary: 0,
 		total_cost_advisor: 0,
 		total_cost_subagent: 0,
+		cost_by_provider: [],
+		billed_cost: 0,
+		subscription_cost: 0,
 		total_utility_cost: 0,
 		total_cache_read_tokens: 0,
 		total_cache_write_tokens: 0,
@@ -304,6 +312,7 @@ export function aggregateData(
 		{ calls: number; total_sec: number; p50Pairs: Array<{ value: number; weight: number }>; p90Pairs: Array<{ value: number; weight: number }> }
 	>();
 	const churnAcc = new Map<string, { edits: number; sessions: Set<string> }>();
+	const costByProviderRaw: Record<string, number> = {};
 	// Tooling sessions stay in every total (cost, tokens, sessions, active
 	// time, tool rates, the manifest) but must not pollute the signals that
 	// feed the model's narrative: worst turns, friction, facets merged into
@@ -351,6 +360,7 @@ export function aggregateData(
 		agg.total_cost_primary += meta.cost_primary;
 		agg.total_cost_advisor += meta.cost_advisor;
 		agg.total_cost_subagent += meta.cost_subagent;
+		mergeRecord(costByProviderRaw, meta.cost_by_provider);
 		agg.total_utility_cost += meta.utility_cost;
 		agg.total_cache_read_tokens += meta.cache_read_tokens;
 		agg.total_cache_write_tokens += meta.cache_write_tokens;
@@ -494,6 +504,16 @@ export function aggregateData(
 				agg.user_instructions.push(...facets.user_instructions_to_assistant);
 			}
 		}
+	}
+
+	// Why computed after the fold, not per-meta: auth is a run-wide fact
+	// (the credential a provider is configured with), not a per-session one.
+	agg.cost_by_provider = Object.entries(costByProviderRaw)
+		.map(([provider, cost]) => ({ provider, cost, auth: providerAuth[provider] ?? "unknown" }) as const)
+		.sort((a, b) => b.cost - a.cost);
+	for (const entry of agg.cost_by_provider) {
+		if (entry.auth === "api_key") agg.billed_cost += entry.cost;
+		else if (entry.auth === "subscription") agg.subscription_cost += entry.cost;
 	}
 
 	// Pooled approximation (see the AggregatedData comment): the weighted

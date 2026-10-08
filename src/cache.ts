@@ -51,7 +51,7 @@ export async function ensureDirs(): Promise<void> {
 // because the cache hit and the backfill made the miss invisible. A schema
 // version is the correct fix; bump it whenever SessionMeta gains a field
 // that must not read as a false zero.
-export const META_SCHEMA_VERSION = 5;
+export const META_SCHEMA_VERSION = 6;
 
 export async function loadCachedMeta(
 	sourceName: string,

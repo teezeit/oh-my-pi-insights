@@ -76,8 +76,19 @@ path and fails with `Cannot find module`.
 ## What omp gives it that Pi did not
 
 - **Cost is recorded, not estimated.** Assistant messages carry
-  `message.usage.cost.total` and out-of-band calls are `model_usage` records.
-  Upstream's price table and token-derived cost are gone.
+  `message.usage.cost.total` and out-of-band calls are `model_usage`
+  records. Upstream's price table and token-derived cost are gone. This is
+  omp's own list price per call, applied regardless of how the call is
+  actually paid for, so the report also splits it by payment basis:
+  `cost_by_provider` (sorted desc, one entry per provider) tags each
+  provider's auth as `subscription` (OAuth; the figure is the API
+  list-price equivalent of what the plan covered, not an amount actually
+  billed), `api_key` (pay-as-you-go; `billed_cost` sums these: this is the
+  real spend), or `unknown` (no credential entry for that provider, or
+  omp's credential store could not be read). Auth is read read-only from
+  omp's own `agent.db` (`auth_credentials` table; never the credential
+  data itself) via `src/auth.ts#readProviderAuth`, which never throws: any
+  failure reads every provider as `unknown` rather than guessing.
 - **Tool failures are a boolean.** `toolResult.isError` replaces upstream's
   regex bucketing over tool output; the category comes from the tool name.
 - **Nested logs are real sessions.** `__advisor.jsonl` and per-subagent logs

@@ -348,6 +348,7 @@ export function computeAbortHeuristicLabel(
 export function extractSidecarUsage(entries: AnyEntry[]): SidecarUsage {
 	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costInput: 0, costOutput: 0 };
 	const modelUsage: ModelUsageMap = {};
+	const costByProvider: Record<string, number> = {};
 	let utilityCost = 0;
 	let toolCalls = 0;
 	let toolErrors = 0;
@@ -357,7 +358,9 @@ export function extractSidecarUsage(entries: AnyEntry[]): SidecarUsage {
 			const usage = readUsage(entry.usage);
 			addUsage(totals, usage);
 			utilityCost += usage.cost;
+			const muProvider = typeof entry.provider === "string" ? entry.provider : "unknown";
 			accumulateModel(modelUsage, typeof entry.model === "string" ? entry.model : "unknown", usage);
+			costByProvider[muProvider] = (costByProvider[muProvider] ?? 0) + usage.cost;
 			continue;
 		}
 		if (entry.type !== "message") continue;
@@ -367,7 +370,9 @@ export function extractSidecarUsage(entries: AnyEntry[]): SidecarUsage {
 		if (msg.role === "assistant") {
 			const usage = readUsage(msg.usage);
 			addUsage(totals, usage);
+			const asstProvider = typeof msg.provider === "string" ? msg.provider : "unknown";
 			accumulateModel(modelUsage, typeof msg.model === "string" ? msg.model : "unknown", usage);
+			costByProvider[asstProvider] = (costByProvider[asstProvider] ?? 0) + usage.cost;
 			if (Array.isArray(msg.content)) {
 				for (const block of msg.content as ContentBlock[]) {
 					if (block.type === "toolCall") toolCalls++;
@@ -378,7 +383,14 @@ export function extractSidecarUsage(entries: AnyEntry[]): SidecarUsage {
 		}
 	}
 
-	return { totals, utility_cost: utilityCost, model_usage: modelUsage, tool_calls: toolCalls, tool_errors: toolErrors };
+	return {
+		totals,
+		utility_cost: utilityCost,
+		model_usage: modelUsage,
+		cost_by_provider: costByProvider,
+		tool_calls: toolCalls,
+		tool_errors: toolErrors,
+	};
 }
 
 export function extractSessionStats(entries: AnyEntry[]) {
@@ -393,6 +405,11 @@ export function extractSessionStats(entries: AnyEntry[]) {
 	const responseDurations: number[] = [];
 	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costInput: 0, costOutput: 0 };
 	const modelUsage: ModelUsageMap = {};
+	// Why: per-provider split for the cost report (subscription vs billed),
+	// keyed by the raw provider string the record carried; "unknown" when
+	// absent. Auth (oauth/api-key) is resolved later, in aggregate.ts, from
+	// omp's credential store, not here.
+	const costByProvider: Record<string, number> = {};
 	const toolCallsByTool: Record<string, number> = {};
 	const toolErrorsByTool: Record<string, number> = {};
 	const toolNotFoundByTool: Record<string, number> = {};
@@ -542,7 +559,9 @@ export function extractSessionStats(entries: AnyEntry[]) {
 			const usage = readUsage(entry.usage);
 			addUsage(totals, usage);
 			utilityCost += usage.cost;
+			const muProvider = typeof entry.provider === "string" ? entry.provider : "unknown";
 			accumulateModel(modelUsage, typeof entry.model === "string" ? entry.model : "unknown", usage);
+			costByProvider[muProvider] = (costByProvider[muProvider] ?? 0) + usage.cost;
 			continue;
 		}
 		if (entry.type !== "message") continue;
@@ -599,7 +618,9 @@ export function extractSessionStats(entries: AnyEntry[]) {
 
 			const usage = readUsage(msg.usage);
 			addUsage(totals, usage);
+			const asstProvider = typeof msg.provider === "string" ? msg.provider : "unknown";
 			accumulateModel(modelUsage, typeof msg.model === "string" ? msg.model : "unknown", usage);
+			costByProvider[asstProvider] = (costByProvider[asstProvider] ?? 0) + usage.cost;
 			if (turnStartTs !== null) {
 				turnRoundTrips++;
 				turnCost += usage.cost;
@@ -853,6 +874,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 		compactions,
 		firstPrompt,
 		modelUsage,
+		cost_by_provider: costByProvider,
 		tool_calls_by_tool: toolCallsByTool,
 		tool_errors_by_tool: toolErrorsByTool,
 		tool_not_found: toolNotFoundByTool,
@@ -894,6 +916,7 @@ export function buildSessionMeta(
 	let sidecarToolCalls = 0;
 	let sidecarToolErrors = 0;
 	const sidecarCounts = { advisor: 0, subagent: 0 };
+	const costByProvider: Record<string, number> = { ...stats.cost_by_provider };
 
 	for (const sidecar of sidecars) {
 		sidecarCounts[sidecar.kind]++;
@@ -903,6 +926,9 @@ export function buildSessionMeta(
 		sidecarToolErrors += sidecar.usage.tool_errors;
 		if (sidecar.kind === "advisor") costAdvisor += sidecar.usage.totals.cost;
 		else costSubagent += sidecar.usage.totals.cost;
+		for (const [provider, cost] of Object.entries(sidecar.usage.cost_by_provider)) {
+			costByProvider[provider] = (costByProvider[provider] ?? 0) + cost;
+		}
 		for (const [model, usage] of Object.entries(sidecar.usage.model_usage)) {
 			accumulateModel(modelUsage, model, {
 				input: usage.input_tokens,
@@ -1002,6 +1028,7 @@ export function buildSessionMeta(
 		cost_primary: stats.totals.cost,
 		cost_advisor: costAdvisor,
 		cost_subagent: costSubagent,
+		cost_by_provider: costByProvider,
 		cache_read_tokens: totals.cacheRead,
 		cache_write_tokens: totals.cacheWrite,
 		utility_cost: utilityCost,

@@ -138,3 +138,26 @@ test("enforceBudget leaves fields already within budget untouched and never call
 	);
 	assert.equal(retryCalls, 0);
 });
+
+// C2: interaction_style's blocks each get a 60-word body budget, truncating
+// an over-long block to the longest whole-sentence prefix that fits.
+
+test("enforceBudget truncates an over-budget interaction_style block body", async () => {
+	const word = (n: number) => Array.from({ length: n }, (_, i) => `w${i}`).join(" ");
+	const longSentence = `${word(30)}.`;
+	const overBudget = `${longSentence} ${word(30)}.`; // 60 words total, two sentences
+
+	const sections = {
+		interaction_style: {
+			blocks: [{ title: "Delegation", body: overBudget, evidence_sessions: [] }],
+			key_pattern: "fine",
+		},
+	};
+
+	const result = (await enforceBudget(
+		sections,
+		[{ section: "interaction_style", arrayField: "blocks", field: "body", maxWords: 30 }],
+	)) as typeof sections;
+
+	assert.equal(result.interaction_style.blocks[0]!.body, longSentence);
+});
