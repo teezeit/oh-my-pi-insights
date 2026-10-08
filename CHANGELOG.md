@@ -59,6 +59,17 @@ upstream verbatim; every entry below is a diff against it.
   reuse; `--max-sessions` / `--max-facets` / `--model-concurrency` flags and
   `OMP_INSIGHTS_*` environment overrides.
 - Test suite (33 tests, `node --test`, no dependencies) and CI.
+- **Facts object and facts checker** (`src/facts.ts`). Every percentage and
+  dollar amount the report may quote is computed in TS with its definition,
+  `n`, population and window, handed to the section prompts read-only, and
+  the generated prose is checked against it afterwards (+-1 point for
+  percentages, +-1% for dollars). Unbacked numbers are reported as a warning
+  and written to `fact_check` in `session-set.json`. Scope is percentages and
+  dollar amounts only; bare integers are not checked.
+- `n=` sample size on every stat card and chart in the HTML report;
+  facet charts are labelled decay-weighted.
+- Tool errors carry a cause (`relay`, `syntax`, `timeout`, `runtime`,
+  `other`) per tool, shown in the per-tool error table.
 
 ### Changed
 
@@ -79,6 +90,13 @@ upstream verbatim; every entry below is a diff against it.
   primary log and every sidecar; caches namespaced per source.
 - `multi_clauding` renamed to `concurrent_sessions` (harness-neutral).
 - Session load cap raised from 200 to 2000; the corpus already exceeded it.
+- **Model price comparison uses implied list price** (`usage.cost.input /
+  input`, `usage.cost.output / output`, $ per Mtok) instead of blended
+  cost per token. Blended rates fold cache reads in, so identically priced
+  models with different cache mixes read 2-5x apart and drove savings claims.
+  Model tiers derive from it; the Markdown model table shows it.
+- Session meta cache schema bumped to 3 (new per-model cost components and
+  per-tool error causes).
 
 ### Removed
 
@@ -101,6 +119,19 @@ upstream verbatim; every entry below is a diff against it.
   shared limiter now caps live model subprocesses across all phases;
   `--facet-concurrency` is replaced by `--model-concurrency` (default 4, env
   `OMP_INSIGHTS_MODEL_CONCURRENCY`).
+- **Impossible active time.** Active hours summed every session's duration,
+  so parallel sessions counted once each (198h/day). Now the union of session
+  intervals per local calendar day; no day can exceed 24h.
+- **Interruption card vs rate.** The card counted steering only while the
+  rate also counted mid-session aborts. Both now use one numerator, with an
+  aborted / steered breakdown on the card.
+- **Conflicting before/after deltas.** The banner, the major-transition note
+  and the trajectory line each computed their own delta over unstated
+  windows. There is now one `TemporalData.delta` (around the model switch,
+  else week over week) with explicit windows, and every printed delta quotes it.
+- **Browser errors blamed on eval.** Browser automation runs through `eval`,
+  so relay failures counted as eval errors. Eval calls whose code uses the
+  `browser` global, or that fail with a relay error, now count as `browser`.
 - A session present twice on disk under two slugified-cwd directories was
   counted twice, double-counting its spend and making session counts
   non-deterministic between runs. Deduplicated by session id.

@@ -102,7 +102,7 @@ Session set and per-session cost: `<data-dir>/session-set.json`
 - Global instruction rules read: 1
 
 ## 💸 Model Spend
-| Model | Cost | Messages |
-|-------|------|----------|
-| claude-opus-5 | $9.50 | 60 |
-| gpt-5.5 | $0.50 | 6 |
+| Model | Cost | Messages | List $/Mtok in / out |
+|-------|------|----------|----------------------|
+| claude-opus-5 | $9.50 | 60 | unknown |
+| gpt-5.5 | $0.50 | 6 | unknown |
