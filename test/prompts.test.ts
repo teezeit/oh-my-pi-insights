@@ -50,12 +50,14 @@ test("filterSuggestions drops a learn-tool suggestion when the backend is mnemop
 				one_liner: "record durable facts",
 				why_for_you: "you repeat yourself across sessions",
 				example: "learn that the deploy key lives in 1Password",
+				evidence_sessions: ["s1", "s2"],
 			},
 			{
 				feature: "Subagents (task tool)",
 				one_liner: "parallel research",
 				why_for_you: "you map unfamiliar code a lot",
 				example: "task(...)",
+				evidence_sessions: ["s1", "s2"],
 			},
 		],
 	};
@@ -77,12 +79,14 @@ test("filterSuggestions drops a suggestion naming an already-installed skill (cl
 				suggestion: "Create a ticket-kickoff skill",
 				detail: "A skill that starts a ticket wave",
 				copyable_prompt: "make a ticket-kickoff skill",
+				evidence_sessions: ["s1", "s2"],
 			},
 			{
 				title: "Batch your reviews",
 				suggestion: "Review PRs in one sitting",
 				detail: "Switching contexts per PR costs you ramp-up time",
 				copyable_prompt: "review all open PRs now",
+				evidence_sessions: ["s1", "s2"],
 			},
 		],
 	};
@@ -97,7 +101,12 @@ test("filterSuggestions keeps unrelated skill suggestions", () => {
 	const userCtx = ctx({ installed_managed_skills: ["landing-peach-backend-change"] });
 	const suggestions = {
 		stop_doing: [
-			{ what: "Manually diffing PR comments", why: "slow", alternative: "use the reviewer skill" },
+			{
+				what: "Manually diffing PR comments",
+				why: "slow",
+				alternative: "use the reviewer skill",
+				evidence_sessions: ["s1", "s2"],
+			},
 		],
 	};
 	const filtered = filterSuggestions(suggestions, userCtx);

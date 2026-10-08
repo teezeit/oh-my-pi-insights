@@ -88,6 +88,14 @@ upstream verbatim; every entry below is a diff against it.
   (comma-separated, substring-matched; `none` opts out), default excludes
   `oh-my-pi-insights`. The excluded count is reported in the corpus audit
   table and the session-set.json manifest.
+- **Evidence-backed suggestions** (`filterByEvidence`): every
+  `config_additions`, `features_to_try`, `usage_patterns` and `stop_doing`
+  item, plus `friction_analysis`'s `ongoing` items, now carries
+  `evidence_sessions` (session ids from the data block); the suggestion
+  section's four item arrays are filtered to drop anything citing fewer
+  than 2 distinct ids before render — "stop using the browser tool" from a
+  single remark despite deliberate relay setup work is exactly the class of
+  advice this was built to catch.
 
 ### Changed
 

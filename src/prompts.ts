@@ -129,8 +129,8 @@ ${formatFactsForPrompt(facts)}
 		) +
 		`
 
-SESSION SUMMARIES:
-${agg.session_summaries.map((s) => `- ${s.summary} (${s.outcome}, ${s.helpfulness})`).join("\n")}
+SESSION SUMMARIES (the leading [id] is the session id to cite in evidence_sessions):
+${agg.session_summaries.map((s) => `- [${s.id}] ${s.summary} (${s.outcome}, ${s.helpfulness})`).join("\n")}
 
 FRICTION DETAILS:
 ${agg.friction_details.map((d) => `- ${d}`).join("\n")}
@@ -208,11 +208,18 @@ ${memoryFeatureBlock(ctx)}
    - Good for: team conventions and per-path rules the agent always follows`;
 }
 
+export type ConfigAddition = { addition: string; why: string; where: string; evidence_sessions: string[] };
+export type FeatureToTry = { feature: string; one_liner: string; why_for_you: string; example: string; evidence_sessions: string[] };
+export type UsagePattern = { title: string; suggestion: string; detail: string; copyable_prompt: string; evidence_sessions: string[] };
+export type StopDoingItem = { what: string; why: string; alternative: string; evidence_sessions: string[] };
+/** friction_analysis's "ongoing" items; carries evidence_sessions like the suggestion item types (B10), but is not run through filterByEvidence — the fix design filters stop_doing/suggestions only. */
+export type OngoingFrictionItem = { category: string; description: string; examples: string[]; severity: string; evidence_sessions: string[] };
+
 export type SuggestionSections = {
-	config_additions?: Array<{ addition: string; why: string; where: string }>;
-	features_to_try?: Array<{ feature: string; one_liner: string; why_for_you: string; example: string }>;
-	usage_patterns?: Array<{ title: string; suggestion: string; detail: string; copyable_prompt: string }>;
-	stop_doing?: Array<{ what: string; why: string; alternative: string }>;
+	config_additions?: ConfigAddition[];
+	features_to_try?: FeatureToTry[];
+	usage_patterns?: UsagePattern[];
+	stop_doing?: StopDoingItem[];
 };
 
 // Filler words that show up in both naming phrases and skill slugs without
@@ -291,6 +298,27 @@ export function filterSuggestions(
 	};
 }
 
+const MIN_EVIDENCE_SESSIONS = 2;
+
+/**
+ * B10: an item is only as credible as the sessions behind it. "Stop using
+ * the browser tool" from one remark despite deliberate relay setup work was
+ * the finding this exists to catch. Prompts ask every config_additions,
+ * features_to_try, usage_patterns and stop_doing item for evidence_sessions
+ * (ids from the data block); anything citing fewer than 2 distinct ids is
+ * dropped here rather than trusted on the model's say-so.
+ */
+export function filterByEvidence(suggestions: SuggestionSections): SuggestionSections {
+	const hasEvidence = (item: { evidence_sessions: string[] }) =>
+		new Set(item.evidence_sessions).size >= MIN_EVIDENCE_SESSIONS;
+	return {
+		config_additions: suggestions.config_additions?.filter(hasEvidence),
+		features_to_try: suggestions.features_to_try?.filter(hasEvidence),
+		usage_patterns: suggestions.usage_patterns?.filter(hasEvidence),
+		stop_doing: suggestions.stop_doing?.filter(hasEvidence),
+	};
+}
+
 export function buildSectionPrompts(data: string, temporal: TemporalData, userCtx: UserContext, agg: AggregatedData) {
 	return {
 		project_areas: `Analyze this usage data and identify project areas.
@@ -359,6 +387,10 @@ FRICTION SIGNALS (from toolResult.isError and stopReason, not text heuristics):
 - Edit churn: files edited repeatedly across the corpus are a model that did not understand them the first time: ${agg.most_churned_files.slice(0, 5).map(f => `${f.path} (${f.edits}x across ${f.sessions} session(s))`).join(", ") || "none"}.
 
 Focus on ONGOING friction. Mention resolved items briefly as wins.
+EVIDENCE: every "ongoing" item must include evidence_sessions, an array of
+the session ids (the "[id]" from SESSION SUMMARIES, or session_id from
+worst_turns_corpus/worst_cache_sessions in the data below) that actually show
+this pattern. Cite real ids only; never invent one.
 
 RESPOND WITH ONLY A VALID JSON OBJECT:
 {
@@ -374,7 +406,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
       "category": "concrete category name",
       "description": "1-2 sentences. Use 'you' not 'the user'.",
       "examples": ["specific example with consequence", "another example"],
-      "severity": "high|medium|low"
+      "severity": "high|medium|low",
+      "evidence_sessions": ["session id", "another session id"]
     }
   ]
 }
@@ -396,6 +429,11 @@ FOCUS on ongoing friction. Include at least one NEGATIVE suggestion (something t
 - A tool that fails near 100% of the time, or an invented tool name the model keeps calling, is exactly the class of finding this section exists to surface: check the per-tool error rate table and invented-tool-name list in the data below before writing stop_doing.
 - A turn costing many round trips and tool calls to change little (see worst_turns_corpus in the data) is the other class of finding this section exists to surface: over-exploration before an edit, repeated failed attempts, or a model that should have asked instead of guessing.
 Tailor copyable prompts to their actual model (${userCtx.default_model || "unknown"}) and projects.
+EVIDENCE: every item below must include evidence_sessions, an array of >= 2
+DISTINCT session ids (the "[id]" from SESSION SUMMARIES, or session_id from
+worst_turns_corpus/worst_cache_sessions in the data below) that actually
+support it. Cite real ids only, never invent one. If you cannot name two
+different sessions backing an item, drop the item instead of writing it.
 
 RESPOND WITH ONLY A VALID JSON OBJECT:
 {
@@ -403,7 +441,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
     {
       "addition": "a specific rule NOT already in their AGENTS.md",
       "why": "1 sentence referencing actual ongoing friction",
-      "where": "AGENTS.md | ~/.omp/agent/config.yml | ~/.omp/agent/extensions/ | ~/.omp/agent/managed-skills/ | ~/.omp/agent/hooks/"
+      "where": "AGENTS.md | ~/.omp/agent/config.yml | ~/.omp/agent/extensions/ | ~/.omp/agent/managed-skills/ | ~/.omp/agent/hooks/",
+      "evidence_sessions": ["session id", "another session id"]
     }
   ],
   "features_to_try": [
@@ -411,7 +450,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
       "feature": "feature name from OMP FEATURES REFERENCE",
       "one_liner": "what it does",
       "why_for_you": "why this helps YOUR ongoing friction patterns",
-      "example": "actual command or config referencing their real projects"
+      "example": "actual command or config referencing their real projects",
+      "evidence_sessions": ["session id", "another session id"]
     }
   ],
   "usage_patterns": [
@@ -419,14 +459,16 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
       "title": "short title",
       "suggestion": "1-2 sentence summary",
       "detail": "3-4 sentences referencing actual projects and patterns",
-      "copyable_prompt": "specific prompt using their model, projects, tools"
+      "copyable_prompt": "specific prompt using their model, projects, tools",
+      "evidence_sessions": ["session id", "another session id"]
     }
   ],
   "stop_doing": [
     {
       "what": "something to stop or remove",
       "why": "evidence from sessions",
-      "alternative": "what to do instead"
+      "alternative": "what to do instead",
+      "evidence_sessions": ["session id", "another session id"]
     }
   ]
 }

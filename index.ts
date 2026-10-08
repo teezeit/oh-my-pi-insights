@@ -62,8 +62,14 @@ import {
 	buildSynthesisPrompt,
 	CHUNK_SUMMARIZE_PROMPT,
 	FACET_EXTRACT_PROMPT,
+	filterByEvidence,
 	filterSuggestions,
+	type ConfigAddition,
+	type FeatureToTry,
+	type OngoingFrictionItem,
+	type StopDoingItem,
 	type SuggestionSections,
+	type UsagePattern,
 } from "./src/prompts.ts";
 import { callModel, createLimiter, parseJsonFromResponse } from "./src/model.ts";
 import { generateMarkdown } from "./src/render/md.ts";
@@ -588,9 +594,11 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	// B8: drop suggestions naming an unavailable feature or an installed skill,
 	// whether the section came fresh or from cache — the live harness state can
 	// change (e.g. memory.backend) after a cached run was generated.
+	// B10: drop stop_doing/suggestion items citing fewer than 2 distinct
+	// evidence sessions — same reasoning, applied regardless of cache freshness.
 	if (sectionResults.suggestions) {
 		sectionResults.suggestions = filterSuggestions(
-			sectionResults.suggestions as SuggestionSections,
+			filterByEvidence(sectionResults.suggestions as SuggestionSections),
 			userCtx,
 		);
 	}
@@ -747,6 +755,7 @@ export {
 	excludeToolingSessions,
 	extractSessionStats,
 	extractSidecarUsage,
+	filterByEvidence,
 	filterSuggestions,
 	gatherHarnessState,
 	gatherUserContext,
@@ -762,16 +771,21 @@ export {
 };
 export type {
 	AggregatedData,
+	ConfigAddition,
 	ExtensionAPI,
 	ExtensionCommandContext,
+	Fact,
+	FeatureToTry,
 	HarnessState,
+	OngoingFrictionItem,
 	ScanSummary,
 	SessionFacets,
 	SessionMeta,
 	SessionRef,
 	SessionSource,
+	StopDoingItem,
 	SuggestionSections,
 	TemporalData,
-	Fact,
+	UsagePattern,
 	UserContext,
 };

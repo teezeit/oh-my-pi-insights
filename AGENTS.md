@@ -23,7 +23,7 @@ Port of Observal/pi-insights (Pi harness) to omp. AGPL-3.0-only; keep SPDX heade
 | `src/cache.ts` | session-meta / facets / sections caches | `loadCachedMeta`, `saveMeta`, `loadCachedSections`, `pruneSections` |
 | `src/context.ts` | User context from `~/.omp/agent` (config.yml incl. memory backend, skills, managed-skills, extensions) | `gatherUserContext`, `parseSimpleYaml` |
 | `src/model.ts` | Shells out to `omp -p` | `callModel`, `parseJsonFromResponse` |
-| `src/prompts.ts` | Facet/section/synthesis prompts | `FACET_EXTRACT_PROMPT`, `buildFeaturesReference`, `filterSuggestions`, `buildSectionPrompts` |
+| `src/prompts.ts` | Facet/section/synthesis prompts | `FACET_EXTRACT_PROMPT`, `buildFeaturesReference`, `filterSuggestions`, `filterByEvidence`, `buildSectionPrompts` |
 | `src/render/html.ts`, `src/render/md.ts` | Report output | `generateHTML`, `generateMarkdown` |
 
 Pipeline in `runInsights`:
