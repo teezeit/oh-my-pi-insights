@@ -122,8 +122,6 @@ export type SessionMeta = {
 	// ── friction-signal additions (interruptions, errors, tool-not-found) ──
 	tool_calls_by_tool: Record<string, number>;
 	tool_errors_by_tool: Record<string, number>;
-	/** Error cause per rate key: relay | syntax | timeout | runtime | other. */
-	tool_error_classes_by_tool: Record<string, Record<string, number>>;
 	tool_not_found: Record<string, number>;
 	error_classes: Record<string, number>;
 	error_generations: number;
@@ -272,7 +270,6 @@ export type AggregatedData = {
 	// ── friction-signal additions (interruptions, errors, tool-not-found) ──
 	tool_calls_by_tool: Record<string, number>;
 	tool_errors_by_tool: Record<string, number>;
-	tool_error_classes_by_tool: Record<string, Record<string, number>>;
 	tool_not_found: Record<string, number>;
 	error_classes: Record<string, number>;
 	error_generations: number;
@@ -282,7 +279,7 @@ export type AggregatedData = {
 	ttsr_rules: Record<string, number>;
 	reset_boundaries: number;
 	interruption_rate: number;
-	tool_error_rate_table: Array<{ tool: string; calls: number; errors: number; rate: number; classes: Record<string, number> }>;
+	tool_error_rate_table: Array<{ tool: string; calls: number; errors: number; rate: number }>;
 	abort_labels: Record<string, number>;
 	// ── per-turn aggregation (Gap 3) ──
 	// Pooled approximation: only per-session percentiles are persisted, not

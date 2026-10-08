@@ -274,20 +274,10 @@ export function classifyErrorMessage(text: string): string {
 }
 
 // Why: browser automation mostly runs through `eval` (the `browser` global),
-// so counting errors by tool name blamed the browser relay's failures on eval
-// and produced "stop scripting in eval" advice. The error itself is still
-// decided by `isError`; these patterns only name its cause.
+// so counting errors by tool name blamed the browser's failures on eval and
+// produced "stop scripting in eval" advice. Attribution is by the call's
+// input (its code), never by matching the error text.
 const BROWSER_IN_CODE_RE = /\bbrowser\s*\./;
-const RELAY_ERROR_RE = /no matching page|not visible|extension (?:is )?not connected|\brelay\b|ECONNREFUSED|ECONNRESET|socket hang up|target (?:page )?closed|connection (?:closed|refused|lost)/i;
-
-/** Cause of a failed tool call: relay (browser/connectivity), syntax, timeout, runtime or other. */
-export function classifyToolError(text: string): string {
-	if (RELAY_ERROR_RE.test(text)) return "relay";
-	if (/SyntaxError|IndentationError|Unexpected token/.test(text)) return "syntax";
-	if (/timed? ?out|timeout|deadline exceeded/i.test(text)) return "timeout";
-	if (/\b[A-Z]\w*(?:Error|Exception)\b|Traceback/.test(text)) return "runtime";
-	return "other";
-}
 
 // Why: a session left open for days spans its whole wall-clock life, so
 // [start, end] read as ~23h/day. Activity is the run of message records
@@ -406,7 +396,6 @@ export function extractSessionStats(entries: AnyEntry[]) {
 	const toolCallsByTool: Record<string, number> = {};
 	const toolErrorsByTool: Record<string, number> = {};
 	const toolNotFoundByTool: Record<string, number> = {};
-	const toolErrorClassesByTool: Record<string, Record<string, number>> = {};
 	// toolCallIds of eval calls whose code drives the `browser` global.
 	const browserEvalCalls = new Set<string>();
 	const activityTs: number[] = [];
@@ -793,7 +782,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 			const resultText = msg.isError === true ? extractTextFromContent(msg.content).trim() : "";
 			// Rates are keyed by what the call was for, not which tool ran it.
 			const rateKey =
-				toolKey === "eval" && (browserEvalCalls.has(toolCallId) || RELAY_ERROR_RE.test(resultText))
+				toolKey === "eval" && browserEvalCalls.has(toolCallId)
 					? "browser"
 					: toolKey;
 			if (msg.isError === true) {
@@ -810,9 +799,6 @@ export function extractSessionStats(entries: AnyEntry[]) {
 					toolErrors++;
 					const cat = toolErrorCategory(rateKey === "browser" ? "browser" : toolNameRaw);
 					toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
-					const cls = classifyToolError(resultText);
-					const classes = (toolErrorClassesByTool[rateKey] ??= {});
-					classes[cls] = (classes[cls] ?? 0) + 1;
 				}
 			} else {
 				toolCallsByTool[rateKey] = (toolCallsByTool[rateKey] ?? 0) + 1;
@@ -867,7 +853,6 @@ export function extractSessionStats(entries: AnyEntry[]) {
 		modelUsage,
 		tool_calls_by_tool: toolCallsByTool,
 		tool_errors_by_tool: toolErrorsByTool,
-		tool_error_classes_by_tool: toolErrorClassesByTool,
 		tool_not_found: toolNotFoundByTool,
 		error_classes: errorClasses,
 		error_generations: errorGenerations,
@@ -1031,7 +1016,6 @@ export function buildSessionMeta(
 		model_usage: modelUsage,
 		tool_calls_by_tool: stats.tool_calls_by_tool,
 		tool_errors_by_tool: stats.tool_errors_by_tool,
-		tool_error_classes_by_tool: stats.tool_error_classes_by_tool,
 		tool_not_found: stats.tool_not_found,
 		error_classes: stats.error_classes,
 		error_generations: stats.error_generations,

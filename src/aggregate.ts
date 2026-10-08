@@ -238,7 +238,6 @@ export function aggregateData(
 		// ── friction-signal additions (interruptions, errors, tool-not-found) ──
 		tool_calls_by_tool: {},
 		tool_errors_by_tool: {},
-		tool_error_classes_by_tool: {},
 		tool_not_found: {},
 		error_classes: {},
 		error_generations: 0,
@@ -335,8 +334,6 @@ export function aggregateData(
 		agg.total_steering += meta.steering_messages;
 		mergeRecord(agg.tool_calls_by_tool, meta.tool_calls_by_tool);
 		mergeRecord(agg.tool_errors_by_tool, meta.tool_errors_by_tool);
-		for (const [tool, classes] of Object.entries(meta.tool_error_classes_by_tool ?? {}))
-			mergeRecord((agg.tool_error_classes_by_tool[tool] ??= {}), classes);
 		mergeRecord(agg.tool_not_found, meta.tool_not_found);
 		mergeRecord(agg.error_classes, meta.error_classes);
 		mergeRecord(agg.ttsr_rules, meta.ttsr_rules);
@@ -558,7 +555,7 @@ export function aggregateData(
 	agg.tool_error_rate_table = Object.entries(agg.tool_calls_by_tool)
 		.map(([tool, calls]) => {
 			const errors = agg.tool_errors_by_tool[tool] ?? 0;
-			return { tool, calls, errors, rate: calls > 0 ? errors / calls : 0, classes: agg.tool_error_classes_by_tool[tool] ?? {} };
+			return { tool, calls, errors, rate: calls > 0 ? errors / calls : 0 };
 		})
 		.filter((r) => r.calls >= 5)
 		.sort((a, b) => b.rate - a.rate);

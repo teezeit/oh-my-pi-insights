@@ -293,7 +293,7 @@ test("sidecar spend folds into the parent and stays broken out", () => {
 	assert.equal(meta.duration_minutes, 20);
 });
 
-test("browser automation run through eval is attributed to browser, with error classes per tool", () => {
+test("browser automation run through eval is attributed to browser by its code", () => {
 	const at = 1_788_000_000_000;
 	const call = (id: string, name: string, args: Record<string, unknown>) => ({ type: "toolCall", id, name, arguments: args });
 	const result = (id: string, toolName: string, isError: boolean, text = "") => ({
@@ -323,10 +323,6 @@ test("browser automation run through eval is attributed to browser, with error c
 	assert.equal(stats.tool_errors_by_tool.browser, 2);
 	assert.equal(stats.tool_calls_by_tool.eval, 2);
 	assert.equal(stats.tool_errors_by_tool.eval, 1);
-	assert.deepEqual(stats.tool_error_classes_by_tool, {
-		browser: { relay: 2 },
-		eval: { runtime: 1 },
-	});
 	assert.equal(stats.toolErrorCategories["Browser Failed"], 2);
 	assert.equal(stats.toolErrorCategories["Eval Failed"], 1);
 });

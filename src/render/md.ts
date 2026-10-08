@@ -173,10 +173,10 @@ export function generateMarkdown(
 	}
 	if (agg.tool_error_rate_table.length) {
 		lines.push("**Per-tool error rate** (>=5 calls, worst first; denominator is `toolResult` messages, not `toolCounts`; `browser` includes eval calls that drive the browser global):");
-		lines.push(`| Tool | Errors / Calls | Rate | Causes |`);
-		lines.push(`|------|-----------------|------|--------|`);
+		lines.push(`| Tool | Errors / Calls | Rate |`);
+		lines.push(`|------|-----------------|------|`);
 		for (const r of agg.tool_error_rate_table.slice(0, 10))
-			lines.push(`| ${r.tool} | ${r.errors} / ${r.calls} | ${(r.rate * 100).toFixed(1)}% | ${Object.entries(r.classes).map(([k, v]) => `${k} ${v}`).join(", ") || "-"} |`);
+			lines.push(`| ${r.tool} | ${r.errors} / ${r.calls} | ${(r.rate * 100).toFixed(1)}% |`);
 		lines.push("");
 	}
 	if (Object.keys(agg.tool_not_found).length) {

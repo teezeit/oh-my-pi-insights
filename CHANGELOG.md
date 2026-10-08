@@ -68,8 +68,6 @@ upstream verbatim; every entry below is a diff against it.
   dollar amounts only; bare integers are not checked.
 - `n=` sample size on every stat card and chart in the HTML report;
   facet charts are labelled decay-weighted.
-- Tool errors carry a cause (`relay`, `syntax`, `timeout`, `runtime`,
-  `other`) per tool, shown in the per-tool error table.
 
 ### Changed
 
@@ -96,7 +94,7 @@ upstream verbatim; every entry below is a diff against it.
   models with different cache mixes read 2-5x apart and drove savings claims.
   Model tiers derive from it; the Markdown model table shows it.
 - Session meta cache schema bumped to 4 (per-session activity intervals,
-  per-model cost components, per-tool error causes).
+  per-model cost components).
 
 ### Removed
 
@@ -132,8 +130,8 @@ upstream verbatim; every entry below is a diff against it.
   windows. There is now one `TemporalData.delta` (around the model switch,
   else week over week) with explicit windows, and every printed delta quotes it.
 - **Browser errors blamed on eval.** Browser automation runs through `eval`,
-  so relay failures counted as eval errors. Eval calls whose code uses the
-  `browser` global, or that fail with a relay error, now count as `browser`.
+  so its failures counted as eval errors. Eval calls whose code uses the
+  `browser` global now count as `browser`.
 - A session present twice on disk under two slugified-cwd directories was
   counted twice, double-counting its spend and making session counts
   non-deterministic between runs. Deduplicated by session id.
