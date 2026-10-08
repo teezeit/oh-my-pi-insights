@@ -128,12 +128,18 @@ export function responseTimeChart(times: number[]): string {
 		.join("\n");
 }
 
-export function statCard(label: string, value: string, sub?: string): string {
+/** `n` is the sample behind the number, e.g. "n=196 sessions"; never omitted. */
+export function statCard(label: string, value: string, sub: string, n: string): string {
 	return `<div class="stat-card">
   <div class="stat-value">${esc(value)}</div>
   <div class="stat-label">${esc(label)}</div>
   ${sub ? `<div class="stat-sub">${esc(sub)}</div>` : ""}
+  <div class="stat-sub">${esc(n)}</div>
 </div>`;
+}
+
+function chartTitle(title: string, n: string): string {
+	return `<h3>${esc(title)} <span style="text-transform:none;font-weight:400;color:var(--muted)">${esc(n)}</span></h3>`;
 }
 
 export function generateHTML(
@@ -197,6 +203,8 @@ export function generateHTML(
 
 	const topTools = top8(agg.tool_counts);
 	const topGoals = top8(agg.goal_categories);
+	const nSessions = `n=${agg.total_sessions} sessions`;
+	const toolCalls = Object.values(agg.tool_calls_by_tool).reduce((a, b) => a + b, 0);
 
 	const configAdditions = suggSec?.config_additions ?? [];
 	const featuresToTry = suggSec?.features_to_try ?? [];
@@ -380,58 +388,58 @@ ${temporal.diff_headlines.length || temporal.major_transition ? `
 <section id="stats">
   <h2><span class="emoji">📊</span> By the Numbers</h2>
   <div class="stat-grid">
-    ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`)}
-    ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`)}
-    ${statCard("Active Time", fmtHours(agg.total_duration_hours), `${(agg.total_duration_hours / Math.max(Object.keys(agg.active_hours_by_day).length, 1)).toFixed(1)}h/day, parallel sessions counted once`)}
-    ${statCard("Tokens In", fmtTokens(agg.total_input_tokens), "")}
-    ${statCard("Tokens Out", fmtTokens(agg.total_output_tokens), "")}
-    ${statCard("Total Cost", fmtCost(agg.total_cost), "")}
-    ${statCard("Lines Added", fmtTokens(agg.total_lines_added), "")}
-    ${statCard("Lines Removed", fmtTokens(agg.total_lines_removed), "")}
-    ${statCard("Git Commits", String(agg.git_commits), `${agg.git_pushes} pushes`)}
-    ${statCard("Files Modified", fmtTokens(agg.total_files_modified), "")}
-    ${statCard("Tool Errors", String(agg.total_tool_errors), "")}
-    ${statCard("Interruptions", String(agg.total_interruptions), `aborted ${agg.interruptions_aborted} / steered ${agg.interruptions_steered}`)}
-    ${agg.sessions_using_subagent ? statCard("Subagent Sessions", String(agg.sessions_using_subagent), "") : ""}
-    ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "") : ""}
-    ${agg.concurrent_sessions.overlap_events ? statCard("Parallel Sessions", String(agg.concurrent_sessions.overlap_events), "overlap events") : ""}
+    ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`, nSessions)}
+    ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`, nSessions)}
+    ${statCard("Active Time", fmtHours(agg.total_duration_hours), `${(agg.total_duration_hours / Math.max(Object.keys(agg.active_hours_by_day).length, 1)).toFixed(1)}h/day, parallel sessions counted once`, `n=${Object.keys(agg.active_hours_by_day).length} active days`)}
+    ${statCard("Tokens In", fmtTokens(agg.total_input_tokens), "", nSessions)}
+    ${statCard("Tokens Out", fmtTokens(agg.total_output_tokens), "", nSessions)}
+    ${statCard("Total Cost", fmtCost(agg.total_cost), "", nSessions)}
+    ${statCard("Lines Added", fmtTokens(agg.total_lines_added), "", nSessions)}
+    ${statCard("Lines Removed", fmtTokens(agg.total_lines_removed), "", nSessions)}
+    ${statCard("Git Commits", String(agg.git_commits), `${agg.git_pushes} pushes`, nSessions)}
+    ${statCard("Files Modified", fmtTokens(agg.total_files_modified), "", nSessions)}
+    ${statCard("Tool Errors", String(agg.total_tool_errors), "", `n=${toolCalls} tool calls`)}
+    ${statCard("Interruptions", String(agg.total_interruptions), `aborted ${agg.interruptions_aborted} / steered ${agg.interruptions_steered}`, `n=${agg.total_messages} human messages`)}
+    ${agg.sessions_using_subagent ? statCard("Subagent Sessions", String(agg.sessions_using_subagent), "", nSessions) : ""}
+    ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "", nSessions) : ""}
+    ${agg.concurrent_sessions.overlap_events ? statCard("Parallel Sessions", String(agg.concurrent_sessions.overlap_events), "overlap events", nSessions) : ""}
   </div>
 
   <div class="charts-grid">
     <div class="chart-box">
-      <h3>Goal Categories</h3>
+      ${chartTitle("Goal Categories", `n=${agg.sessions_with_facets} sessions, decay-weighted`)}
       ${barChart(agg.goal_categories, { limit: 10 })}
     </div>
     <div class="chart-box">
-      <h3>Outcomes</h3>
+      ${chartTitle("Outcomes", `n=${Object.values(agg.outcome_counts).reduce((a, b) => a + b, 0)} sessions, decay-weighted`)}
       ${barChart(agg.outcomes, { order: OUTCOME_ORDER })}
     </div>
     <div class="chart-box">
-      <h3>Satisfaction</h3>
+      ${chartTitle("Satisfaction", `n=${agg.sample_sizes.satisfaction_signals} signals, decay-weighted`)}
       ${barChart(agg.satisfaction, { order: SATISFACTION_ORDER })}
     </div>
     <div class="chart-box">
-      <h3>Top Tools</h3>
+      ${chartTitle("Top Tools", `n=${Object.values(agg.tool_counts).reduce((a, b) => a + b, 0)} calls`)}
       ${barChart(agg.tool_counts, { limit: 10 })}
     </div>
     <div class="chart-box">
-      <h3>Languages</h3>
+      ${chartTitle("Languages", `n=${Object.values(agg.languages).reduce((a, b) => a + b, 0)} file touches`)}
       ${barChart(agg.languages, { limit: 10 })}
     </div>
     <div class="chart-box">
-      <h3>Friction Types</h3>
+      ${chartTitle("Friction Types", `n=${agg.sample_sizes.friction_sessions} sessions with friction, decay-weighted`)}
       ${barChart(agg.friction, { limit: 10 })}
     </div>
     <div class="chart-box">
-      <h3>Tool Errors</h3>
+      ${chartTitle("Tool Errors", `n=${agg.total_tool_errors} errors`)}
       ${barChart(agg.tool_error_categories)}
     </div>
     <div class="chart-box">
-      <h3>Response Times</h3>
+      ${chartTitle("Response Times", `n=${agg.user_response_times.length} responses`)}
       ${responseTimeChart(agg.user_response_times)}
     </div>
     <div class="chart-box">
-      <h3>Time of Day</h3>
+      ${chartTitle("Time of Day", `n=${agg.message_hours.length} messages`)}
       ${timeOfDayChart(agg.message_hours)}
     </div>
   </div>
@@ -608,19 +616,19 @@ ${temporal.diff_headlines.length || temporal.major_transition ? `
   ${modelEffSec?.summary ? `<p style="color:var(--dim);margin-bottom:16px">${esc(modelEffSec.summary)}</p>` : ""}
 
   <div class="stat-grid">
-    ${statCard("Estimated Waste", fmtCost(agg.estimated_waste), "from model mismatch")}
-    ${statCard("Efficiency Flags", String(agg.model_efficiency.length), `${agg.model_efficiency.filter(e => e.flag === "overspend").length} overspend, ${agg.model_efficiency.filter(e => e.flag === "underspend").length} underspend, ${agg.model_efficiency.filter(e => e.flag === "quota_pressure").length} quota pressure`)}
-    ${statCard("Models Used", String(Object.keys(agg.model_usage).length), "")}
+    ${statCard("Estimated Waste", fmtCost(agg.estimated_waste), "from model mismatch", `n=${agg.sessions_with_facets} sessions with facets`)}
+    ${statCard("Efficiency Flags", String(agg.model_efficiency.length), `${agg.model_efficiency.filter(e => e.flag === "overspend").length} overspend, ${agg.model_efficiency.filter(e => e.flag === "underspend").length} underspend, ${agg.model_efficiency.filter(e => e.flag === "quota_pressure").length} quota pressure`, `n=${agg.sessions_with_facets} sessions with facets`)}
+    ${statCard("Models Used", String(Object.keys(agg.model_usage).length), "", nSessions)}
   </div>
 
   <div class="charts-grid">
     <div class="chart-box">
-      <h3>Cost by Model</h3>
+      ${chartTitle("Cost by Model", nSessions)}
       ${barChart(Object.fromEntries(Object.entries(agg.model_usage).map(([k, v]) => [k, Math.round(v.cost * 100)])), { limit: 8 })}
       <p class="muted" style="margin-top:8px;font-size:11px">Values in cents</p>
     </div>
     <div class="chart-box">
-      <h3>Messages by Model</h3>
+      ${chartTitle("Messages by Model", `n=${Object.values(agg.model_usage).reduce((a, u) => a + u.message_count, 0)} model messages`)}
       ${barChart(Object.fromEntries(Object.entries(agg.model_usage).map(([k, v]) => [k, v.message_count])), { limit: 8 })}
     </div>
   </div>

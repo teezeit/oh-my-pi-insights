@@ -187,6 +187,7 @@ export function aggregateData(
 		goal_categories: {},
 		outcomes: {},
 		outcome_counts: {},
+		sample_sizes: { satisfaction_signals: 0, friction_sessions: 0 },
 		satisfaction: {},
 		helpfulness: {},
 		session_types: {},
@@ -422,6 +423,8 @@ export function aggregateData(
 				agg.outcome_counts[facets.outcome] = (agg.outcome_counts[facets.outcome] ?? 0) + 1;
 			}
 			mergeWeighted(agg.satisfaction, facets.user_satisfaction_counts, w);
+			agg.sample_sizes.satisfaction_signals += Object.values(facets.user_satisfaction_counts ?? {}).reduce((a, b) => a + b, 0);
+			if (Object.values(facets.friction_counts ?? {}).some((v) => v > 0)) agg.sample_sizes.friction_sessions++;
 			if (facets.assistant_helpfulness)
 				agg.helpfulness[facets.assistant_helpfulness] =
 					(agg.helpfulness[facets.assistant_helpfulness] ?? 0) + w;
