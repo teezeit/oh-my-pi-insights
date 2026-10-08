@@ -325,6 +325,17 @@ export type ScanSummary = {
 	reused_stale_sections: boolean;
 };
 
+export type DeltaWindow = { start: string; end: string; sessions: number };
+
+export type TemporalDelta = {
+	basis: "model_switch" | "week_over_week";
+	before: DeltaWindow;
+	after: DeltaWindow;
+	/** pct is rounded to a whole percent; before/after are per-session means. */
+	cost_per_session: { before: number; after: number; pct: number };
+	errors_per_session: { before: number; after: number; pct: number };
+};
+
 export type TemporalData = {
 	diff_headlines: string[];
 	this_week: { sessions: number; avg_cost: number; errors_per_session: number; primary_model: string } | null;
@@ -335,6 +346,13 @@ export type TemporalData = {
 	resolved_friction: string[];
 	ongoing_friction: Array<{ type: string; recent_count: number; total_count: number }>;
 	staleness_pct: number;
+	/**
+	 * The only before/after comparison in the report. Why: the banner, the
+	 * transition note and the trajectory line each computed their own delta
+	 * over different, unstated windows (-37% vs -43% vs -70% errors). Every
+	 * printed delta now quotes this object.
+	 */
+	delta: TemporalDelta | null;
 };
 
 

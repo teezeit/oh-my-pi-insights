@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aggregateData, generateHTML } from "../index.ts";
+import { aggregateData, computeTemporalData, generateHTML } from "../index.ts";
 import { meta } from "./helpers.ts";
 
 // Local wall-clock time: active time is bucketed per local calendar day.
@@ -69,11 +69,7 @@ test("interruption card and rate share one numerator with an aborted/steered bre
 	assert.equal(agg.interruptions_aborted, 2);
 	assert.equal(agg.interruptions_steered, 2);
 
-	const html = generateHTML(agg, {}, {}, {
-		diff_headlines: [], this_week: null, last_week: null,
-		trajectory: { cost: "stable", errors: "stable", note: "" },
-		anomalies: [], major_transition: null, resolved_friction: [], ongoing_friction: [], staleness_pct: 0,
-	});
+	const html = generateHTML(agg, {}, {}, computeTemporalData([], new Map()));
 	const card = html.match(/<div class="stat-card">\s*<div class="stat-value">(\d+)<\/div>\s*<div class="stat-label">Interruptions<\/div>\s*<div class="stat-sub">([^<]*)<\/div>/);
 	assert.ok(card, "interruptions card not found");
 	assert.equal(card[1], "4");

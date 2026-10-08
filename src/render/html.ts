@@ -344,9 +344,9 @@ export function generateHTML(
   <a href="#model-efficiency">Model Spend</a>
 </nav>
 
-${temporal.diff_headlines.length ? `
+${temporal.diff_headlines.length || temporal.major_transition ? `
 <div style="background:linear-gradient(135deg,#1a2332,#1e2a3a);border:1px solid var(--border2);border-radius:var(--radius);padding:24px 28px;margin-bottom:32px">
-  <h3 style="color:var(--accent2);font-size:13px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:14px">\u{1F4C8} What Changed This Week</h3>
+  <h3 style="color:var(--accent2);font-size:13px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:14px">\u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}</h3>
   <div style="display:flex;flex-wrap:wrap;gap:10px">
     ${temporal.diff_headlines.map(h => `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 14px;font-size:14px;color:var(--text)">${esc(h)}</div>`).join("\n    ")}
   </div>

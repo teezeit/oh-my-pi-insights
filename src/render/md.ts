@@ -40,8 +40,8 @@ export function generateMarkdown(
 	lines.push(`> ${agg.date_range.start} to ${agg.date_range.end} | ${agg.total_sessions} sessions | Generated ${new Date().toLocaleDateString()}`);
 	lines.push("");
 
-	if (temporal.diff_headlines.length) {
-		lines.push("## \u{1F4C8} What Changed This Week");
+	if (temporal.diff_headlines.length || temporal.major_transition) {
+		lines.push(`## \u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}`);
 		for (const h of temporal.diff_headlines) lines.push(`- ${h}`);
 		if (temporal.major_transition) lines.push(`- **Major shift (${temporal.major_transition.when}):** ${temporal.major_transition.what}. ${temporal.major_transition.impact}`);
 		lines.push("");
