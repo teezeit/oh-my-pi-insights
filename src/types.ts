@@ -84,6 +84,8 @@ export type SessionMeta = {
 	files_modified: number;
 	message_hours: number[];
 	user_message_timestamps: string[];
+	/** Runs of message activity, [startISO, endISO]; see ACTIVE_GAP_MINUTES. */
+	active_intervals: Array<[string, string]>;
 	// ── omp additions ──
 	// Why: omp writes explicit per-call cost, and advisor/subagent sidecars are
 	// separate logs with their own spend. total_cost is the parent-attributed
@@ -174,8 +176,9 @@ export type AggregatedData = {
 	sessions_with_facets: number;
 	date_range: { start: string; end: string };
 	total_messages: number;
-	// Why: union of [start, start+duration] per local calendar day, so
-	// parallel sessions count once and no day can exceed 24h.
+	// Why: union of per-session activity runs per local calendar day, so
+	// parallel sessions count once, idle open sessions count zero, and no day
+	// can exceed 24h.
 	total_duration_hours: number;
 	active_hours_by_day: Record<string, number>;
 	total_input_tokens: number;

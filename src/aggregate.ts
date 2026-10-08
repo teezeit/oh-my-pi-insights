@@ -125,26 +125,28 @@ export function top8(rec: Record<string, number>): [string, number][] {
 
 /**
  * Active hours per local calendar day: the union of every session's
- * [start, start + duration] interval, split at local midnight.
- * Why: summing durations counted parallel sessions once each, which read as
- * 198h/day. No idle trimming: gaps between user messages can be long agent
- * runs, and the logs carry no reliable "nothing happening" signal.
+ * activity runs (SessionMeta.active_intervals), split at local midnight.
+ * Why: summing durations counted parallel sessions once each (198h/day), and
+ * even a union of [start, end] read ~23h/day because sessions stay open for
+ * days; only runs of actual message activity count.
  */
 export function activeHoursByDay(metas: SessionMeta[]): Record<string, number> {
 	const byDay = new Map<string, Array<[number, number]>>();
 	for (const m of metas) {
-		let start = new Date(m.start_time).getTime();
-		const end = start + m.duration_minutes * 60_000;
-		if (Number.isNaN(start) || end <= start) continue;
-		while (start < end) {
-			const d = new Date(start);
-			const nextMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
-			const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-			const segEnd = Math.min(end, nextMidnight);
-			let list = byDay.get(key);
-			if (!list) byDay.set(key, (list = []));
-			list.push([start, segEnd]);
-			start = segEnd;
+		for (const [startIso, endIso] of m.active_intervals ?? []) {
+			let start = Date.parse(startIso);
+			const end = Date.parse(endIso);
+			if (Number.isNaN(start) || Number.isNaN(end)) continue;
+			while (start < end) {
+				const d = new Date(start);
+				const nextMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+				const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+				const segEnd = Math.min(end, nextMidnight);
+				let list = byDay.get(key);
+				if (!list) byDay.set(key, (list = []));
+				list.push([start, segEnd]);
+				start = segEnd;
+			}
 		}
 	}
 	const out: Record<string, number> = {};

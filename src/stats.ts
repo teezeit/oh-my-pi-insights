@@ -289,6 +289,29 @@ export function classifyToolError(text: string): string {
 	return "other";
 }
 
+// Why: a session left open for days spans its whole wall-clock life, so
+// [start, end] read as ~23h/day. Activity is the run of message records
+// (user, assistant, toolResult); a gap longer than this ends the run. 15 min
+// covers a long tool call or a slow model turn without bridging idle hours.
+export const ACTIVE_GAP_MINUTES = 15;
+
+/** Merges activity timestamps into [startISO, endISO] runs; no padding, so a lone record adds 0. */
+export function activityIntervals(timestamps: number[]): Array<[string, string]> {
+	const sorted = [...timestamps].sort((a, b) => a - b);
+	const runs: Array<[string, string]> = [];
+	let start = sorted[0];
+	let end = start;
+	for (const ts of sorted.slice(1)) {
+		if (ts - end! > ACTIVE_GAP_MINUTES * 60_000) {
+			runs.push([new Date(start!).toISOString(), new Date(end!).toISOString()]);
+			start = ts;
+		}
+		end = ts;
+	}
+	if (start !== undefined) runs.push([new Date(start).toISOString(), new Date(end!).toISOString()]);
+	return runs;
+}
+
 /** Lowercase word-token Jaccard overlap, used to tell a rephrase from a new ask. */
 export function jaccardOverlap(a: string, b: string): number {
 	const ta = new Set(a.toLowerCase().match(/\w+/g) ?? []);
@@ -386,6 +409,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 	const toolErrorClassesByTool: Record<string, Record<string, number>> = {};
 	// toolCallIds of eval calls whose code drives the `browser` global.
 	const browserEvalCalls = new Set<string>();
+	const activityTs: number[] = [];
 	// Pre-seeded so every class reads as 0 rather than undefined when absent.
 	const errorClasses: Record<string, number> = { rate_limit: 0, quota: 0, auth: 0, other: 0 };
 	const ttsrRules: Record<string, number> = {};
@@ -531,6 +555,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 			continue;
 		}
 		if (entry.type !== "message") continue;
+		if (!Number.isNaN(entryTs)) activityTs.push(entryTs);
 
 		const msg = entry.message as AnyMessage | undefined;
 		if (!msg) continue;
@@ -820,6 +845,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 		userResponseTimes,
 		messageHours,
 		userMessageTimestamps,
+		activeIntervals: activityIntervals(activityTs),
 		ttfts,
 		responseDurations,
 		gitCommits,
@@ -984,6 +1010,7 @@ export function buildSessionMeta(
 		files_modified: stats.filesModified,
 		message_hours: stats.messageHours,
 		user_message_timestamps: stats.userMessageTimestamps,
+		active_intervals: stats.activeIntervals,
 		cost_primary: stats.totals.cost,
 		cost_advisor: costAdvisor,
 		cost_subagent: costSubagent,

@@ -3,21 +3,21 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aggregateData, computeTemporalData, generateHTML } from "../index.ts";
+import { aggregateData, buildSessionMeta, computeTemporalData, generateHTML } from "../index.ts";
 import { meta } from "./helpers.ts";
 
 // Local wall-clock time: active time is bucketed per local calendar day.
-const local = (day: number, hour: number, min = 0) => new Date(2026, 8, day, hour, min).toISOString();
+const at = (day: number, hour: number, min = 0) => new Date(2026, 8, day, hour, min);
+const local = (day: number, hour: number, min = 0) => at(day, hour, min).toISOString();
+const span = (id: string, day: number, hour: number, min: number, minutes: number) =>
+	meta({
+		session_id: id,
+		start_time: local(day, hour, min),
+		active_intervals: [[local(day, hour, min), new Date(at(day, hour, min).getTime() + minutes * 60_000).toISOString()]],
+	});
 
 test("active time is the union of overlapping sessions, not their sum", () => {
-	const agg = aggregateData(
-		[
-			meta({ session_id: "a", start_time: local(1, 9), duration_minutes: 60 }),
-			meta({ session_id: "b", start_time: local(1, 9, 30), duration_minutes: 60 }),
-			meta({ session_id: "c", start_time: local(1, 9, 45), duration_minutes: 5 }),
-		],
-		new Map(),
-	);
+	const agg = aggregateData([span("a", 1, 9, 0, 60), span("b", 1, 9, 30, 60), span("c", 1, 9, 45, 5)], new Map());
 
 	// 9:00-10:30 covered once; a plain sum would read 2.08h.
 	assert.equal(agg.total_duration_hours, 1.5);
@@ -27,9 +27,7 @@ test("active time is the union of overlapping sessions, not their sum", () => {
 test("active time never exceeds 24h on any day, however many sessions overlap", () => {
 	const metas = [];
 	for (let day = 1; day <= 30; day++) {
-		for (let i = 0; i < 10; i++) {
-			metas.push(meta({ session_id: `d${day}-${i}`, start_time: local(day, 8), duration_minutes: 600 }));
-		}
+		for (let i = 0; i < 10; i++) metas.push(span(`d${day}-${i}`, day, 8, 0, 600));
 	}
 	const agg = aggregateData(metas, new Map());
 
@@ -42,11 +40,42 @@ test("active time never exceeds 24h on any day, however many sessions overlap", 
 });
 
 test("a session running past midnight is split across both days", () => {
-	const agg = aggregateData(
-		[meta({ session_id: "late", start_time: local(1, 23), duration_minutes: 120 })],
-		new Map(),
-	);
+	const agg = aggregateData([span("late", 1, 23, 0, 120)], new Map());
 	assert.deepEqual(agg.active_hours_by_day, { "2026-09-01": 1, "2026-09-02": 1 });
+});
+
+test("a session left open counts only its runs of activity, not the idle gap", () => {
+	const msg = (d: Date, role: string) => ({
+		type: "message",
+		timestamp: d.toISOString(),
+		message: role === "user"
+			? { role, attribution: "user", content: [{ type: "text", text: "go" }], timestamp: d.getTime() }
+			: { role, content: [], timestamp: d.getTime() },
+	});
+	const m = buildSessionMeta(
+		{
+			id: "idle",
+			path: "/sessions/proj/idle.jsonl",
+			project_path: "/Users/me/projects/peach",
+			size: 1,
+			created: at(1, 9),
+			modified: at(1, 13, 10),
+			sidecars: [],
+			signature: "1:1",
+		},
+		[
+			{ type: "session", version: 3, id: "idle", timestamp: local(1, 9), cwd: "/Users/me/projects/peach" },
+			msg(at(1, 9), "user"),
+			msg(at(1, 9, 5), "assistant"),
+			msg(at(1, 13), "user"),
+			msg(at(1, 13, 10), "toolResult"),
+		],
+		[],
+	);
+
+	assert.deepEqual(m.active_intervals, [[local(1, 9), local(1, 9, 5)], [local(1, 13), local(1, 13, 10)]]);
+	const agg = aggregateData([m], new Map());
+	assert.equal(agg.total_duration_hours, 0.25);
 });
 
 test("interruption card and rate share one numerator with an aborted/steered breakdown", () => {

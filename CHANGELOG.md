@@ -95,8 +95,8 @@ upstream verbatim; every entry below is a diff against it.
   cost per token. Blended rates fold cache reads in, so identically priced
   models with different cache mixes read 2-5x apart and drove savings claims.
   Model tiers derive from it; the Markdown model table shows it.
-- Session meta cache schema bumped to 3 (new per-model cost components and
-  per-tool error causes).
+- Session meta cache schema bumped to 4 (per-session activity intervals,
+  per-model cost components, per-tool error causes).
 
 ### Removed
 
@@ -120,8 +120,10 @@ upstream verbatim; every entry below is a diff against it.
   `--facet-concurrency` is replaced by `--model-concurrency` (default 4, env
   `OMP_INSIGHTS_MODEL_CONCURRENCY`).
 - **Impossible active time.** Active hours summed every session's duration,
-  so parallel sessions counted once each (198h/day). Now the union of session
-  intervals per local calendar day; no day can exceed 24h.
+  so parallel sessions counted once each (198h/day). Each session now records
+  runs of message activity (user, assistant, toolResult) split at gaps over
+  15 minutes; active time is their union per local calendar day, so parallel
+  sessions count once and sessions left open count only while active.
 - **Interruption card vs rate.** The card counted steering only while the
   rate also counted mid-session aborts. Both now use one numerator, with an
   aborted / steered breakdown on the card.

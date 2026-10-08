@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readJsonl } from "./omp.ts";
 import type { DirEntry } from "./omp.ts";
-import { countNewlines, extractSidecarUsage, getLanguageFromPath, isMetaSession, toolErrorCategory } from "../stats.ts";
+import { activityIntervals, countNewlines, extractSidecarUsage, getLanguageFromPath, isMetaSession, toolErrorCategory } from "../stats.ts";
 import type {
 	AnyEntry,
 	AnyMessage,
@@ -100,6 +100,7 @@ export function extractClaudeStats(entries: AnyEntry[]) {
 	let firstPrompt = "";
 	let lastAssistantTs: number | null = null;
 	const totals: UsageRecord = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costInput: 0, costOutput: 0 };
+	const activityTs: number[] = [];
 
 	for (const entry of entries) {
 		if (typeof entry.sessionId === "string" && !sessionId) sessionId = entry.sessionId;
@@ -109,6 +110,8 @@ export function extractClaudeStats(entries: AnyEntry[]) {
 		if (!Number.isNaN(ts)) {
 			if (!firstTs) firstTs = ts;
 			if (ts > lastTs) lastTs = ts;
+			// Tool results are "user" entries in Claude Code logs, so both roles cover all activity.
+			if (entry.type === "user" || entry.type === "assistant") activityTs.push(ts);
 		}
 
 		if (entry.type === "cost-state") {
@@ -245,6 +248,7 @@ export function extractClaudeStats(entries: AnyEntry[]) {
 		projectPath,
 		firstTs,
 		lastTs,
+		activeIntervals: activityIntervals(activityTs),
 		costAvailable,
 		totals,
 		modelUsage,
@@ -303,6 +307,7 @@ export function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMe
 		files_modified: stats.filesModified,
 		message_hours: stats.messageHours,
 		user_message_timestamps: stats.userMessageTimestamps,
+		active_intervals: stats.activeIntervals,
 		// Claude Code reports one aggregate cost per session, so subagent spend
 		// cannot be split out of it without estimating. It stays in primary.
 		cost_primary: stats.totals.cost,
