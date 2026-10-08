@@ -363,8 +363,9 @@ export function generateHTML(
 
 	const actionItems: ActionItem[] = buildActionList(sections);
 	const actionListHtml = actionItems.length
-		? `<div class="card" id="action-list">
-  <h3 style="margin-bottom:12px">Top Actions</h3>
+		? `<section class="rpt-section" id="action-list">
+<h2>Top Actions</h2>
+  <div class="card">
   <ol class="action-list">
   ${actionItems
 			.map((item) => {
@@ -382,7 +383,8 @@ export function generateHTML(
 			})
 			.join("\n  ")}
   </ol>
-</div>`
+  </div>
+</section>`
 		: "";
 
 	// Since-last-report delta, folded into the Summary card instead of a
@@ -456,7 +458,23 @@ export function generateHTML(
   nav a { background: var(--bg3); border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px; color: var(--dim); font-size: 13px; transition: all 0.15s; }
   nav a:hover { color: var(--text); border-color: var(--border2); text-decoration: none; background: var(--bg2); }
 
-  .rpt-section { margin-bottom: 48px; display: block; }
+  /* Why: single rule for vertical rhythm between Top Actions, Summary and every following section. */
+  .rpt-section { margin-top: 48px; display: block; }
+  /* Collapsible heavy sections (By the Numbers, Model Spend) and their nested
+     chart blocks (Numbers, Flagged Sessions): native <details>/<summary>, no JS.
+     Narrative sections stay plain <section> and are never collapsible. */
+  details > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before {
+    content: ""; width: 7px; height: 7px; flex-shrink: 0;
+    border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+    transform: rotate(-45deg); transition: transform 0.15s ease;
+  }
+  details[open] > summary::before { transform: rotate(45deg); }
+  details > summary:hover { background: var(--bg3); border-radius: var(--radius-sm); }
+  details.rpt-section > summary { border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 24px; }
+  details.rpt-section > summary > h2 { flex: 1; margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+  details.nested-collapse > summary > h3 { flex: 1; margin-bottom: 0; }
   h2 { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
   /* Category pills: the same pill marks a friction type in the chart and on
      the friction cards, so a card visibly belongs to a chart row. */
@@ -639,8 +657,8 @@ ${actionListHtml}
 </section>
 
 <!-- ── Stats ── -->
-<section class="rpt-section" id="stats">
-<h2>By the Numbers</h2>
+<details class="rpt-section" id="stats">
+<summary><h2>By the Numbers</h2></summary>
   <div class="stat-grid">
     ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`, nSessions, cardTitle("substantive sessions in the report", nSessions))}
     ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`, nSessions, cardTitle("human messages across all sessions", nSessions))}
@@ -688,8 +706,8 @@ ${actionListHtml}
     </div>
   </div>
 
-  <div id="numbers">
-  <h3 style="margin-top:28px">Languages, time of day, response times</h3>
+  <details class="nested-collapse" id="numbers" style="margin-top:20px">
+  <summary><h3>Languages, time of day, response times</h3></summary>
   <div class="charts-grid" style="margin-top:12px">
     <div class="chart-box">
       ${chartTitle("Languages", `n=${Object.values(agg.languages).reduce((a, b) => a + b, 0)} file touches`)}
@@ -704,8 +722,8 @@ ${actionListHtml}
       ${timeOfDayChart(agg.message_hours)}
     </div>
   </div>
-  </div>
-</section>
+  </details>
+</details>
 
 <!-- ── Project Areas ── -->
 <section class="rpt-section" id="projects">
@@ -897,8 +915,8 @@ ${actionListHtml}
 </section>
 
 <!-- ── Model Efficiency ── -->
-<section class="rpt-section" id="model-efficiency">
-<h2>Model Spend</h2>
+<details class="rpt-section" id="model-efficiency">
+<summary><h2>Model Spend</h2></summary>
   ${modelEffSec?.summary ? `<p style="color:var(--muted);margin-bottom:16px">${esc(modelEffSec.summary)}</p>` : ""}
 
   <div class="stat-grid">
@@ -940,7 +958,8 @@ ${actionListHtml}
     ${modelEffSec.potential_savings_note ? `<p style="color:var(--muted);margin-top:6px;font-size:12px;font-style:italic">${esc(modelEffSec.potential_savings_note)}</p>` : ""}
   </div>` : ""}
 
-  ${agg.model_efficiency.length ? `<h3 style="margin-top:24px">Flagged Sessions</h3>
+  ${agg.model_efficiency.length ? `<details class="nested-collapse" id="flagged-sessions" style="margin-top:24px">
+  <summary><h3>Flagged Sessions</h3></summary>
   <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
     ${agg.model_efficiency.slice(0, 10).map(e => `<div class="card" style="padding:14px 18px">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -955,7 +974,8 @@ ${actionListHtml}
     </div>`).join("\n")}
   </div>
   ` : ""}
-</section>
+</details>
+</details>
 
 
 </div>

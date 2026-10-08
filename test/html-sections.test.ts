@@ -43,14 +43,27 @@ function buildFixtureHtml(sessionPaths: Record<string, string> = {}) {
 	});
 }
 
-// ── Sections: plain, never collapsible ─────────────────────────────────────
+// ── Sections: heavy ones collapsible, narrative ones plain ──────────────────
 
-test("report sections are plain <section> blocks with ids and no toggles anywhere", async () => {
+test("narrative sections are plain <section> blocks with ids, never <details>", async () => {
 	const html = await buildFixtureHtml();
 	const ids = [...html.matchAll(/<section class="rpt-section" id="([^"]+)">/g)].map((m) => m[1]);
-	for (const id of ["at-a-glance", "stats", "projects", "style", "what-works", "friction", "suggestions", "horizon", "model-efficiency"])
+	for (const id of ["at-a-glance", "action-list", "projects", "style", "what-works", "friction", "suggestions", "horizon"])
 		assert.ok(ids.includes(id), `missing section ${id}`);
-	assert.doesNotMatch(html, /<details\b|<summary\b/);
+});
+
+test("heavy sections (By the Numbers, Model Spend) are collapsed <details> without the open attribute", async () => {
+	const html = await buildFixtureHtml();
+	for (const id of ["stats", "model-efficiency"]) {
+		assert.match(html, new RegExp(`<details class="rpt-section" id="${id}">\\s*<summary><h2>`), `${id} is not a collapsed <details>`);
+		assert.doesNotMatch(html, new RegExp(`<details[^>]*id="${id}"[^>]*\\bopen\\b`), `${id} must not default open`);
+	}
+});
+
+test("nested heavy chart blocks (Numbers, Flagged Sessions) are also collapsed <details>", async () => {
+	const html = await buildFixtureHtml();
+	assert.match(html, /<details class="nested-collapse" id="numbers"[^>]*>\s*<summary><h3>Languages, time of day, response times<\/h3>/);
+	assert.doesNotMatch(html, /<details[^>]*id="numbers"[^>]*\bopen\b/);
 });
 
 test("changes render as a non-collapsible 'Since Last Report' block inside Summary, not a standalone section", async () => {
@@ -115,9 +128,9 @@ test("an item with no evidence_sessions renders no evidence line", async () => {
 
 test("languages, response-time and time-of-day charts follow the primary charts in the Stats section (D21)", async () => {
 	const html = await buildFixtureHtml();
-	const numbersIdx = html.indexOf('<div id="numbers">');
+	const numbersIdx = html.indexOf('id="numbers"');
 	assert.ok(numbersIdx > -1, "numbers block not found");
-	const inside = html.slice(numbersIdx, html.indexOf("</section>", numbersIdx));
+	const inside = html.slice(numbersIdx, html.indexOf("</details>", numbersIdx));
 	for (const title of ["Languages", "Response Times", "Time of Day"]) assert.match(inside, new RegExp(`<h3>${title}`));
 	const before = html.slice(html.indexOf('id="stats"'), numbersIdx);
 	for (const title of ["Goal Categories", "Outcomes", "Satisfaction", "Top Tools", "Friction Types", "Tool Errors"])
