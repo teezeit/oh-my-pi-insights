@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aggregateData, excludeToolingSessions, type SessionFacets } from "../index.ts";
+import { aggregateData, defaultExcludeProjects, excludeToolingSessions, type SessionFacets } from "../index.ts";
 import { meta } from "./helpers.ts";
 
 // B11: this tool's own development sessions (scanner port, friction-analysis
@@ -12,7 +12,7 @@ import { meta } from "./helpers.ts";
 
 test("excludeToolingSessions drops sessions whose project matches the exclude list", () => {
 	const metas = [
-		meta({ session_id: "a", project_path: "/Users/me/projects/peach" }),
+		meta({ session_id: "a", project_path: "/Users/me/projects/webapp" }),
 		meta({ session_id: "b", project_path: "/Users/me/code/oh-my-pi-insights" }),
 	];
 	const filtered = excludeToolingSessions(metas, ["oh-my-pi-insights"]);
@@ -29,6 +29,17 @@ test("excludeToolingSessions matches a worktree path under the excluded repo nam
 		meta({ session_id: "a", project_path: "/Users/me/code/oh-my-pi-insights/.orca/worktrees/insights-b-advice" }),
 	];
 	assert.deepEqual(excludeToolingSessions(metas, ["oh-my-pi-insights"]), []);
+});
+
+test("defaultExcludeProjects derives the exclude list from an injected extension dir, so any clone of this tool excludes its own sessions", () => {
+	const injectedRoot = "/Users/someone-else/code/their-fork-of-this-tool";
+	const metas = [
+		meta({ session_id: "a", project_path: "/Users/someone-else/projects/webapp" }),
+		meta({ session_id: "b", project_path: injectedRoot }),
+		meta({ session_id: "c", project_path: `${injectedRoot}/.orca/worktrees/insights-b-advice` }),
+	];
+	const filtered = excludeToolingSessions(metas, defaultExcludeProjects(injectedRoot));
+	assert.deepEqual(filtered.map((m) => m.session_id), ["a"]);
 });
 
 test("a tooling session's cost/sessions count stay in totals; its worst turn is dropped from worst_turns_corpus", () => {
@@ -58,7 +69,7 @@ test("a tooling session's cost/sessions count stay in totals; its worst turn is 
 	const metas = [
 		meta({
 			session_id: "a",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			total_cost: 0.1,
 			worst_turns: [userTurn],
 		}),
@@ -84,7 +95,7 @@ test("a tooling session's cost/sessions count stay in totals; its worst turn is 
 
 test("a tooling session's facets (friction, session summaries) are excluded even though it counts toward totals", () => {
 	const metas = [
-		meta({ session_id: "a", project_path: "/Users/me/projects/peach" }),
+		meta({ session_id: "a", project_path: "/Users/me/projects/webapp" }),
 		meta({ session_id: "b", project_path: "/Users/me/code/oh-my-pi-insights" }),
 	];
 	const facetsMap = new Map<string, SessionFacets>([
@@ -129,7 +140,7 @@ test("a tooling session's facets (friction, session summaries) are excluded even
 
 test("a tooling session is excluded from worst_cache_sessions (suggestion evidence)", () => {
 	const metas = [
-		meta({ session_id: "a", project_path: "/Users/me/projects/peach", input_tokens: 60_000, cache_read_tokens: 1_000 }),
+		meta({ session_id: "a", project_path: "/Users/me/projects/webapp", input_tokens: 60_000, cache_read_tokens: 1_000 }),
 		meta({ session_id: "b", project_path: "/Users/me/code/oh-my-pi-insights", input_tokens: 60_000, cache_read_tokens: 1_000 }),
 	];
 	const agg = aggregateData(metas, new Map(), ["oh-my-pi-insights"]);

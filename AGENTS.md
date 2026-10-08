@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`omp-insights` is an omp extension that registers `/insights`. It scans local session logs (omp: `~/.omp/agent/sessions`, or Claude Code: `~/.claude/projects` via `--source claude`), extracts deterministic stats (spend, tokens, tool errors, aborts, model switches), optionally runs LLM facet/section prompts, and writes a self-contained HTML report plus optional Markdown export and an audit manifest.
+`omp-insights` is an omp extension that registers `/insights`. It scans local session logs (omp: the resolved agent dir's `sessions/` subdir, default `~/.omp/agent/sessions` but honoring `OMP_PROFILE`/`PI_PROFILE`/`PI_CODING_AGENT_DIR`, see `resolveAgentDir` in `src/cache.ts`; or Claude Code: `~/.claude/projects` via `--source claude`), extracts deterministic stats (spend, tokens, tool errors, aborts, model switches), optionally runs LLM facet/section prompts, and writes a self-contained HTML report plus optional Markdown export and an audit manifest.
 
 Port of Observal/pi-insights (Pi harness) to omp. AGPL-3.0-only; keep SPDX headers in `index.ts`. Versioning restarted at 0.1.0 for the fork.
 
@@ -20,8 +20,8 @@ Port of Observal/pi-insights (Pi harness) to omp. AGPL-3.0-only; keep SPDX heade
 | `src/aggregate.ts` | Corpus aggregation, 10-day decay weighting, concurrency, tooling-session exclusion | `aggregateData`, `detectConcurrentSessions`, `excludeToolingSessions` |
 | `src/temporal.ts` | Week-over-week deltas, anomalies, trajectory | `computeTemporalData` |
 | `src/harness.ts` | Harness-change detection via persisted run-to-run snapshots (config/model-roles/skills/hooks/AGENTS.md, separate from temporal.ts) | `detectHarnessChanges`, `gatherHarnessSnapshot`, `loadHarnessSnapshot`, `saveHarnessSnapshot` |
-| `src/cache.ts` | session-meta / facets / sections caches | `loadCachedMeta`, `saveMeta`, `loadCachedSections`, `pruneSections` |
-| `src/context.ts` | User context from `~/.omp/agent` (config.yml incl. memory backend, skills, managed-skills, extensions) | `gatherUserContext`, `parseSimpleYaml` |
+| `src/cache.ts` | session-meta / facets / sections caches, agent-dir resolution | `loadCachedMeta`, `saveMeta`, `loadCachedSections`, `pruneSections`, `resolveAgentDir` |
+| `src/context.ts` | User context from the resolved agent dir (config.yml incl. memory backend, autolearn, skills, managed-skills, extensions) | `gatherUserContext`, `parseSimpleYaml` |
 | `src/model.ts` | Shells out to `omp -p` | `callModel`, `parseJsonFromResponse` |
 | `src/prompts.ts` | Facet/section/synthesis prompts | `FACET_EXTRACT_PROMPT`, `buildFeaturesReference`, `filterSuggestions`, `filterByEvidence`, `buildSectionPrompts` |
 | `src/render/html.ts`, `src/render/md.ts` | Report output | `generateHTML`, `generateMarkdown` |

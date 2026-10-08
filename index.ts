@@ -47,6 +47,7 @@ import {
 	loadCachedMeta,
 	loadLatestSections,
 	pruneSections,
+	resolveAgentDir,
 	REPORT_MD_PATH,
 	REPORT_PATH,
 	saveFacets,
@@ -200,7 +201,15 @@ function resolveProjectList(
 // signals meant to reflect the user's other work; excluded by default,
 // overridable with --exclude-projects/OMP_INSIGHTS_EXCLUDE_PROJECTS (comma
 // separated, substring-matched against project_path; "none" opts out entirely).
-const DEFAULT_EXCLUDE_PROJECTS = ["oh-my-pi-insights"];
+// Why import.meta.dirname instead of a hardcoded repo name: any user's clone
+// of this extension lives at a path of their own choosing, so the only name
+// that reliably identifies "this tool's own sessions" is wherever this file
+// actually runs from, not the upstream repo's directory name. Split out as a
+// pure function of the dir so tests can inject a fake one.
+function defaultExcludeProjects(extensionDir: string): string[] {
+	return [extensionDir];
+}
+const DEFAULT_EXCLUDE_PROJECTS = defaultExcludeProjects(import.meta.dirname);
 
 // ─── Main Command Handler ─────────────────────────────────────────────────────
 
@@ -766,8 +775,22 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	ctx.ui.notify(`✅ Report saved: ${REPORT_PATH}`, "success");
 
 	if (!noOpen) {
-		const opener = platform() === "darwin" ? "open" : "xdg-open";
-		execFile(opener, [REPORT_PATH]).catch(() => {
+		// Why: `start` is a cmd builtin, not an executable, and its first quoted
+		// arg is treated as the window title, so an empty title ("") is required
+		// or a path containing spaces gets misparsed as the title instead.
+		let opener: string;
+		let openerArgs: string[];
+		if (platform() === "darwin") {
+			opener = "open";
+			openerArgs = [REPORT_PATH];
+		} else if (platform() === "win32") {
+			opener = "cmd";
+			openerArgs = ["/c", "start", "", REPORT_PATH];
+		} else {
+			opener = "xdg-open";
+			openerArgs = [REPORT_PATH];
+		}
+		execFile(opener, openerArgs).catch(() => {
 			ctx.ui.notify(`Open manually: ${REPORT_PATH}`, "info");
 		});
 	}
@@ -801,11 +824,14 @@ export {
 	createLimiter,
 	aggregateData,
 	buildFeaturesReference,
+	buildSectionPrompts,
 	buildSessionMeta,
+	buildSharedDataBlock,
 	computeTemporalData,
 	createOmpSessionSource,
 	dedupeIncidents,
 	dedupeRecommendations,
+	defaultExcludeProjects,
 	detectConcurrentSessions,
 	detectHarnessChanges,
 	enforceBudget,
@@ -830,7 +856,9 @@ export {
 	loadHarnessSnapshot,
 	parseSimpleYaml,
 	readUsage,
+	resolveAgentDir,
 	resolveLimit,
+	resolveProjectList,
 	saveHarnessSnapshot,
 	toolErrorCategory,
 };

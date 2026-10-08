@@ -88,7 +88,7 @@ const SESSION = {
 	version: 3,
 	id: "01a07af7-bbe1-77b4-9c0e-e1295ebb1e38",
 	timestamp: "2026-09-07T10:00:00.000Z",
-	cwd: "/Users/me/projects/peach",
+	cwd: "/Users/me/projects/webapp",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ test("two turns in one session with different tool_calls; worst_turns has highes
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -140,7 +140,7 @@ test("exploration_before_first_mutation: read, grep, edit, read -> 2 calls, muta
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -175,7 +175,7 @@ test("exploration_before_first_mutation: read, grep only -> 2 calls, mutated fal
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -208,7 +208,7 @@ test("wall_sec uses completedAt when present, falls back to envelope timestamp",
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -233,7 +233,7 @@ test("wall_sec uses completedAt when present, falls back to envelope timestamp",
 		{
 			id: "other-id",
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -262,7 +262,7 @@ test("prompt truncation to 120 chars", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -291,7 +291,7 @@ test("aborted flag true when turn's last assistant has stopReason 'aborted'", ()
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -385,7 +385,7 @@ test("start_ts is ISO timestamp of human message that starts the turn", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -413,7 +413,7 @@ test("cost is sum of assistant usage.cost.total in the turn", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -443,7 +443,7 @@ test("llm_round_trips counts assistant messages in the turn", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -474,7 +474,7 @@ test("turn_p50 and turn_p90 compute percentiles across all turns", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),

@@ -278,6 +278,7 @@ export function aggregateData(
 		worst_turns_corpus: [],
 		tool_duration_by_tool: {},
 		tool_time_share: [],
+		tool_calls_with_intent: 0,
 		cache_hit_ratio: 0,
 		worst_cache_sessions: [],
 		most_churned_files: [],
@@ -362,6 +363,7 @@ export function aggregateData(
 		agg.total_compactions += meta.compactions;
 		agg.total_steering += meta.steering_messages;
 		mergeRecord(agg.tool_calls_by_tool, meta.tool_calls_by_tool);
+		agg.tool_calls_with_intent += meta.tool_calls_with_intent;
 		mergeRecord(agg.tool_errors_by_tool, meta.tool_errors_by_tool);
 		mergeRecord(agg.tool_not_found, meta.tool_not_found);
 		mergeRecord(agg.error_classes, meta.error_classes);

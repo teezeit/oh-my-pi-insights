@@ -133,7 +133,7 @@ export function detectHarnessChanges(
 
 async function readMemoryBackend(cfg: ReturnType<typeof parseSimpleYaml>): Promise<string> {
 	const backend = yamlMap(cfg, "memory")?.backend;
-	return typeof backend === "string" && backend ? backend : "learn";
+	return typeof backend === "string" && backend ? backend : "off";
 }
 
 /** Reads the live harness state from an omp agent dir (defaults to the real one; tests pass a temp dir). */

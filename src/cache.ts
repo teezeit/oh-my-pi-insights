@@ -11,7 +11,23 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SessionFacets, SessionMeta } from "./types.ts";
 
-export const AGENT_DIR = join(homedir(), ".omp", "agent");
+/**
+ * omp's agent dir: `OMP_PROFILE`/`PI_PROFILE` select a named profile under
+ * `~/.omp/profiles/<name>/agent`; the literal "default" (or no env set)
+ * means the default profile, where `PI_CODING_AGENT_DIR` relocates the dir.
+ * Named profiles ignore `PI_CODING_AGENT_DIR`: that override only exists
+ * for the default profile's agent dir.
+ */
+export function resolveAgentDir(
+	env: Record<string, string | undefined>,
+	home: string,
+): string {
+	const profile = env.OMP_PROFILE || env.PI_PROFILE || "default";
+	if (profile !== "default") return join(home, ".omp", "profiles", profile, "agent");
+	return env.PI_CODING_AGENT_DIR || join(home, ".omp", "agent");
+}
+
+export const AGENT_DIR = resolveAgentDir(process.env, homedir());
 export const SESSIONS_DIR = join(AGENT_DIR, "sessions");
 export const DATA_DIR = join(AGENT_DIR, "usage-data");
 export const FACETS_DIR = join(DATA_DIR, "facets");
@@ -35,7 +51,7 @@ export async function ensureDirs(): Promise<void> {
 // because the cache hit and the backfill made the miss invisible. A schema
 // version is the correct fix; bump it whenever SessionMeta gains a field
 // that must not read as a false zero.
-export const META_SCHEMA_VERSION = 4;
+export const META_SCHEMA_VERSION = 5;
 
 export async function loadCachedMeta(
 	sourceName: string,

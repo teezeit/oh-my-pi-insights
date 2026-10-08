@@ -197,7 +197,7 @@ export function generateMarkdown(
 		lines.push("");
 	}
 	if (agg.tool_time_share.length) {
-		lines.push("**Per-tool wall clock** (`tool_execution_start` paired with the matching `toolResult` by `toolCallId`; `intent` is only recorded before 2026-10-07, when `tools.intentTracing` was disabled, so it is not shown):");
+		lines.push(`**Per-tool wall clock** (\`tool_execution_start\` paired with the matching \`toolResult\` by \`toolCallId\`${agg.tool_calls_with_intent > 0 ? `; ${agg.tool_calls_with_intent} calls also carry an \`intent\` field` : ""}):`);
 		lines.push(`| Tool | Calls | p50 | p90 | Share of Tool Time |`);
 		lines.push(`|------|-------|-----|-----|--------------------|`);
 		for (const t of agg.tool_time_share.slice(0, 10)) {

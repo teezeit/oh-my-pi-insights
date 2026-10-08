@@ -130,7 +130,7 @@ test("gatherHarnessSnapshot reads memory backend, model roles, skills, hooks and
 		"utf-8",
 	);
 	await mkdir(join(agentDir, "skills", "orca-cli"), { recursive: true });
-	await mkdir(join(agentDir, "managed-skills", "landing-peach-backend-change"), { recursive: true });
+	await mkdir(join(agentDir, "managed-skills", "landing-webapp-backend-change"), { recursive: true });
 	await mkdir(join(agentDir, "hooks", "pre"), { recursive: true });
 	await writeFile(join(agentDir, "hooks", "pre", "eval.ts"), "", "utf-8");
 	await writeFile(join(agentDir, "AGENTS.md"), "# rules\n", "utf-8");
@@ -139,17 +139,17 @@ test("gatherHarnessSnapshot reads memory backend, model roles, skills, hooks and
 
 	assert.equal(snap.memory_backend, "mnemopi");
 	assert.deepEqual(snap.model_roles, { default: "anthropic/claude-opus-5" });
-	assert.deepEqual(snap.skills.sort(), ["landing-peach-backend-change", "orca-cli"]);
+	assert.deepEqual(snap.skills.sort(), ["landing-webapp-backend-change", "orca-cli"]);
 	assert.deepEqual(snap.hooks, ["pre/eval.ts"]);
 	assert.ok(snap.config_hash.length > 0);
 	assert.ok(snap.agents_md_hash && snap.agents_md_hash.length > 0);
 });
 
-test("gatherHarnessSnapshot defaults to learn / empty state when nothing is set up", async () => {
+test("gatherHarnessSnapshot defaults to omp's memory.backend default (off) / empty state when nothing is set up", async () => {
 	const emptyAgentDir = await mkdtemp(join(tmpdir(), "omp-insights-harness-empty-"));
 	try {
 		const snap = await gatherHarnessSnapshot(emptyAgentDir);
-		assert.equal(snap.memory_backend, "learn");
+		assert.equal(snap.memory_backend, "off");
 		assert.deepEqual(snap.model_roles, {});
 		assert.deepEqual(snap.skills, []);
 		assert.deepEqual(snap.hooks, []);

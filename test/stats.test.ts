@@ -68,7 +68,7 @@ const SESSION = {
 	version: 3,
 	id: "01a07af7-bbe1-77b4-9c0e-e1295ebb1e38",
 	timestamp: "2026-09-07T10:00:00.000Z",
-	cwd: "/Users/me/projects/peach",
+	cwd: "/Users/me/projects/webapp",
 };
 
 test("readUsage reads the recorded cost and never invents one", () => {
@@ -110,7 +110,7 @@ test("cost comes from both assistant messages and model_usage records", () => {
 	assert.equal(stats.modelUsage["claude-opus-5"]?.cost, 1.5);
 	assert.equal(stats.modelUsage["claude-haiku-4-5"]?.cost, 0.25);
 	assert.equal(stats.sessionId, SESSION.id);
-	assert.equal(stats.projectPath, "/Users/me/projects/peach");
+	assert.equal(stats.projectPath, "/Users/me/projects/webapp");
 });
 
 test("tool errors count the isError flag, not error-shaped output text", () => {

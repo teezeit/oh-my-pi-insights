@@ -418,10 +418,11 @@ export function extractSessionStats(entries: AnyEntry[]) {
 	let turnLastToolResultTs: number | null = null;
 	const editsByFile: Record<string, number> = {};
 	// toolCallId -> startedAt(ms); paired against the matching toolResult to
-	// get per-tool wall-clock. `intent` is read-only-to-caveat: it goes
-	// empty after tools.intentTracing was disabled, so it is deliberately
-	// never stored here.
+	// get per-tool wall-clock. `intent` is only present when intent tracing is
+	// turned on, so its presence is counted (never assumed from a fixed date)
+	// and the prose only mentions it when the corpus actually carries it.
 	const toolCallStarts = new Map<string, { toolName: string; startedAtMs: number }>();
+	let toolCallsWithIntent = 0;
 	const toolDurationSamples: Record<string, number[]> = {};
 
 	/**
@@ -534,6 +535,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 			if (toolCallId && toolNameStart && !Number.isNaN(startedAtMs)) {
 				toolCallStarts.set(toolCallId, { toolName: toolNameStart, startedAtMs });
 			}
+			if (typeof data?.intent === "string" && data.intent) toolCallsWithIntent++;
 			continue;
 		}
 		if (entry.type === "model_usage") {
@@ -865,6 +867,7 @@ export function extractSessionStats(entries: AnyEntry[]) {
 		turns,
 		edits_by_file: editsByFile,
 		tool_duration_samples: toolDurationSamples,
+		tool_calls_with_intent: toolCallsWithIntent,
 	};
 }
 
@@ -1031,6 +1034,7 @@ export function buildSessionMeta(
 		worst_turns: worstTurns,
 		tool_duration_by_tool: toolDurationByTool,
 		tool_time_share: toolTimeShare,
+		tool_calls_with_intent: stats.tool_calls_with_intent,
 		cache_hit_ratio: cacheHitRatio,
 		edits_by_file: editsByFileCapped,
 	};

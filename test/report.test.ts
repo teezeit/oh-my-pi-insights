@@ -185,7 +185,7 @@ test("the markdown report matches the golden file", async () => {
 	const userCtx: UserContext = {
 		existing_agents_md_rules: ["never commit without running the tests"],
 		installed_skills: ["orca-cli"],
-		installed_managed_skills: ["landing-peach-backend-change", "make-it-work"],
+		installed_managed_skills: ["landing-webapp-backend-change", "make-it-work"],
 		installed_extensions: ["orca-agent-status"],
 		installed_hooks: ["pre/eval.ts"],
 		mcp_servers: ["atlassian", "outline"],
@@ -193,6 +193,7 @@ test("the markdown report matches the golden file", async () => {
 		fallback_chains: { default: ["anthropic/claude-opus-5", "github-copilot/gpt-5.6-terra"] },
 		default_model: "anthropic/claude-opus-5",
 		memory_backend: "learn",
+		autolearn_enabled: false,
 		config_yml_flat: {},
 	};
 

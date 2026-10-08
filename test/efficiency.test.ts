@@ -113,7 +113,7 @@ const SESSION = {
 	version: 3,
 	id: "01a07af7-bbe1-77b4-9c0e-e1295ebb1e38",
 	timestamp: "2026-09-07T10:00:00.000Z",
-	cwd: "/Users/me/projects/peach",
+	cwd: "/Users/me/projects/webapp",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ test("two tool starts paired by toolCallId: bash 4s, read 1s -> duration_by_tool
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -169,7 +169,7 @@ test("tool_execution_start with no matching toolResult is ignored", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -203,7 +203,7 @@ test("cache_hit_ratio for one assistant message ≈ 100/110", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -229,7 +229,7 @@ test("cache_hit_ratio is 0 when usage has zero input and cacheRead", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -255,7 +255,7 @@ test("edits_by_file counts edit/write toolCall blocks with paths", () => {
 		{
 			id: SESSION.id,
 			path: "/sessions/proj/ts_id.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -301,7 +301,7 @@ test("most_churned_files aggregates edits across sessions, top 10 by edits desc"
 		{
 			id: "session-1",
 			path: "/sessions/proj/s1.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-07T10:00:00.000Z"),
 			modified: new Date("2026-09-07T10:30:00.000Z"),
@@ -398,7 +398,7 @@ test("model price comparison is cache-invariant: equal list prices compare equal
 			{
 				id,
 				path: `/sessions/proj/${id}.jsonl`,
-				project_path: "/Users/me/projects/peach",
+				project_path: "/Users/me/projects/webapp",
 				size: 1,
 				created: new Date(at),
 				modified: new Date(at + 60_000),

@@ -9,7 +9,7 @@ export function meta(overrides: Partial<SessionMeta>): SessionMeta {
 		{
 			id: "00000000-0000-7000-0000-000000000000",
 			path: "/sessions/proj/log.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: new Date("2026-09-01T09:00:00.000Z"),
 			modified: new Date("2026-09-01T09:30:00.000Z"),
@@ -19,5 +19,5 @@ export function meta(overrides: Partial<SessionMeta>): SessionMeta {
 		[],
 		[],
 	);
-	return { ...base, project_path: "/Users/me/projects/peach", ...overrides };
+	return { ...base, project_path: "/Users/me/projects/webapp", ...overrides };
 }

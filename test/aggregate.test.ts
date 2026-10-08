@@ -56,7 +56,7 @@ test("a session left open counts only its runs of activity, not the idle gap", (
 		{
 			id: "idle",
 			path: "/sessions/proj/idle.jsonl",
-			project_path: "/Users/me/projects/peach",
+			project_path: "/Users/me/projects/webapp",
 			size: 1,
 			created: at(1, 9),
 			modified: at(1, 13, 10),
@@ -64,7 +64,7 @@ test("a session left open counts only its runs of activity, not the idle gap", (
 			signature: "1:1",
 		},
 		[
-			{ type: "session", version: 3, id: "idle", timestamp: local(1, 9), cwd: "/Users/me/projects/peach" },
+			{ type: "session", version: 3, id: "idle", timestamp: local(1, 9), cwd: "/Users/me/projects/webapp" },
 			msg(at(1, 9), "user"),
 			msg(at(1, 9, 5), "assistant"),
 			msg(at(1, 13), "user"),

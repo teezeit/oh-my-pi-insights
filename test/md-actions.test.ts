@@ -37,6 +37,7 @@ const userCtx: UserContext = {
 	installed_hooks: [],
 	mcp_servers: [],
 	memory_backend: "learn",
+	autolearn_enabled: false,
 	model_roles: {},
 	fallback_chains: {},
 	default_model: "",

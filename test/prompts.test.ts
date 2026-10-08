@@ -17,32 +17,58 @@ function ctx(overrides: Partial<UserContext> = {}): UserContext {
 		fallback_chains: {},
 		default_model: "",
 		config_yml_flat: {},
-		memory_backend: "learn",
+		memory_backend: "off",
+		autolearn_enabled: false,
 		...overrides,
 	};
 }
 
 // B8: the features reference is built from live state, not a hardcoded Pi-shaped list.
 
-test("buildFeaturesReference describes the learn tool when memory.backend is unset", () => {
+test("buildFeaturesReference: no memory backend enabled (off, the default) says how to enable one", () => {
 	const ref = buildFeaturesReference(ctx());
-	assert.match(ref, /learn tool/i);
-	assert.doesNotMatch(ref, /retain\/recall/i);
+	assert.match(ref, /no memory backend is enabled/i);
+	assert.match(ref, /memory\.backend/i);
+	assert.match(ref, /local.*hindsight.*mnemopi/is);
+	assert.doesNotMatch(ref, /\blearn tool\b/i);
 });
 
-test("buildFeaturesReference describes retain/recall when memory.backend is mnemopi", () => {
+test("buildFeaturesReference: local backend describes memory://root, not retain/recall", () => {
+	const ref = buildFeaturesReference(ctx({ memory_backend: "local" }));
+	assert.match(ref, /memory:\/\/root/i);
+	assert.doesNotMatch(ref, /\bretain\b/i);
+	assert.doesNotMatch(ref, /\blearn tool\b/i);
+});
+
+test("buildFeaturesReference: mnemopi backend describes retain/recall/reflect/memory_edit, not the learn tool", () => {
 	const ref = buildFeaturesReference(
-		ctx({ memory_backend: "mnemopi", installed_skills: ["landing-peach-backend-change"] }),
+		ctx({ memory_backend: "mnemopi", installed_skills: ["landing-webapp-backend-change"] }),
 	);
 	assert.match(ref, /retain/i);
 	assert.match(ref, /recall/i);
+	assert.match(ref, /memory_edit/i);
 	assert.doesNotMatch(ref, /\blearn tool\b/i);
+});
+
+test("buildFeaturesReference: learn/manage_skill are only mentioned when autolearn is on", () => {
+	const autolearnOff = buildFeaturesReference(ctx({ memory_backend: "mnemopi" }));
+	assert.doesNotMatch(autolearnOff, /\blearn tool\b/i);
+	assert.doesNotMatch(autolearnOff, /manage_skill/i);
+
+	const autolearnOn = buildFeaturesReference(ctx({ memory_backend: "mnemopi", autolearn_enabled: true }));
+	assert.match(autolearnOn, /\blearn tool\b/i);
+	assert.match(autolearnOn, /manage_skill/i);
+
+	// Off backend: manage_skill does not need a backend, but the learn tool does.
+	const offWithAutolearn = buildFeaturesReference(ctx({ autolearn_enabled: true }));
+	assert.doesNotMatch(offWithAutolearn, /\blearn tool\b/i);
+	assert.match(offWithAutolearn, /manage_skill/i);
 });
 
 // Suggestions naming an unavailable feature or an installed skill (name or
 // close match) must be dropped before render.
 
-test("filterSuggestions drops a learn-tool suggestion when the backend is mnemopi", () => {
+test("filterSuggestions drops a learn-tool suggestion when autolearn is off", () => {
 	const userCtx = ctx({ memory_backend: "mnemopi" });
 	const suggestions = {
 		features_to_try: [
@@ -69,9 +95,37 @@ test("filterSuggestions drops a learn-tool suggestion when the backend is mnemop
 	);
 });
 
+test("filterSuggestions drops a retain/recall suggestion when the backend is off or local", () => {
+	const suggestion = {
+		features_to_try: [
+			{
+				feature: "Memory (mnemopi: retain/recall)",
+				one_liner: "record durable facts",
+				why_for_you: "you repeat yourself across sessions",
+				example: "retain that the deploy key lives in 1Password",
+				evidence_sessions: ["s1", "s2"],
+			},
+			{
+				feature: "Subagents (task tool)",
+				one_liner: "parallel research",
+				why_for_you: "you map unfamiliar code a lot",
+				example: "task(...)",
+				evidence_sessions: ["s1", "s2"],
+			},
+		],
+	};
+	for (const backend of ["off", "local"]) {
+		const filtered = filterSuggestions(suggestion, ctx({ memory_backend: backend }));
+		assert.deepEqual(
+			filtered.features_to_try!.map((f) => f.feature),
+			["Subagents (task tool)"],
+		);
+	}
+});
+
 test("filterSuggestions drops a suggestion naming an already-installed skill (close match)", () => {
 	const userCtx = ctx({
-		installed_managed_skills: ["orchestrating-peach-ticket-wave-with-orca-omp-workers"],
+		installed_managed_skills: ["orchestrating-webapp-ticket-wave-with-orca-omp-workers"],
 	});
 	const suggestions = {
 		usage_patterns: [
@@ -99,7 +153,7 @@ test("filterSuggestions drops a suggestion naming an already-installed skill (cl
 });
 
 test("filterSuggestions keeps unrelated skill suggestions", () => {
-	const userCtx = ctx({ installed_managed_skills: ["landing-peach-backend-change"] });
+	const userCtx = ctx({ installed_managed_skills: ["landing-webapp-backend-change"] });
 	const suggestions = {
 		stop_doing: [
 			{

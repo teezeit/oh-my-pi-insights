@@ -72,6 +72,7 @@ const baseUserCtx: UserContext = {
 	fallback_chains: {},
 	default_model: "",
 	memory_backend: "learn",
+	autolearn_enabled: false,
 	config_yml_flat: {},
 };
 

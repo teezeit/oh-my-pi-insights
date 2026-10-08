@@ -51,7 +51,7 @@ Out-of-band model calls (titles, auto-thinking, advisor prompts) inside that tot
 | Project | Ratio | Tokens | Cost |
 |---------|-------|--------|------|
 | jar | 0.0% | 500k | $4.00 |
-| peach | 96.4% | 41.5M | $6.00 |
+| webapp | 96.4% | 41.5M | $6.00 |
 
 ## 🔧 Tools
 | Tool | Calls |
@@ -72,7 +72,7 @@ Languages: TypeScript (12), Go (5), Markdown (4)
 
 | Project | Sessions |
 |---------|----------|
-| peach | 1 |
+| webapp | 1 |
 | jar | 1 |
 
 ## 🔍 Corpus

@@ -125,9 +125,9 @@ wrong, get corrected, or work too long for too little":
 
 Two caveats:
 
-- `intent` on `tool_execution_start` is only recorded before 2026-10-07; omp
-  disabled `tools.intentTracing` that day, so sessions after it carry no
-  intent. The report never renders an intent column for this reason.
+- `intent` on `tool_execution_start` is only present when omp's
+  `tools.intentTracing` was on for that session. The report counts tool calls
+  carrying intent and mentions intent only when that count is above zero.
 - The Claude Code source (`--source claude`) has no `steering`,
   `ttsr_injection`, `reset_boundary` or `tool_execution_start` equivalent, so
   interruption rate, TTSR injections, reset boundaries and per-tool wall

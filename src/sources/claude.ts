@@ -347,6 +347,8 @@ export function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMe
 		worst_turns: [],
 		tool_duration_by_tool: {},
 		tool_time_share: [],
+		// Why 0: Claude Code's log has no tool_execution_start/intent record at all.
+		tool_calls_with_intent: 0,
 		cache_hit_ratio: 0,
 		edits_by_file: {},
 	};

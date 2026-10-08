@@ -143,6 +143,8 @@ export type SessionMeta = {
 	// session produced are a transient detail of extraction.
 	tool_duration_by_tool: Record<string, { calls: number; total_sec: number; p50_sec: number; p90_sec: number }>;
 	tool_time_share: Array<{ tool: string; total_sec: number; share: number }>;
+	/** Count of tool_execution_start records that carried a non-empty "intent" field; omp only writes it when intent tracing is turned on, so a corpus with none must never claim an intent column exists. */
+	tool_calls_with_intent: number;
 	// ── derived ratios (Gap 5) ──
 	cache_hit_ratio: number;
 	// Capped to the top 20 paths by edit count; feeds files_modified's .size
@@ -297,6 +299,8 @@ export type AggregatedData = {
 	// for that tool), not a true recomputation over every individual call.
 	tool_duration_by_tool: Record<string, { calls: number; total_sec: number; p50_sec: number; p90_sec: number }>;
 	tool_time_share: Array<{ tool: string; total_sec: number; share: number }>;
+	/** Sum of SessionMeta.tool_calls_with_intent across the corpus; >0 gates mentioning "intent" anywhere in the prose, instead of a hardcoded date claim. */
+	tool_calls_with_intent: number;
 	// ── derived ratios (Gap 5) ──
 	// Token-weighted: recomputed from the already-summed totals, not an
 	// average of per-session ratios.
@@ -318,8 +322,10 @@ export type UserContext = {
 	model_roles: Record<string, string>;
 	fallback_chains: Record<string, string[]>;
 	default_model: string;
-	/** "learn" (omp's built-in memory tool) unless ~/.omp/agent/config.yml sets memory.backend to something else (e.g. "mnemopi"). Drives which memory feature the suggestions prompt is allowed to recommend. */
+	/** "off" (default) unless ~/.omp/agent/config.yml sets memory.backend to "local", "hindsight" or "mnemopi". Drives which memory feature the suggestions prompt is allowed to recommend. */
 	memory_backend: string;
+	/** autolearn.enabled from config.yml; gates whether the learn/manage_skill tools exist (see omp docs). */
+	autolearn_enabled: boolean;
 	/** The full parsed config.yml, flattened to dotted-path -> scalar leaves (see src/render/configDiff.ts's flattenYaml); arrays omitted. Lets a config_additions item's addition be diffed against what's actually on disk instead of rendered as a raw snippet. */
 	config_yml_flat: Record<string, string>;
 };

@@ -126,7 +126,8 @@ export async function gatherUserContext(): Promise<UserContext> {
 		model_roles: {},
 		fallback_chains: {},
 		default_model: "",
-		memory_backend: "learn",
+		memory_backend: "off",
+		autolearn_enabled: false,
 		config_yml_flat: {},
 	};
 
@@ -173,11 +174,17 @@ export async function gatherUserContext(): Promise<UserContext> {
 				if (Array.isArray(list)) ctx.fallback_chains[role] = list;
 			}
 		}
-		// Absent means the default built-in memory tool, named "learn" in the
-		// features reference; only an explicit override (e.g. mnemopi) changes it.
+		// Absent means no memory backend is enabled (memory.backend defaults to
+		// "off"); an explicit override ("local", "hindsight" or "mnemopi")
+		// changes what the features reference and filterSuggestions allow.
 		const memory = yamlMap(cfg, "memory");
 		const backend = memory?.backend;
 		if (typeof backend === "string" && backend) ctx.memory_backend = backend;
+		// The `learn`/`manage_skill` tools exist only when autolearn.enabled is
+		// true (any backend for manage_skill; learn additionally needs a backend
+		// other than "off", see memoryFeatureBlock in src/prompts.ts).
+		const autolearn = yamlMap(cfg, "autolearn");
+		ctx.autolearn_enabled = autolearn?.enabled === "true";
 	} catch {}
 
 	// Both skill dirs matter: a suggestion recommending an already-installed

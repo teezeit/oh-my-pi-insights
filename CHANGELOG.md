@@ -190,6 +190,32 @@ upstream verbatim; every entry below is a diff against it.
   the synthesis prompt) addressed the reader in the third person
   ("the user", "for this user with Pi") in places; rewritten to second
   person ("you") to match the rest of the report.
+- **Generic memory advice.** `UserContext.memory_backend` now defaults to
+  `"off"` (previously `"learn"`, which assumed omp's built-in tool was
+  always on), and a new `UserContext.autolearn_enabled` field reads
+  `autolearn.enabled` from `config.yml`. `buildFeaturesReference`'s memory
+  block and `filterSuggestions` now describe and gate `retain`/`recall`/
+  `reflect`/`memory_edit` (`hindsight`/`mnemopi`), `memory://root`
+  (`local`) and `learn`/`manage_skill` (only when autolearn is on) instead
+  of one hardcoded "learn tool" story.
+- **Agent dir resolution.** `AGENT_DIR` (`src/cache.ts`) is now produced by
+  a pure `resolveAgentDir(env, homedir)`, honoring `OMP_PROFILE`/
+  `PI_PROFILE` (named profiles live under `~/.omp/profiles/<name>/agent`)
+  and `PI_CODING_AGENT_DIR` (default profile only), instead of hardcoding
+  `~/.omp/agent`.
+- **Tooling-session exclusion** (`DEFAULT_EXCLUDE_PROJECTS`) now derives
+  from this extension's own repo root (`import.meta.dirname`) instead of
+  the hardcoded name `"oh-my-pi-insights"`, so any clone of this tool
+  excludes its own dev sessions by default; `--exclude-projects` /
+  `OMP_INSIGHTS_EXCLUDE_PROJECTS` / `"none"` still override it.
+- **Per-tool wall clock** no longer asserts `intent` is only available
+  "before 2026-10-07"; a new `tool_calls_with_intent` count is read from
+  the actual `tool_execution_start` records, and the prose/Markdown only
+  mention `intent` when the corpus actually carries it.
+- `docs/how-it-works.html`'s worked example now uses synthetic numbers and
+  generic model names instead of a real run's costs, dates and model ids.
+- Personal project names and anecdotes scrubbed from `src/prompts.ts`
+  comments and test fixtures, replaced with neutral examples.
 
 ### Removed
 
@@ -220,6 +246,9 @@ upstream verbatim; every entry below is a diff against it.
   runs of message activity (user, assistant, toolResult) split at gaps over
   15 minutes; active time is their union per local calendar day, so parallel
   sessions count once and sessions left open count only while active.
+- **Report opener on Windows.** `/insights`'s auto-open used `open` on
+  darwin and fell through to `xdg-open` everywhere else, which does not
+  exist on Windows. `win32` now shells out to `cmd /c start "" <path>`.
 - **Interruption card vs rate.** The card counted steering only while the
   rate also counted mid-session aborts. Both now use one numerator, with an
   aborted / steered breakdown on the card.

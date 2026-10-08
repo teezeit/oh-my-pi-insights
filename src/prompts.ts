@@ -139,7 +139,7 @@ USER INSTRUCTIONS TO ASSISTANT:
 ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
 		`\n\nFRICTION SIGNALS:\nInterruption rate: ${(agg.interruption_rate * 100).toFixed(1)}% of human messages were aborted mid-flight or steered ((${agg.aborted_generations} aborted - ${agg.aborted_at_session_end} ended-at-session + ${agg.total_steering} steered) / ${agg.total_messages} human messages).\nAbort outcome labels: ${Object.entries(agg.abort_labels).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nProvider errors: ${agg.error_generations} total, by class: ${Object.entries(agg.error_classes).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nInvented tool names (never real tools, excluded from tool error rates): ${Object.entries(agg.tool_not_found).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nPer-tool error rate (>=5 calls, worst first; "browser" includes eval calls whose code drives the browser global, so "eval" is plain scripting only): ${agg.tool_error_rate_table.slice(0, 8).map(r => `${r.tool} ${(r.rate * 100).toFixed(1)}% (${r.errors}/${r.calls})`).join(", ") || "none"}\nTTSR rule injections (harness caught a bad generation and injected a rule): ${agg.ttsr_injections} total, rules: ${Object.entries(agg.ttsr_rules).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nContext reset boundaries (a path was abandoned and context rewound): ${agg.reset_boundaries}` +
 		`\n\nPER-TURN PATHOLOGY (a turn = one human message to the next; the expensive failure mode is one request costing many LLM round trips and tool calls):\n${agg.total_turns} turns across ${agg.total_sessions} sessions. p50: ${agg.turn_p50.round_trips} round trips, ${agg.turn_p50.tool_calls} tool calls, ${agg.turn_p50.exploration} exploration calls before first edit, ${agg.turn_p50.wall_sec.toFixed(0)}s wall clock. p90: ${agg.turn_p90.round_trips} round trips, ${agg.turn_p90.tool_calls} tool calls, ${agg.turn_p90.exploration} exploration calls, ${agg.turn_p90.wall_sec.toFixed(0)}s wall clock.\nWorst turns across the corpus (name these specifically): ${agg.worst_turns_corpus.map(t => `"${t.prompt}" (${t.project}): ${t.llm_round_trips} round trips, ${t.tool_calls} tool calls, ${t.exploration_before_first_mutation} exploration-before-edit, ${t.wall_sec.toFixed(0)}s, $${t.cost.toFixed(2)}`).join("; ") || "none"}` +
-		`\n\nPER-TOOL WALL CLOCK (startedAt paired with the matching toolResult by toolCallId; "intent" is absent for sessions after 2026-10-07 since tools.intentTracing was disabled, so it is never shown):\n${agg.tool_time_share.slice(0, 8).map(t => `${t.tool}: ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}` +
+		`\n\nPER-TOOL WALL CLOCK (startedAt paired with the matching toolResult by toolCallId${agg.tool_calls_with_intent > 0 ? `; ${agg.tool_calls_with_intent} of these calls also carry an "intent" field: use it to explain why a slow tool call happened, not just which tool` : ""}):\n${agg.tool_time_share.slice(0, 8).map(t => `${t.tool}: ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}` +
 		`\n\nCACHE EFFICIENCY:\nOverall cache hit ratio: ${(agg.cache_hit_ratio * 100).toFixed(1)}% (cacheRead / (input + cacheRead)). A low ratio on a large prompt is the resumed-stale-session tax: money and latency burned re-reading context.\nWorst sessions by ratio (>=50k input+cacheRead tokens): ${agg.worst_cache_sessions.map(s => `${s.project} (${s.tokens} tok, $${s.cost.toFixed(2)}): ${(s.ratio * 100).toFixed(1)}%`).join("; ") || "none"}` +
 		`\n\nEDIT CHURN (same file edited repeatedly across the corpus = the model did not understand it the first time):\n${agg.most_churned_files.map(f => `${f.path}: ${f.edits} edits across ${f.sessions} session(s)`).join("; ") || "none"}` +
 		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "Before/after delta (the only one in the report; quote it with its windows, never compute another): " + temporal.diff_headlines.join("; ") : "No significant before/after change."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
@@ -147,26 +147,43 @@ ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
 }
 
 // B8: the features reference is built at run time from the live harness
-// state (memory backend, installed skills/hooks) rather than a hardcoded,
-// Pi-shaped list — the model can only suggest features it is told exist, so
-// a wrong list is the main way the report turns into useless advice.
+// state (memory backend, autolearn, installed skills/hooks) rather than a
+// hardcoded, Pi-shaped list: the model can only suggest features it is told
+// exist, so a wrong list is the main way the report turns into useless advice.
 function memoryFeatureBlock(ctx: UserContext): string {
-	if (ctx.memory_backend === "mnemopi") {
-		return `2. Memory (mnemopi: retain/recall) — durable project/user facts recorded via
-   the retain tool, searched via recall or synthesised with reflect,
-   summarised at memory://root. autolearn is off, so nothing is written
-   without an explicit retain call.
+	const learnAvailable = ctx.autolearn_enabled && ctx.memory_backend !== "off";
+	const manageSkillNote = ctx.autolearn_enabled
+		? " autolearn is on, so manage_skill can also write new skills on its own."
+		: "";
+	const learnNote = learnAvailable
+		? " The learn tool also records facts automatically (autolearn is on)."
+		: "";
+	if (ctx.memory_backend === "hindsight" || ctx.memory_backend === "mnemopi") {
+		const mnemopi = ctx.memory_backend === "mnemopi";
+		const tools = mnemopi ? "retain/recall/reflect/memory_edit" : "retain/recall/reflect";
+		return `2. Memory (${ctx.memory_backend}: ${tools}) - durable project/user facts
+   recorded via the retain tool, searched via recall or synthesised with
+   reflect${mnemopi ? ", corrected via memory_edit" : ""}.${learnNote}
    - Good for: conventions, non-obvious fixes, user preferences that must survive sessions`;
 	}
-	return `2. Memory (learn tool) — durable project/user facts recorded to long-term
-   memory, summarised at memory://root
+	if (ctx.memory_backend === "local") {
+		return `2. Memory (local backend) - file-backed memory readable at memory://root
+   (summary, MEMORY.md, skills).${learnNote}
    - Good for: conventions, non-obvious fixes, user preferences that must survive sessions`;
+	}
+	// "off" (the default) or any other unrecognized value.
+	return `2. Memory - no memory backend is enabled (memory.backend is unset or "off"
+   in ~/.omp/agent/config.yml), so nothing persists across sessions.${manageSkillNote}
+   Enable one by setting memory.backend to "local" (file-backed, summarised at
+   memory://root), "hindsight" or "mnemopi" (both add retain/recall/reflect).
+   - Good for: suggesting this as a config_additions item when the data shows facts being re-explained every session`;
 }
 
 export function buildFeaturesReference(ctx: UserContext): string {
+	const managedSkillsNote = ctx.autolearn_enabled ? " (agent-authored via the manage_skill tool)" : "";
 	return `## OMP FEATURES REFERENCE:
-1. Skills — SKILL.md procedures in ~/.omp/agent/skills/ (user-authored) and
-   ~/.omp/agent/managed-skills/ (agent-authored via the manage_skill tool);
+1. Skills - SKILL.md procedures in ~/.omp/agent/skills/ (user-authored) and
+   ~/.omp/agent/managed-skills/${managedSkillsNote};
    surfaced automatically by name/description match, read with skill://<name>
    - Good for: repeatable procedures, debugging recipes, project workflows
    - Rule: never suggest a skill whose name already appears in the installed list
@@ -274,17 +291,21 @@ function keepSuggestion(item: Record<string, unknown>, ctx: UserContext): boolea
 	const allText = Object.values(item)
 		.filter((v): v is string => typeof v === "string")
 		.join(" ");
-	const unavailableFeature = ctx.memory_backend !== "learn" && /\blearn tool\b|memory \(learn\)/i.test(allText);
-	return !unavailableFeature && !mentionsInstalledSkill(item, ctx);
+	const learnAvailable = ctx.autolearn_enabled && ctx.memory_backend !== "off";
+	const retainAvailable = ctx.memory_backend === "hindsight" || ctx.memory_backend === "mnemopi";
+	const unavailableLearn = !learnAvailable && /\blearn tool\b|memory \(learn\)/i.test(allText);
+	const unavailableManageSkill = !ctx.autolearn_enabled && /\bmanage_skill\b/i.test(allText);
+	const unavailableRetain = !retainAvailable && /\bretain\b|\brecall\b|\breflect\b|\bmemory_edit\b/i.test(allText);
+	return !unavailableLearn && !unavailableManageSkill && !unavailableRetain && !mentionsInstalledSkill(item, ctx);
 }
 
 /**
  * Drops suggestions naming an unavailable feature (e.g. the learn tool when
- * memory.backend isn't "learn") or an already-installed skill (name or close
- * match), after the model has generated them. Prompt-side instructions alone
- * are not reliable enough to prevent this — see the `oh-my-pi-insights`
- * "ticket-kickoff" / "orchestrating-peach-ticket-wave-with-orca-omp-workers"
- * overlap this was built to catch.
+ * autolearn is off, or retain/recall when memory.backend is "off" or
+ * "local") or an already-installed skill (name or close match), after the
+ * model has generated them. Prompt-side instructions alone are not reliable
+ * enough to prevent this: a suggestion overlapping an already-installed
+ * skill by name is exactly the class of finding this was built to catch.
  */
 export function filterSuggestions(
 	suggestions: SuggestionSections,
@@ -301,12 +322,13 @@ export function filterSuggestions(
 const MIN_EVIDENCE_SESSIONS = 2;
 
 /**
- * B10: an item is only as credible as the sessions behind it. "Stop using
- * the browser tool" from one remark despite deliberate relay setup work was
- * the finding this exists to catch. Prompts ask every config_additions,
- * features_to_try, usage_patterns and stop_doing item for evidence_sessions
- * (ids from the data block); anything citing fewer than 2 distinct ids is
- * dropped here rather than trusted on the model's say-so.
+ * B10: an item is only as credible as the sessions behind it. A one-off
+ * remark misread as a pattern (e.g. "stop using the browser tool" after one
+ * complaint, despite otherwise deliberate use) is the finding this exists to
+ * catch. Prompts ask every config_additions, features_to_try, usage_patterns
+ * and stop_doing item for evidence_sessions (ids from the data block);
+ * anything citing fewer than 2 distinct ids is dropped here rather than
+ * trusted on the model's say-so.
  */
 export function filterByEvidence(suggestions: SuggestionSections): SuggestionSections {
 	const hasEvidence = (item: { evidence_sessions: string[] }) =>
@@ -383,7 +405,7 @@ FRICTION SIGNALS (from toolResult.isError and stopReason, not text heuristics):
 - Invented tool names that always fail (excluded from per-tool rates below, but a real bug on their own): ${Object.entries(agg.tool_not_found).map(([k, v]) => `${k} (${v}x)`).join(", ") || "none"}.
 - Worst real per-tool error rates (>=5 calls): ${agg.tool_error_rate_table.slice(0, 5).map(r => `${r.tool} ${(r.rate * 100).toFixed(0)}% (${r.errors}/${r.calls})`).join(", ") || "none"}.
 - Per-turn pathology: p50 is ${agg.turn_p50.round_trips} round trips / ${agg.turn_p50.tool_calls} tool calls per request; p90 is ${agg.turn_p90.round_trips} round trips / ${agg.turn_p90.tool_calls} tool calls. The expensive failure mode is ONE request costing many LLM round trips and tool calls to make a small change; name the worst turns specifically (prompt + round trips + tool calls), don't just cite the percentile.
-- Per-tool wall clock (startedAt paired with the matching toolResult; "intent" is only available before 2026-10-07): ${agg.tool_time_share.slice(0, 5).map(t => `${t.tool} ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}. "The model is slow" and "the model is waiting on your test suite" are different findings; name the tool, not just the session.
+- Per-tool wall clock (startedAt paired with the matching toolResult${agg.tool_calls_with_intent > 0 ? `; ${agg.tool_calls_with_intent} calls also carry an "intent" field` : ""}): ${agg.tool_time_share.slice(0, 5).map(t => `${t.tool} ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}. "The model is slow" and "the model is waiting on your test suite" are different findings; name the tool, not just the session.
 - Edit churn: files edited repeatedly across the corpus are a model that did not understand them the first time: ${agg.most_churned_files.slice(0, 5).map(f => `${f.path} (${f.edits}x across ${f.sessions} session(s))`).join(", ") || "none"}.
 
 Focus on ONGOING friction. Mention resolved items briefly as wins.
