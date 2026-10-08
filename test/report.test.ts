@@ -7,34 +7,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
 	aggregateData,
-	buildSessionMeta,
 	computeTemporalData,
 	detectConcurrentSessions,
 	generateMarkdown,
 	type ScanSummary,
-	type SessionMeta,
 	type UserContext,
 } from "../index.ts";
+import { meta } from "./helpers.ts";
 
 const GOLDEN = join(import.meta.dirname, "golden", "report.md");
-
-function meta(overrides: Partial<SessionMeta>): SessionMeta {
-	const base = buildSessionMeta(
-		{
-			id: "00000000-0000-7000-0000-000000000000",
-			path: "/sessions/proj/log.jsonl",
-			project_path: "/Users/me/projects/peach",
-			size: 1,
-			created: new Date("2026-09-01T09:00:00.000Z"),
-			modified: new Date("2026-09-01T09:30:00.000Z"),
-			sidecars: [],
-			signature: "1:1",
-		},
-		[],
-		[],
-	);
-	return { ...base, project_path: "/Users/me/projects/peach", ...overrides };
-}
 
 test("concurrent-session detection needs interleaving inside the window", () => {
 	const t = (min: number) => new Date(Date.UTC(2026, 8, 1, 9, min)).toISOString();

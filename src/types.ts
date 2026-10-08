@@ -172,7 +172,10 @@ export type AggregatedData = {
 	sessions_with_facets: number;
 	date_range: { start: string; end: string };
 	total_messages: number;
+	// Why: union of [start, start+duration] per local calendar day, so
+	// parallel sessions count once and no day can exceed 24h.
 	total_duration_hours: number;
+	active_hours_by_day: Record<string, number>;
 	total_input_tokens: number;
 	total_output_tokens: number;
 	total_cost: number;
@@ -197,7 +200,10 @@ export type AggregatedData = {
 	}>;
 	friction_details: string[];
 	user_instructions: string[];
+	// Same numerator as interruption_rate: mid-session aborts plus steering.
 	total_interruptions: number;
+	interruptions_aborted: number;
+	interruptions_steered: number;
 	total_tool_errors: number;
 	tool_error_categories: Record<string, number>;
 	user_response_times: number[];

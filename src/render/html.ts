@@ -382,7 +382,7 @@ ${temporal.diff_headlines.length ? `
   <div class="stat-grid">
     ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`)}
     ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`)}
-    ${statCard("Active Time", fmtHours(agg.total_duration_hours), `${(agg.total_duration_hours / Math.max(agg.days_active, 1)).toFixed(1)}h/day`)}
+    ${statCard("Active Time", fmtHours(agg.total_duration_hours), `${(agg.total_duration_hours / Math.max(Object.keys(agg.active_hours_by_day).length, 1)).toFixed(1)}h/day, parallel sessions counted once`)}
     ${statCard("Tokens In", fmtTokens(agg.total_input_tokens), "")}
     ${statCard("Tokens Out", fmtTokens(agg.total_output_tokens), "")}
     ${statCard("Total Cost", fmtCost(agg.total_cost), "")}
@@ -391,7 +391,7 @@ ${temporal.diff_headlines.length ? `
     ${statCard("Git Commits", String(agg.git_commits), `${agg.git_pushes} pushes`)}
     ${statCard("Files Modified", fmtTokens(agg.total_files_modified), "")}
     ${statCard("Tool Errors", String(agg.total_tool_errors), "")}
-    ${statCard("Interruptions", String(agg.total_interruptions), "")}
+    ${statCard("Interruptions", String(agg.total_interruptions), `aborted ${agg.interruptions_aborted} / steered ${agg.interruptions_steered}`)}
     ${agg.sessions_using_subagent ? statCard("Subagent Sessions", String(agg.sessions_using_subagent), "") : ""}
     ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "") : ""}
     ${agg.concurrent_sessions.overlap_events ? statCard("Parallel Sessions", String(agg.concurrent_sessions.overlap_events), "overlap events") : ""}

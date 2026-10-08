@@ -671,6 +671,7 @@ export {
 	extractSessionStats,
 	extractSidecarUsage,
 	gatherUserContext,
+	generateHTML,
 	generateMarkdown,
 	isMetaSession,
 	parseSimpleYaml,

@@ -123,6 +123,48 @@ export function top8(rec: Record<string, number>): [string, number][] {
 		.slice(0, 8);
 }
 
+/**
+ * Active hours per local calendar day: the union of every session's
+ * [start, start + duration] interval, split at local midnight.
+ * Why: summing durations counted parallel sessions once each, which read as
+ * 198h/day. No idle trimming: gaps between user messages can be long agent
+ * runs, and the logs carry no reliable "nothing happening" signal.
+ */
+export function activeHoursByDay(metas: SessionMeta[]): Record<string, number> {
+	const byDay = new Map<string, Array<[number, number]>>();
+	for (const m of metas) {
+		let start = new Date(m.start_time).getTime();
+		const end = start + m.duration_minutes * 60_000;
+		if (Number.isNaN(start) || end <= start) continue;
+		while (start < end) {
+			const d = new Date(start);
+			const nextMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+			const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+			const segEnd = Math.min(end, nextMidnight);
+			let list = byDay.get(key);
+			if (!list) byDay.set(key, (list = []));
+			list.push([start, segEnd]);
+			start = segEnd;
+		}
+	}
+	const out: Record<string, number> = {};
+	for (const key of [...byDay.keys()].sort()) {
+		const intervals = byDay.get(key)!.sort((a, b) => a[0] - b[0]);
+		let totalMs = 0;
+		let [curStart, curEnd] = intervals[0]!;
+		for (const [s, e] of intervals.slice(1)) {
+			if (s > curEnd) {
+				totalMs += curEnd - curStart;
+				curStart = s;
+				curEnd = e;
+			} else if (e > curEnd) curEnd = e;
+		}
+		totalMs += curEnd - curStart;
+		out[key] = totalMs / 3_600_000;
+	}
+	return out;
+}
+
 export function aggregateData(
 	metas: SessionMeta[],
 	facetsMap: Map<string, SessionFacets>,
@@ -133,6 +175,7 @@ export function aggregateData(
 		date_range: { start: "", end: "" },
 		total_messages: 0,
 		total_duration_hours: 0,
+		active_hours_by_day: {},
 		total_input_tokens: 0,
 		total_output_tokens: 0,
 		total_cost: 0,
@@ -152,6 +195,8 @@ export function aggregateData(
 		friction_details: [],
 		user_instructions: [],
 		total_interruptions: 0,
+		interruptions_aborted: 0,
+		interruptions_steered: 0,
 		total_tool_errors: 0,
 		tool_error_categories: {},
 		user_response_times: [],
@@ -253,7 +298,6 @@ export function aggregateData(
 
 	for (const meta of metas) {
 		agg.total_messages += meta.user_message_count;
-		agg.total_duration_hours += meta.duration_minutes / 60;
 		agg.total_input_tokens += meta.input_tokens;
 		agg.total_output_tokens += meta.output_tokens;
 		agg.total_cost += meta.total_cost;
@@ -262,7 +306,6 @@ export function aggregateData(
 		mergeRecord(agg.tool_error_categories, meta.tool_error_categories);
 		agg.git_commits += meta.git_commits;
 		agg.git_pushes += meta.git_pushes;
-		agg.total_interruptions += meta.user_interruptions;
 		agg.total_tool_errors += meta.tool_errors;
 		agg.total_lines_added += meta.lines_added;
 		agg.total_lines_removed += meta.lines_removed;
@@ -488,11 +531,13 @@ export function aggregateData(
 	// Interruption rate: aborted mid-flight or corrected via steering, per
 	// human message. A trailing abort with no next message (session just
 	// ended there) is excluded; there was no further request to interrupt.
-	agg.interruption_rate =
-		agg.total_messages > 0
-			? (agg.aborted_generations - agg.aborted_at_session_end + agg.total_steering) /
-				agg.total_messages
-			: 0;
+	agg.interruptions_aborted = agg.aborted_generations - agg.aborted_at_session_end;
+	agg.interruptions_steered = agg.total_steering;
+	agg.total_interruptions = agg.interruptions_aborted + agg.interruptions_steered;
+	agg.interruption_rate = agg.total_messages > 0 ? agg.total_interruptions / agg.total_messages : 0;
+
+	agg.active_hours_by_day = activeHoursByDay(metas);
+	agg.total_duration_hours = Object.values(agg.active_hours_by_day).reduce((a, b) => a + b, 0);
 
 	// Per-tool error rate, excluding tool_not_found misfires from both sides
 	// of the ratio. Floored at 5 calls so a single unlucky call can't read as
