@@ -36,7 +36,7 @@ import { promisify } from "node:util";
 
 import { createClaudeSessionSource } from "./src/sources/claude.ts";
 import { createOmpSessionSource, ompSessionSource } from "./src/sources/omp.ts";
-import { gatherUserContext, parseSimpleYaml } from "./src/context.ts";
+import { flattenYaml, gatherUserContext, parseSimpleYaml } from "./src/context.ts";
 import {
 	deleteCachedFacets,
 	ensureDirs,
@@ -77,7 +77,7 @@ import { generateHTML } from "./src/render/html.ts";
 import { buildFacts, checkFacts, type Fact } from "./src/facts.ts";
 import { DEFAULT_WORD_BUDGETS, dedupeIncidents, dedupeRecommendations, enforceBudget } from "./src/postprocess.ts";
 import { buildActionList, type ActionItem } from "./src/render/actions.ts";
-import { configDiff, type ConfigDiffEntry } from "./src/render/configDiff.ts";
+import { configDiff, diffConfigAddition, type ConfigDiffEntry } from "./src/render/configDiff.ts";
 import { diffReports, type ReportDiffEntry } from "./src/render/reportDiff.ts";
 import { buildEvidenceLinks, type EvidenceLink } from "./src/render/evidence.ts";
 import {
@@ -728,8 +728,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		{ encoding: "utf-8", mode: 0o600 },
 	);
 
-const sessionPaths = Object.fromEntries(kept.map((m) => [m.session_id, m.session_path]));
-	const html = generateHTML(agg, renderSections, synthesis, temporal, { prevSections, sessionPaths });
+	const sessionPaths = Object.fromEntries(kept.map((m) => [m.session_id, m.session_path]));
+	const html = generateHTML(agg, renderSections, synthesis, temporal, { prevSections, sessionPaths, userCtx });
 	await writeFile(REPORT_PATH, html, { encoding: "utf-8" });
 
 	if (formatMd) {
@@ -803,6 +803,8 @@ export {
 	checkFacts,
 	buildActionList,
 	configDiff,
+	diffConfigAddition,
+	flattenYaml,
 	diffReports,
 	buildEvidenceLinks,
 	isMetaSession,

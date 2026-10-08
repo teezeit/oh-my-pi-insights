@@ -40,6 +40,7 @@ const userCtx: UserContext = {
 	model_roles: {},
 	fallback_chains: {},
 	default_model: "",
+	config_yml_flat: {},
 };
 
 test("generateMarkdown starts with the action list as `- [ ]` items (D22)", async () => {

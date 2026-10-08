@@ -80,6 +80,22 @@ export function yamlMap(node: YamlNode | undefined, key: string): YamlNode | und
 	return v && !Array.isArray(v) && typeof v === "object" ? v : undefined;
 }
 
+/**
+ * Flattens a parsed YAML tree into dotted-path -> scalar leaves
+ * ("modelRoles.plan" -> "anthropic/claude-opus-5"). Arrays are dropped: a
+ * sequence like a fallback chain isn't a single old -> new scalar, so it
+ * has no sensible diff rendering in src/render/configDiff.ts.
+ */
+export function flattenYaml(node: YamlNode, prefix = ""): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries(node)) {
+		const path = prefix ? `${prefix}.${key}` : key;
+		if (typeof value === "string") out[path] = value;
+		else if (!Array.isArray(value)) Object.assign(out, flattenYaml(value, path));
+	}
+	return out;
+}
+
 export async function listDirNames(
 	dir: string,
 	kind: "dirs" | "files",
@@ -111,6 +127,7 @@ export async function gatherUserContext(): Promise<UserContext> {
 		fallback_chains: {},
 		default_model: "",
 		memory_backend: "learn",
+		config_yml_flat: {},
 	};
 
 	// Global instructions. omp has no ~/.omp/agent/AGENTS.md; the user-level
@@ -135,6 +152,7 @@ export async function gatherUserContext(): Promise<UserContext> {
 	// and retry.fallbackChains is the routing the report must not re-suggest.
 	try {
 		const cfg = parseSimpleYaml(await readFile(join(AGENT_DIR, "config.yml"), "utf-8"));
+		ctx.config_yml_flat = flattenYaml(cfg);
 		const roles = yamlMap(cfg, "modelRoles");
 		if (roles) {
 			for (const [role, model] of Object.entries(roles)) {

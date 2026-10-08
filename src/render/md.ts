@@ -10,6 +10,7 @@
 import { top8 } from "../aggregate.ts";
 import { SESSION_SET_PATH } from "../cache.ts";
 import { buildActionList } from "./actions.ts";
+import { diffConfigAddition } from "./configDiff.ts";
 import type { AggregatedData, ScanSummary, TemporalData, UserContext } from "../types.ts";
 
 export function fmtHours(h: number): string {
@@ -309,7 +310,11 @@ export function generateMarkdown(
 		lines.push("## \u{1F4A1} Next Steps");
 		if (suggSec.config_additions?.length) {
 			lines.push("**Config additions:**");
-			for (const c of suggSec.config_additions) lines.push(`- \`${c.where}\`: ${c.addition} (${c.why})`);
+			for (const c of suggSec.config_additions) {
+				const diff = c.where.includes("config.yml") ? diffConfigAddition(userCtx.config_yml_flat, c.addition) : null;
+				const body = diff ? diff.map((d) => `${d.key}: ${d.from} -> ${d.to}`).join("; ") : c.addition;
+				lines.push(`- \`${c.where}\`: ${body} (${c.why})`);
+			}
 		}
 		if (suggSec.features_to_try?.length) {
 			lines.push("\n**Features to try:**");

@@ -12,6 +12,7 @@ import { fmtCost, fmtHours, fmtTokens } from "./md.ts";
 import { buildActionList, type ActionItem } from "./actions.ts";
 import { buildEvidenceLinks } from "./evidence.ts";
 import { diffReports, type ReportDiffEntry } from "./reportDiff.ts";
+import { diffConfigAddition } from "./configDiff.ts";
 import type { AggregatedData, TemporalData, UserContext } from "../types.ts";
 
 export const SATISFACTION_ORDER = [
@@ -155,13 +156,27 @@ export function generateHTML(
 	sections: Record<string, unknown>,
 	synthesis: Record<string, string>,
 	temporal: TemporalData,
-	opts: { prevSections?: Record<string, unknown>; sessionPaths?: Record<string, string> } = {},
+	opts: { prevSections?: Record<string, unknown>; sessionPaths?: Record<string, string>; userCtx?: UserContext } = {},
 ): string {
 	const sessionPaths = opts.sessionPaths ?? {};
+	const liveConfig = opts.userCtx?.config_yml_flat ?? {};
 	const evidenceHtml = (ids: unknown): string => {
 		const links = buildEvidenceLinks(ids, sessionPaths);
 		if (!links.length) return "";
 		return `<div class="evidence">Evidence: ${links.map((l) => `<a href="${esc(l.href)}">${esc(l.id.slice(0, 8))}</a>`).join(", ")}</div>`;
+	};
+	/** D18: a config.yml-targeted addition that parses as YAML renders as an
+	 * old -> new key diff instead of the raw addition text. */
+	const configAdditionHtml = (c: { addition: string; where: string }): string => {
+		if (c.where.includes("config.yml")) {
+			const diff = diffConfigAddition(liveConfig, c.addition);
+			if (diff) {
+				return `<div class="config-diff">${diff
+					.map((d) => `<div class="config-diff-row"><code>${esc(d.key)}</code>: <span class="config-diff-old">${esc(d.from)}</span> \u2192 <span class="config-diff-new">${esc(d.to)}</span></div>`)
+					.join("\n")}</div>`;
+			}
+		}
+		return `<h3>${esc(c.addition)}</h3>`;
 	};
 	const reportDiff: ReportDiffEntry[] = opts.prevSections ? diffReports(opts.prevSections, sections) : [];
 	const diffStatus = (category: string): ReportDiffEntry["status"] | undefined =>
@@ -295,6 +310,11 @@ export function generateHTML(
   details.nested > summary { cursor: pointer; color: var(--dim); font-size: 12px; }
   .evidence { margin-top: 6px; font-size: 11px; color: var(--muted); }
   .evidence a { color: var(--accent2); }
+  .config-diff { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+  .config-diff-row { margin-top: 4px; color: var(--text); }
+  .config-diff-row code { color: var(--accent2); }
+  .config-diff-old { color: var(--red); text-decoration: line-through; }
+  .config-diff-new { color: var(--green); }
 
   .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; }
   .card + .card { margin-top: 12px; }
@@ -589,7 +609,7 @@ ${actionListHtml}
         <input type="checkbox" class="cfg-check" checked data-addition="${esc(c.addition)}" data-where="${esc(c.where)}">
         <div>
           <div class="tag">${esc(c.where)}</div>
-          <h3>${esc(c.addition)}</h3>
+          ${configAdditionHtml(c)}
           <p class="why">Why: ${esc(c.why)}</p>
           ${evidenceHtml(c.evidence_sessions)}
         </div>

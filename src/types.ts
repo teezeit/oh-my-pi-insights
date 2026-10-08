@@ -320,6 +320,8 @@ export type UserContext = {
 	default_model: string;
 	/** "learn" (omp's built-in memory tool) unless ~/.omp/agent/config.yml sets memory.backend to something else (e.g. "mnemopi"). Drives which memory feature the suggestions prompt is allowed to recommend. */
 	memory_backend: string;
+	/** The full parsed config.yml, flattened to dotted-path -> scalar leaves (see src/render/configDiff.ts's flattenYaml); arrays omitted. Lets a config_additions item's addition be diffed against what's actually on disk instead of rendered as a raw snippet. */
+	config_yml_flat: Record<string, string>;
 };
 
 /** What the scan itself saw — reported so the numbers can be audited. */

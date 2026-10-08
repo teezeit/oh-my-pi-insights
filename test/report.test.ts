@@ -193,6 +193,7 @@ test("the markdown report matches the golden file", async () => {
 		fallback_chains: { default: ["anthropic/claude-opus-5", "github-copilot/gpt-5.6-terra"] },
 		default_model: "anthropic/claude-opus-5",
 		memory_backend: "learn",
+		config_yml_flat: {},
 	};
 
 	const agg = aggregateData(metas, new Map());

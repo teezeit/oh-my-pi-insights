@@ -132,9 +132,15 @@ upstream verbatim; every entry below is a diff against it.
 - **Report-to-report diff** (`src/render/reportDiff.ts`, `diffReports`):
   friction categories are marked new / persisting / resolved against the
   previous run's cached sections, surfaced as badges on the Friction cards.
-- `configDiff` (`src/render/configDiff.ts`): a pure live-vs-proposed config
-  key diff, tested but not yet wired into any prompt output (no section
-  emits a `proposed` roles map today).
+- **Config diff instead of a raw snippet** (`src/render/configDiff.ts`):
+  a `config_additions` item whose `where` targets `config.yml` has its
+  `addition` parsed as a YAML `key: value` snippet (`flattenYaml`,
+  `src/context.ts`) and diffed against the live, flattened `config.yml`
+  (`UserContext.config_yml_flat`, gathered alongside the rest of
+  `gatherUserContext`). Only changed/added keys render, as `old -> new`, in
+  both the HTML report and the Markdown export; a plain-English addition
+  (the common case) or a non-config.yml `where` falls back to today's raw
+  text, unchanged.
 
 ### Changed
 

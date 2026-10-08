@@ -21,6 +21,7 @@ function fixtureUserCtx(): UserContext {
 		fallback_chains: {},
 		default_model: "anthropic/claude-opus-5",
 		memory_backend: "learn",
+		config_yml_flat: {},
 	};
 }
 

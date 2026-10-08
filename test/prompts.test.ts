@@ -16,6 +16,7 @@ function ctx(overrides: Partial<UserContext> = {}): UserContext {
 		model_roles: {},
 		fallback_chains: {},
 		default_model: "",
+		config_yml_flat: {},
 		memory_backend: "learn",
 		...overrides,
 	};
