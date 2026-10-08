@@ -1,0 +1,16 @@
+{
+	"friction_analysis": {
+		"ongoing": [
+			{
+				"category": "stale_context_reload",
+				"description": "Resumed sessions re-read large files from scratch instead of hitting cache.",
+				"examples": ["Session s-ccc333 reloaded context once."]
+			},
+			{
+				"category": "slow_lint_on_save",
+				"description": "A save-triggered lint run blocked the next edit for 10-20s.",
+				"examples": ["Session s-ddd444 waited on lint 6 times."]
+			}
+		]
+	}
+}

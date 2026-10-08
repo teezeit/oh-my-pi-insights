@@ -9,6 +9,7 @@
 
 import { top8 } from "../aggregate.ts";
 import { SESSION_SET_PATH } from "../cache.ts";
+import { buildActionList } from "./actions.ts";
 import type { AggregatedData, ScanSummary, TemporalData, UserContext } from "../types.ts";
 
 export function fmtHours(h: number): string {
@@ -39,6 +40,12 @@ export function generateMarkdown(
 	lines.push(scan.source === "omp" ? "# omp Insights" : `# Insights (${scan.source})`);
 	lines.push(`> ${agg.date_range.start} to ${agg.date_range.end} | ${agg.total_sessions} sessions | Generated ${new Date().toLocaleDateString()}`);
 	lines.push("");
+	const actionItems = buildActionList(sections);
+	if (actionItems.length) {
+		lines.push("## \u2705 Top Actions");
+		for (const item of actionItems) lines.push(`- [ ] **${item.label}**${item.where ? ` (\`${item.where}\`)` : ""}: ${item.detail}`);
+		lines.push("");
+	}
 
 	if (temporal.diff_headlines.length || temporal.major_transition || temporal.harness_changes?.length) {
 		lines.push(`## \u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}`);

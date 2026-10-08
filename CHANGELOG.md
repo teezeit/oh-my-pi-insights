@@ -112,6 +112,29 @@ upstream verbatim; every entry below is a diff against it.
   (friction/suggestion/horizon descriptions) over 40 words get one retry
   through the active model, then a sentence-boundary truncation if still
   over budget.
+- Collapsible HTML report (`<details>`/`<summary>`, zero new JavaScript):
+  every section collapsed by default except Summary and What Changed;
+  find-in-page still matches collapsed text, since the browser opens a
+  matching `<details>` natively. Long copyable-prompt blocks collapse
+  inside their card; the existing copy-button script still reads their
+  text while collapsed. Three charts (time of day, languages, response
+  times) demote into a collapsed "Numbers" sub-section.
+- **Action list** (`src/render/actions.ts`, `buildActionList`): the top 5
+  `config_additions` / `stop_doing` / `usage_patterns` items, fixed priority
+  (config additions first), rendered as checkboxes above every section in
+  both the HTML report and the Markdown export.
+- **Evidence links** (`src/render/evidence.ts`): items under
+  `suggestions.*` and `friction_analysis.ongoing` that carry an
+  `evidence_sessions: string[]` field (a contract other in-flight sections
+  work may populate) render a small "Evidence" line linking each known
+  session id to its log file; unknown ids are dropped, not linked to
+  nowhere.
+- **Report-to-report diff** (`src/render/reportDiff.ts`, `diffReports`):
+  friction categories are marked new / persisting / resolved against the
+  previous run's cached sections, surfaced as badges on the Friction cards.
+- `configDiff` (`src/render/configDiff.ts`): a pure live-vs-proposed config
+  key diff, tested but not yet wired into any prompt output (no section
+  emits a `proposed` roles map today).
 
 ### Changed
 

@@ -35,7 +35,7 @@ test("every stat card and chart in the HTML report states its sample size", () =
 	const agg = aggregateData(metas, facetsMap);
 	const html = generateHTML(agg, {}, {}, computeTemporalData(metas, facetsMap));
 
-	const cardBlocks = html.split('<div class="stat-card">').slice(1).map((b) => b.split("\n</div>")[0]!);
+	const cardBlocks = html.split('<div class="stat-card"').slice(1).map((b) => b.split("\n</div>")[0]!);
 	assert.ok(cardBlocks.length >= 12, `found ${cardBlocks.length} cards`);
 	for (const block of cardBlocks) assert.match(block, /n=\d+/, `card without n: ${block.replace(/\s+/g, " ").slice(0, 120)}`);
 

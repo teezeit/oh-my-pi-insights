@@ -9,6 +9,9 @@
 import { top8 } from "../aggregate.ts";
 import { displayLabel } from "../stats.ts";
 import { fmtCost, fmtHours, fmtTokens } from "./md.ts";
+import { buildActionList, type ActionItem } from "./actions.ts";
+import { buildEvidenceLinks } from "./evidence.ts";
+import { diffReports, type ReportDiffEntry } from "./reportDiff.ts";
 import type { AggregatedData, TemporalData, UserContext } from "../types.ts";
 
 export const SATISFACTION_ORDER = [
@@ -128,9 +131,14 @@ export function responseTimeChart(times: number[]): string {
 		.join("\n");
 }
 
-/** `n` is the sample behind the number, e.g. "n=196 sessions"; never omitted. */
-export function statCard(label: string, value: string, sub: string, n: string): string {
-	return `<div class="stat-card">
+/**
+ * `n` is the sample behind the number, e.g. "n=196 sessions"; never omitted.
+ * `title` is the full hover evidence string (definition, n, window); every
+ * caller must supply one so every card is traceable, not just the ones with
+ * a matching Fact id.
+ */
+export function statCard(label: string, value: string, sub: string, n: string, title: string): string {
+	return `<div class="stat-card" title="${esc(title)}">
   <div class="stat-value">${esc(value)}</div>
   <div class="stat-label">${esc(label)}</div>
   ${sub ? `<div class="stat-sub">${esc(sub)}</div>` : ""}
@@ -147,7 +155,24 @@ export function generateHTML(
 	sections: Record<string, unknown>,
 	synthesis: Record<string, string>,
 	temporal: TemporalData,
+	opts: { prevSections?: Record<string, unknown>; sessionPaths?: Record<string, string> } = {},
 ): string {
+	const sessionPaths = opts.sessionPaths ?? {};
+	const evidenceHtml = (ids: unknown): string => {
+		const links = buildEvidenceLinks(ids, sessionPaths);
+		if (!links.length) return "";
+		return `<div class="evidence">Evidence: ${links.map((l) => `<a href="${esc(l.href)}">${esc(l.id.slice(0, 8))}</a>`).join(", ")}</div>`;
+	};
+	const reportDiff: ReportDiffEntry[] = opts.prevSections ? diffReports(opts.prevSections, sections) : [];
+	const diffStatus = (category: string): ReportDiffEntry["status"] | undefined =>
+		reportDiff.find((d) => d.category === category)?.status;
+	const diffBadge = (category: string): string => {
+		const status = diffStatus(category);
+		if (!status || status === "persisting") return "";
+		return ` <span class="badge ${status === "new" ? "red" : "green"}">${status}</span>`;
+	};
+	const resolvedSinceLastRun = reportDiff.filter((d) => d.status === "resolved");
+
 	const areas =
 		(
 			sections.project_areas as {
@@ -170,17 +195,17 @@ export function generateHTML(
 	const frictionSec = sections.friction_analysis as
 		| {
 				intro?: string;
-				categories?: Array<{ category: string; description: string; examples: string[] }>;
+				categories?: Array<{ category: string; description: string; examples: string[]; severity?: string; evidence_sessions?: string[] }>;
 				resolved?: Array<{ category: string; note: string }>;
-				ongoing?: Array<{ category: string; description: string; examples: string[]; severity?: string }>;
+				ongoing?: Array<{ category: string; description: string; examples: string[]; severity?: string; evidence_sessions?: string[] }>;
 		  }
 		| undefined;
 	const suggSec = sections.suggestions as
 		| {
-				config_additions?: Array<{ addition: string; why: string; where: string }>;
-				features_to_try?: Array<{ feature: string; one_liner: string; why_for_you: string; example: string }>;
-				usage_patterns?: Array<{ title: string; suggestion: string; detail: string; copyable_prompt: string }>;
-				stop_doing?: Array<{ what: string; why: string; alternative: string }>;
+				config_additions?: Array<{ addition: string; why: string; where: string; evidence_sessions?: string[] }>;
+				features_to_try?: Array<{ feature: string; one_liner: string; why_for_you: string; example: string; evidence_sessions?: string[] }>;
+				usage_patterns?: Array<{ title: string; suggestion: string; detail: string; copyable_prompt: string; evidence_sessions?: string[] }>;
+				stop_doing?: Array<{ what: string; why: string; alternative: string; evidence_sessions?: string[] }>;
 		  }
 		| undefined;
 	const horizonSec = sections.on_the_horizon as
@@ -203,10 +228,27 @@ export function generateHTML(
 	const topGoals = top8(agg.goal_categories);
 	const nSessions = `n=${agg.total_sessions} sessions`;
 	const toolCalls = Object.values(agg.tool_calls_by_tool).reduce((a, b) => a + b, 0);
+	const windowStr = `${agg.date_range.start}..${agg.date_range.end}`;
+	const cardTitle = (definition: string, n: string) => `${definition} (${n}, ${windowStr})`;
 
 	const configAdditions = suggSec?.config_additions ?? [];
 	const featuresToTry = suggSec?.features_to_try ?? [];
 	const usagePatterns = suggSec?.usage_patterns ?? [];
+
+	const actionItems: ActionItem[] = buildActionList(sections);
+	const actionListHtml = actionItems.length
+		? `<div class="card" id="action-list">
+  <h3 style="margin-bottom:12px">\u2705 Top Actions</h3>
+  ${actionItems
+			.map(
+				(item, i) => `<label style="display:flex;align-items:flex-start;gap:10px;${i === actionItems.length - 1 ? "" : "margin-bottom:10px;"}cursor:pointer">
+    <input type="checkbox" style="margin-top:3px;accent-color:var(--accent);width:15px;height:15px;flex-shrink:0">
+    <span><strong>${esc(item.label)}</strong>${item.where ? ` <span class="tag" style="font-size:10px">${esc(item.where)}</span>` : ""}<br><span style="color:var(--dim);font-size:13px">${esc(item.detail)}</span>${evidenceHtml(item.evidence_sessions)}</span>
+  </label>`,
+			)
+			.join("\n  ")}
+</div>`
+		: "";
 
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -239,10 +281,20 @@ export function generateHTML(
   nav a { background: var(--bg3); border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px; color: var(--dim); font-size: 13px; transition: all 0.15s; }
   nav a:hover { color: var(--text); border-color: var(--border2); text-decoration: none; background: var(--bg2); }
 
-  section { margin-bottom: 48px; }
+  .rpt-section { margin-bottom: 48px; display: block; }
+  .rpt-section > summary { cursor: pointer; list-style: revert; }
+  .rpt-section > summary::-webkit-details-marker { margin-right: 8px; }
+  .rpt-section > summary h2 { display: inline-flex; }
   h2 { font-size: 24px; font-weight: 700; color: var(--text); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .rpt-section > summary h2 { margin-bottom: 0; border-bottom: none; }
+  .rpt-section[open] > summary h2 { margin-bottom: 24px; border-bottom: 1px solid var(--border); width: 100%; }
   h2 .emoji { font-size: 18px; }
   h3 { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+
+  details.nested { margin-top: 10px; }
+  details.nested > summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+  .evidence { margin-top: 6px; font-size: 11px; color: var(--muted); }
+  .evidence a { color: var(--accent2); }
 
   .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; }
   .card + .card { margin-top: 12px; }
@@ -336,6 +388,7 @@ export function generateHTML(
 
 <nav>
   <a href="#at-a-glance">Summary</a>
+  ${temporal.diff_headlines.length || temporal.major_transition ? `<a href="#what-changed">What Changed</a>` : ""}
   <a href="#stats">Numbers</a>
   <a href="#projects">Where You Worked</a>
   <a href="#style">How You Work</a>
@@ -347,8 +400,9 @@ export function generateHTML(
 </nav>
 
 ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harness_changes?.length) ? `
-<div style="background:linear-gradient(135deg,#1a2332,#1e2a3a);border:1px solid var(--border2);border-radius:var(--radius);padding:24px 28px;margin-bottom:32px">
-  <h3 style="color:var(--accent2);font-size:13px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:14px">\u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}</h3>
+<details class="rpt-section" id="what-changed" open>
+<summary><h3 style="color:var(--accent2);font-size:13px;text-transform:uppercase;letter-spacing:0.5px;display:inline">\u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}</h3></summary>
+<div style="background:linear-gradient(135deg,#1a2332,#1e2a3a);border:1px solid var(--border2);border-radius:var(--radius);padding:24px 28px;margin-top:14px">
   <div style="display:flex;flex-wrap:wrap;gap:10px">
     ${temporal.diff_headlines.map(h => `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 14px;font-size:14px;color:var(--text)">${esc(h)}</div>`).join("\n    ")}
   </div>
@@ -356,11 +410,14 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
   ${temporal.harness_changes?.length ? `<div style="margin-top:14px;display:flex;flex-direction:column;gap:6px">
     ${temporal.harness_changes.map(c => `<div style="padding:8px 14px;background:var(--bg);border-radius:var(--radius-sm);border-left:3px solid var(--accent2);font-size:13px;color:var(--dim)"><strong style="color:var(--accent2)">Harness change (${esc(c.when.slice(0, 10))}):</strong> ${esc(c.detail)}${c.too_recent ? ` <em>(too recent to assess impact)</em>` : ""}</div>`).join("\n    ")}
   </div>` : ""}
-</div>` : ""}
+</div>
+</details>` : ""}
+
+${actionListHtml}
 
 <!-- ── At a Glance ── -->
-<section id="at-a-glance">
-  <h2><span class="emoji">⚡</span> Summary</h2>
+<details class="rpt-section" id="at-a-glance" open>
+<summary><h2><span class="emoji">⚡</span> Summary</h2></summary>
   <div class="at-a-glance">
     <div class="at-a-glance-part">
       <h3>What's Working</h3>
@@ -379,27 +436,27 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
       ${wrapP(synthesis.ambitious_workflows ?? "")}
     </div>
   </div>
-</section>
+</details>
 
 <!-- ── Stats ── -->
-<section id="stats">
-  <h2><span class="emoji">📊</span> By the Numbers</h2>
+<details class="rpt-section" id="stats">
+<summary><h2><span class="emoji">📊</span> By the Numbers</h2></summary>
   <div class="stat-grid">
-    ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`, nSessions)}
-    ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`, nSessions)}
-    ${statCard("Active Time", fmtHours(agg.total_duration_hours), `${(agg.total_duration_hours / Math.max(Object.keys(agg.active_hours_by_day).length, 1)).toFixed(1)}h/day, parallel sessions counted once`, `n=${Object.keys(agg.active_hours_by_day).length} active days`)}
-    ${statCard("Tokens In", fmtTokens(agg.total_input_tokens), "", nSessions)}
-    ${statCard("Tokens Out", fmtTokens(agg.total_output_tokens), "", nSessions)}
-    ${statCard("Total Cost", fmtCost(agg.total_cost), "", nSessions)}
-    ${statCard("Lines Added", fmtTokens(agg.total_lines_added), "", nSessions)}
-    ${statCard("Lines Removed", fmtTokens(agg.total_lines_removed), "", nSessions)}
-    ${statCard("Git Commits", String(agg.git_commits), `${agg.git_pushes} pushes`, nSessions)}
-    ${statCard("Files Modified", fmtTokens(agg.total_files_modified), "", nSessions)}
-    ${statCard("Tool Errors", String(agg.total_tool_errors), "", `n=${toolCalls} tool calls`)}
-    ${statCard("Interruptions", String(agg.total_interruptions), `aborted ${agg.interruptions_aborted} / steered ${agg.interruptions_steered}`, `n=${agg.total_messages} human messages`)}
-    ${agg.sessions_using_subagent ? statCard("Subagent Sessions", String(agg.sessions_using_subagent), "", nSessions) : ""}
-    ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "", nSessions) : ""}
-    ${agg.concurrent_sessions.overlap_events ? statCard("Parallel Sessions", String(agg.concurrent_sessions.overlap_events), "overlap events", nSessions) : ""}
+    ${statCard("Sessions", String(agg.total_sessions), `${agg.days_active} active days`, nSessions, cardTitle("substantive sessions in the report", nSessions))}
+    ${statCard("Messages", String(agg.total_messages), `${(agg.total_messages / Math.max(agg.total_sessions, 1)).toFixed(1)} per session`, nSessions, cardTitle("human messages across all sessions", nSessions))}
+    ${statCard("Active Time", fmtHours(agg.total_duration_hours), `${(agg.total_duration_hours / Math.max(Object.keys(agg.active_hours_by_day).length, 1)).toFixed(1)}h/day, parallel sessions counted once`, `n=${Object.keys(agg.active_hours_by_day).length} active days`, cardTitle("union of session intervals per day; parallel sessions counted once", `n=${Object.keys(agg.active_hours_by_day).length} active days`))}
+    ${statCard("Tokens In", fmtTokens(agg.total_input_tokens), "", nSessions, cardTitle("total input tokens recorded across all model calls", nSessions))}
+    ${statCard("Tokens Out", fmtTokens(agg.total_output_tokens), "", nSessions, cardTitle("total output tokens recorded across all model calls", nSessions))}
+    ${statCard("Total Cost", fmtCost(agg.total_cost), "", nSessions, cardTitle("sum of recorded cost (primary + advisor + subagent)", nSessions))}
+    ${statCard("Lines Added", fmtTokens(agg.total_lines_added), "", nSessions, cardTitle("lines added across all file edits", nSessions))}
+    ${statCard("Lines Removed", fmtTokens(agg.total_lines_removed), "", nSessions, cardTitle("lines removed across all file edits", nSessions))}
+    ${statCard("Git Commits", String(agg.git_commits), `${agg.git_pushes} pushes`, nSessions, cardTitle("git commit tool calls across sessions", nSessions))}
+    ${statCard("Files Modified", fmtTokens(agg.total_files_modified), "", nSessions, cardTitle("distinct file-edit operations across sessions", nSessions))}
+    ${statCard("Tool Errors", String(agg.total_tool_errors), "", `n=${toolCalls} tool calls`, cardTitle("tool results with isError", `n=${toolCalls} tool calls`))}
+    ${statCard("Interruptions", String(agg.total_interruptions), `aborted ${agg.interruptions_aborted} / steered ${agg.interruptions_steered}`, `n=${agg.total_messages} human messages`, cardTitle("mid-session aborts + steering messages", `n=${agg.total_messages} human messages`))}
+    ${agg.sessions_using_subagent ? statCard("Subagent Sessions", String(agg.sessions_using_subagent), "", nSessions, cardTitle("sessions that spawned at least one subagent", nSessions)) : ""}
+    ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "", nSessions, cardTitle("sessions that used an MCP tool", nSessions)) : ""}
+    ${agg.concurrent_sessions.overlap_events ? statCard("Parallel Sessions", String(agg.concurrent_sessions.overlap_events), "overlap events", nSessions, cardTitle("overlap events between interleaved sessions", nSessions)) : ""}
   </div>
 
   <div class="charts-grid">
@@ -420,16 +477,21 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
       ${barChart(agg.tool_counts, { limit: 10 })}
     </div>
     <div class="chart-box">
-      ${chartTitle("Languages", `n=${Object.values(agg.languages).reduce((a, b) => a + b, 0)} file touches`)}
-      ${barChart(agg.languages, { limit: 10 })}
-    </div>
-    <div class="chart-box">
       ${chartTitle("Friction Types", `n=${agg.sample_sizes.friction_sessions} sessions with friction, decay-weighted`)}
       ${barChart(agg.friction, { limit: 10 })}
     </div>
     <div class="chart-box">
       ${chartTitle("Tool Errors", `n=${agg.total_tool_errors} errors`)}
       ${barChart(agg.tool_error_categories)}
+    </div>
+  </div>
+
+  <details class="nested" id="numbers">
+  <summary>Numbers: languages, time of day, response times</summary>
+  <div class="charts-grid" style="margin-top:12px">
+    <div class="chart-box">
+      ${chartTitle("Languages", `n=${Object.values(agg.languages).reduce((a, b) => a + b, 0)} file touches`)}
+      ${barChart(agg.languages, { limit: 10 })}
     </div>
     <div class="chart-box">
       ${chartTitle("Response Times", `n=${agg.user_response_times.length} responses`)}
@@ -440,11 +502,12 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
       ${timeOfDayChart(agg.message_hours)}
     </div>
   </div>
-</section>
+  </details>
+</details>
 
 <!-- ── Project Areas ── -->
-<section id="projects">
-  <h2><span class="emoji">🗂️</span> Where You Worked</h2>
+<details class="rpt-section" id="projects">
+<summary><h2><span class="emoji">🗂️</span> Where You Worked</h2></summary>
   <div class="card-grid ${areas.length > 2 ? "cols2" : ""}">
     ${areas
 			.map(
@@ -455,20 +518,20 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
 			)
 			.join("\n")}
   </div>
-</section>
+</details>
 
 <!-- ── Interaction Style ── -->
-<section id="style">
-  <h2><span class="emoji">🎯</span> How You Work</h2>
+<details class="rpt-section" id="style">
+<summary><h2><span class="emoji">🎯</span> How You Work</h2></summary>
   <div class="card">
     ${iStyle?.narrative ? `<div style="line-height:1.8">${renderMarkdown(esc(iStyle.narrative))}</div>` : "<p class='muted'>No data</p>"}
     ${iStyle?.key_pattern ? `<div style="margin-top:16px;padding:14px 16px;background:var(--bg3);border-radius:var(--radius-sm);border:1px solid var(--border2);color:var(--accent2);font-size:14px;font-style:italic">"${esc(iStyle.key_pattern)}"</div>` : ""}
   </div>
-</section>
+</details>
 
 <!-- ── What's Working ── -->
-<section id="what-works">
-  <h2><span class="emoji">✨</span> Wins</h2>
+<details class="rpt-section" id="what-works">
+<summary><h2><span class="emoji">✨</span> Wins</h2></summary>
   ${whatWorks?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(whatWorks.intro)}</p>` : ""}
   <div class="card-grid ${(whatWorks?.impressive_workflows?.length ?? 0) > 1 ? "cols2" : ""}">
     ${(whatWorks?.impressive_workflows ?? [])
@@ -480,34 +543,36 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
 			)
 			.join("\n")}
   </div>
-</section>
+</details>
 
 <!-- ── Friction ── -->
-<section id="friction">
-  <h2><span class="emoji">⚠️</span> Where Things Broke</h2>
+<details class="rpt-section" id="friction">
+<summary><h2><span class="emoji">⚠️</span> Where Things Broke</h2></summary>
   ${frictionSec?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(frictionSec.intro)}</p>` : ""}
-  ${(frictionSec?.resolved?.length) ? `<div style="margin-bottom:20px">
+  ${(frictionSec?.resolved?.length || resolvedSinceLastRun.length) ? `<div style="margin-bottom:20px">
     <h3 style="color:var(--green);font-size:14px;margin-bottom:10px">\u2705 Resolved</h3>
-    ${frictionSec.resolved.map(r => `<div style="padding:6px 14px;color:var(--dim);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(r.category)}</strong> \u2014 ${esc(r.note)}</div>`).join("\n")}
+    ${(frictionSec?.resolved ?? []).map(r => `<div style="padding:6px 14px;color:var(--dim);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(r.category)}</strong> \u2014 ${esc(r.note)}</div>`).join("\n")}
+    ${resolvedSinceLastRun.filter(d => !(frictionSec?.resolved ?? []).some(r => r.category === d.category)).map(d => `<div style="padding:6px 14px;color:var(--dim);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px"><strong>${esc(d.category)}</strong> \u2014 not in this run's friction list anymore</div>`).join("\n")}
   </div>` : ""}
   <div class="card-grid ${((frictionSec?.ongoing ?? frictionSec?.categories)?.length ?? 0) > 1 ? "cols2" : ""}">
     ${((frictionSec?.ongoing ?? frictionSec?.categories) ?? [])
 			.map(
 				(cat) => `<div class="friction-card">
-      <h3>${esc(cat.category)}${(cat as any).severity ? ` <span class="badge ${(cat as any).severity === "high" ? "red" : (cat as any).severity === "medium" ? "yellow" : "green"}">${(cat as any).severity}</span>` : ""}</h3>
+      <h3>${esc(cat.category)}${cat.severity ? ` <span class="badge ${cat.severity === "high" ? "red" : cat.severity === "medium" ? "yellow" : "green"}">${cat.severity}</span>` : ""}${diffBadge(cat.category)}</h3>
       <p>${esc(cat.description)}</p>
       <div class="examples">
         ${(cat.examples ?? []).map((ex) => `<div class="example">${esc(ex)}</div>`).join("")}
       </div>
+      ${evidenceHtml(cat.evidence_sessions)}
     </div>`,
 			)
 			.join("\n")}
   </div>
-</section>
+</details>
 
 <!-- ── Suggestions ── -->
-<section id="suggestions">
-  <h2><span class="emoji">💡</span> Next Steps</h2>
+<details class="rpt-section" id="suggestions">
+<summary><h2><span class="emoji">💡</span> Next Steps</h2></summary>
 
   ${
 		configAdditions.length
@@ -526,6 +591,7 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
           <div class="tag">${esc(c.where)}</div>
           <h3>${esc(c.addition)}</h3>
           <p class="why">Why: ${esc(c.why)}</p>
+          ${evidenceHtml(c.evidence_sessions)}
         </div>
       </label>
     </div>`,
@@ -550,8 +616,11 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
       <div class="tag">${esc(f.feature)}</div>
       <h3>${esc(f.one_liner)}</h3>
       <p>${esc(f.why_for_you)}</p>
+      <details class="nested"><summary>Show example</summary>
       <div class="copy-box">${esc(f.example)}</div>
       <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
+      </details>
+      ${evidenceHtml(f.evidence_sessions)}
     </div>`,
 			)
 			.join("\n")}
@@ -569,8 +638,11 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
       <h3>${esc(p.title)}</h3>
       <p>${esc(p.suggestion)}</p>
       <p style="margin-top:8px;font-size:13px;color:var(--muted)">${esc(p.detail)}</p>
+      <details class="nested"><summary>Show prompt</summary>
       <div class="copy-box">${esc(p.copyable_prompt)}</div>
       <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
+      </details>
+      ${evidenceHtml(p.evidence_sessions)}
     </div>`,
 			)
 			.join("\n")}
@@ -584,13 +656,14 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
       <h3 style="color:var(--red);font-size:14px">${esc(s.what)}</h3>
       <p style="color:var(--dim);margin-top:6px;font-size:13px">${esc(s.why)}</p>
       <p style="color:var(--green);margin-top:6px;font-size:13px"><strong>Instead:</strong> ${esc(s.alternative)}</p>
+      ${evidenceHtml(s.evidence_sessions)}
     </div>`).join("\n")}
   </div>` : ""}
-</section>
+</details>
 
 <!-- ── On the Horizon ── -->
-<section id="horizon">
-  <h2><span class="emoji">🚀</span> Future Workflows</h2>
+<details class="rpt-section" id="horizon">
+<summary><h2><span class="emoji">🚀</span> Future Workflows</h2></summary>
   ${horizonSec?.intro ? `<p style="color:var(--dim);margin-bottom:16px">${esc(horizonSec.intro)}</p>` : ""}
   <div style="display:flex;flex-direction:column;gap:12px">
     ${(horizonSec?.opportunities ?? [])
@@ -599,23 +672,25 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
       <h3>${esc(o.title)}</h3>
       <p>${esc(o.whats_possible)}</p>
       <p class="how">${esc(o.how_to_try)}</p>
+      <details class="nested"><summary>Show prompt</summary>
       <div class="copy-box">${esc(o.copyable_prompt)}</div>
       <button class="copy-btn" onclick="copyFromBox(this)">📋 Copy</button>
+      </details>
     </div>`,
 			)
 			.join("\n")}
   </div>
-</section>
+</details>
 
 <!-- ── Model Efficiency ── -->
-<section id="model-efficiency">
-  <h2><span class="emoji">💸</span> Model Spend</h2>
+<details class="rpt-section" id="model-efficiency">
+<summary><h2><span class="emoji">💸</span> Model Spend</h2></summary>
   ${modelEffSec?.summary ? `<p style="color:var(--dim);margin-bottom:16px">${esc(modelEffSec.summary)}</p>` : ""}
 
   <div class="stat-grid">
-    ${statCard("Estimated Waste", fmtCost(agg.estimated_waste), "from model mismatch", `n=${agg.sessions_with_facets} sessions with facets`)}
-    ${statCard("Efficiency Flags", String(agg.model_efficiency.length), `${agg.model_efficiency.filter(e => e.flag === "overspend").length} overspend, ${agg.model_efficiency.filter(e => e.flag === "underspend").length} underspend, ${agg.model_efficiency.filter(e => e.flag === "quota_pressure").length} quota pressure`, `n=${agg.sessions_with_facets} sessions with facets`)}
-    ${statCard("Models Used", String(Object.keys(agg.model_usage).length), "", nSessions)}
+    ${statCard("Estimated Waste", fmtCost(agg.estimated_waste), "from model mismatch", `n=${agg.sessions_with_facets} sessions with facets`, cardTitle("heuristic model-mismatch waste over flagged sessions", `n=${agg.sessions_with_facets} sessions with facets`))}
+    ${statCard("Efficiency Flags", String(agg.model_efficiency.length), `${agg.model_efficiency.filter(e => e.flag === "overspend").length} overspend, ${agg.model_efficiency.filter(e => e.flag === "underspend").length} underspend, ${agg.model_efficiency.filter(e => e.flag === "quota_pressure").length} quota pressure`, `n=${agg.sessions_with_facets} sessions with facets`, cardTitle("sessions flagged overspend/underspend/quota_pressure", `n=${agg.sessions_with_facets} sessions with facets`))}
+    ${statCard("Models Used", String(Object.keys(agg.model_usage).length), "", nSessions, cardTitle("distinct models recorded in model_usage", nSessions))}
   </div>
 
   <div class="charts-grid">
@@ -651,8 +726,8 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
     ${modelEffSec.potential_savings_note ? `<p style="color:var(--muted);margin-top:6px;font-size:12px;font-style:italic">${esc(modelEffSec.potential_savings_note)}</p>` : ""}
   </div>` : ""}
 
-  ${agg.model_efficiency.length ? `<h3 style="margin-top:24px;margin-bottom:12px">Flagged Sessions</h3>
-  <div style="display:flex;flex-direction:column;gap:8px">
+  ${agg.model_efficiency.length ? `<details class="nested"><summary>Flagged Sessions</summary>
+  <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
     ${agg.model_efficiency.slice(0, 10).map(e => `<div class="card" style="padding:14px 18px">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
@@ -664,8 +739,10 @@ ${(temporal.diff_headlines.length || temporal.major_transition || temporal.harne
       <p style="color:var(--dim);font-size:13px;margin-top:6px">${esc(e.reason)}</p>
       <p style="color:var(--muted);font-size:12px;margin-top:4px">${esc(e.goal)}</p>
     </div>`).join("\n")}
-  </div>` : ""}
-</section>
+  </div>
+  </details>` : ""}
+</details>
+
 
 </div>
 <script>

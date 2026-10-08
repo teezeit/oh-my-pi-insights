@@ -76,6 +76,10 @@ import { generateMarkdown } from "./src/render/md.ts";
 import { generateHTML } from "./src/render/html.ts";
 import { buildFacts, checkFacts, type Fact } from "./src/facts.ts";
 import { DEFAULT_WORD_BUDGETS, dedupeIncidents, dedupeRecommendations, enforceBudget } from "./src/postprocess.ts";
+import { buildActionList, type ActionItem } from "./src/render/actions.ts";
+import { configDiff, type ConfigDiffEntry } from "./src/render/configDiff.ts";
+import { diffReports, type ReportDiffEntry } from "./src/render/reportDiff.ts";
+import { buildEvidenceLinks, type EvidenceLink } from "./src/render/evidence.ts";
 import {
 	buildSessionMeta,
 	extractSessionStats,
@@ -565,6 +569,13 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 
 	scan.reused_stale_sections = Boolean(staleSections);
 
+	// Captured before this run's own generation (if any) is saved below, so
+	// it reflects the previous run's state, not this one's: diffReports
+	// (D20) needs it to mark friction categories new/persisting/resolved.
+	// Degenerates to comparing a run against itself when nothing changed
+	// since the last save, which just reads as "all persisting".
+	const prevSections = (await loadLatestSections(source.name))?.sections;
+
 	const sectionKeys =
 		useLlm && !cachedSections
 			? (Object.keys(sectionPrompts) as Array<keyof typeof sectionPrompts>)
@@ -717,7 +728,8 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		{ encoding: "utf-8", mode: 0o600 },
 	);
 
-	const html = generateHTML(agg, renderSections, synthesis, temporal);
+const sessionPaths = Object.fromEntries(kept.map((m) => [m.session_id, m.session_path]));
+	const html = generateHTML(agg, renderSections, synthesis, temporal, { prevSections, sessionPaths });
 	await writeFile(REPORT_PATH, html, { encoding: "utf-8" });
 
 	if (formatMd) {
@@ -789,6 +801,10 @@ export {
 	generateMarkdown,
 	buildFacts,
 	checkFacts,
+	buildActionList,
+	configDiff,
+	diffReports,
+	buildEvidenceLinks,
 	isMetaSession,
 	parseSimpleYaml,
 	readUsage,
@@ -813,6 +829,10 @@ export type {
 	SuggestionSections,
 	TemporalData,
 	UsagePattern,
+	ActionItem,
+	ConfigDiffEntry,
+	ReportDiffEntry,
+	EvidenceLink,
 	UserContext,
 };
 export type { BudgetTarget } from "./src/postprocess.ts";

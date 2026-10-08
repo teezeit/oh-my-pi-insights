@@ -1,0 +1,68 @@
+{
+	"project_areas": {
+		"areas": [
+			{ "name": "acme-dashboard", "session_count": 4, "description": "Internal metrics dashboard work." }
+		]
+	},
+	"interaction_style": {
+		"narrative": "Short, direct prompts; rarely asks clarifying questions.",
+		"key_pattern": "Give me the fix, not the options."
+	},
+	"what_works": {
+		"intro": "Fast iteration on small, well-scoped edits.",
+		"impressive_workflows": [
+			{ "title": "One-shot migration", "description": "Rewrote the auth middleware in one turn with no follow-up fixes." }
+		]
+	},
+	"friction_analysis": {
+		"intro": "Two ongoing friction categories, one resolved since last run.",
+		"resolved": [
+			{ "category": "flaky_test_retries", "note": "No longer appears after the CI timeout fix." }
+		],
+		"ongoing": [
+			{
+				"category": "stale_context_reload",
+				"description": "Resumed sessions re-read large files from scratch instead of hitting cache.",
+				"examples": ["Session s-aaa111 reloaded a 40k-token file twice in one turn."],
+				"severity": "high",
+				"evidence_sessions": ["s-aaa111", "s-bbb222"]
+			},
+			{
+				"category": "invented_tool_names",
+				"description": "Model calls a tool name that does not exist and every call fails.",
+				"examples": ["xd://ast_query called 6 times, 100% failed."],
+				"severity": "medium"
+			}
+		]
+	},
+	"suggestions": {
+		"config_additions": [
+			{ "addition": "Never commit without running the changed test file first.", "why": "3 sessions pushed with a failing local test.", "where": "AGENTS.md", "evidence_sessions": ["s-aaa111"] },
+			{ "addition": "Set retry.fallbackChains.default to include a cheaper fallback model.", "why": "2 quota-pressure flags this window.", "where": "~/.omp/agent/config.yml" },
+			{ "addition": "Install the xd://lsp device before refactors touching exported symbols.", "why": "Manual grep-based renames missed 2 call sites.", "where": "~/.omp/agent/extensions/" }
+		],
+		"features_to_try": [
+			{ "feature": "xd://ast_edit", "one_liner": "Structural refactors instead of text edits.", "why_for_you": "Several sessions hand-edited repeated call sites.", "example": "ast_edit rename Foo to Bar across src/" }
+		],
+		"usage_patterns": [
+			{ "title": "Batch the read-only scouting", "suggestion": "Dispatch one scout before editing unfamiliar modules.", "detail": "Three sessions re-read the same five files across separate turns before the first edit.", "copyable_prompt": "Scout src/render for every call site of generateHTML before editing." }
+		],
+		"stop_doing": [
+			{ "what": "Re-reading the same file after every edit to confirm it worked", "why": "Doubled tool calls on 4 sessions with no behavior change.", "alternative": "Trust the edit response and verify once at the end." },
+			{ "what": "Running the full suite after every single-line change", "why": "Added 30-90s per turn on 5 sessions.", "alternative": "Run the single changed test file, full suite once at the end." }
+		]
+	},
+	"on_the_horizon": {
+		"intro": "Autonomous multi-file refactors are close to reliable for this codebase.",
+		"opportunities": [
+			{ "title": "Autonomous dependency bump", "whats_possible": "A subagent updates the dependency, fixes the breaking call sites, and runs the suite unattended.", "how_to_try": "Dispatch a subagent with the changelog diff as context.", "copyable_prompt": "Upgrade acme-sdk to 4.x, fix all breaking call sites, run the suite." }
+		]
+	},
+	"model_efficiency": {
+		"summary": "Mostly on the right model; one quota-pressure pattern on long refactors."
+	},
+	"fun_ending": {
+		"headline": "You shipped 12 commits before your coffee went cold.",
+		"detail": "Fastest turnaround: 90 seconds from prompt to green test."
+	}
+}

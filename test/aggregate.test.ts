@@ -99,7 +99,7 @@ test("interruption card and rate share one numerator with an aborted/steered bre
 	assert.equal(agg.interruptions_steered, 2);
 
 	const html = generateHTML(agg, {}, {}, computeTemporalData([], new Map()));
-	const card = html.match(/<div class="stat-card">\s*<div class="stat-value">(\d+)<\/div>\s*<div class="stat-label">Interruptions<\/div>\s*<div class="stat-sub">([^<]*)<\/div>/);
+	const card = html.match(/<div class="stat-card"[^>]*>\s*<div class="stat-value">(\d+)<\/div>\s*<div class="stat-label">Interruptions<\/div>\s*<div class="stat-sub">([^<]*)<\/div>/);
 	assert.ok(card, "interruptions card not found");
 	assert.equal(card[1], "4");
 	assert.match(card[2]!, /aborted 2 \/ steered 2/);
