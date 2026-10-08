@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Tobias Hoelzer (omp port)
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Why: CI actions are pinned to commit SHAs; without this they never get updates.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    # Only devDependencies exist (typescript, @types/node); group them into one PR.
+    groups:
+      dev:
+        patterns: ["*"]
