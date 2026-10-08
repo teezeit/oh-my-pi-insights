@@ -1,11 +1,10 @@
-<!-- SPDX-FileCopyrightText: 2026 Tobias Hoelzer (omp port) -->
-<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+# SPDX-FileCopyrightText: 2026 Tobias Hoelzer (omp port)
+# SPDX-License-Identifier: AGPL-3.0-only
 
 name: ci
 on:
   push:
   pull_request:
-
 
 permissions:
   contents: read
