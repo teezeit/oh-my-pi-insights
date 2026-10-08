@@ -177,6 +177,7 @@ test("the markdown report matches the golden file", async () => {
 		excluded_unparsed: 0,
 		excluded_not_substantive: 1,
 		excluded_by_since: 0,
+		excluded_tooling: 0,
 		included: 2,
 		reused_stale_sections: false,
 	};
@@ -191,6 +192,7 @@ test("the markdown report matches the golden file", async () => {
 		model_roles: { default: "anthropic/claude-opus-5", smol: "anthropic/claude-haiku-4-5" },
 		fallback_chains: { default: ["anthropic/claude-opus-5", "github-copilot/gpt-5.6-terra"] },
 		default_model: "anthropic/claude-opus-5",
+		memory_backend: "learn",
 	};
 
 	const agg = aggregateData(metas, new Map());

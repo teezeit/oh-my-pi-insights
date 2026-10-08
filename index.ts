@@ -53,13 +53,17 @@ import {
 	SESSION_SET_PATH,
 } from "./src/cache.ts";
 import { computeTemporalData } from "./src/temporal.ts";
-import { aggregateData, detectConcurrentSessions } from "./src/aggregate.ts";
+import { aggregateData, detectConcurrentSessions, excludeToolingSessions } from "./src/aggregate.ts";
+import { detectHarnessChanges, gatherHarnessState, type HarnessState } from "./src/harness.ts";
 import {
+	buildFeaturesReference,
 	buildSectionPrompts,
 	buildSharedDataBlock,
 	buildSynthesisPrompt,
 	CHUNK_SUMMARIZE_PROMPT,
 	FACET_EXTRACT_PROMPT,
+	filterSuggestions,
+	type SuggestionSections,
 } from "./src/prompts.ts";
 import { callModel, createLimiter, parseJsonFromResponse } from "./src/model.ts";
 import { generateMarkdown } from "./src/render/md.ts";
@@ -75,6 +79,7 @@ import {
 } from "./src/stats.ts";
 import type {
 	AggregatedData,
+	HarnessChange,
 	ScanSummary,
 	SessionFacets,
 	SessionMeta,
@@ -159,6 +164,26 @@ function resolveLimit(
 	return Number.isFinite(env) && env > 0 ? env : fallback;
 }
 
+/** `--<flag> a,b` on the command line, else `$ENV` (comma-separated), else the default list. The literal "none" (either source) opts out of the default entirely. */
+function resolveProjectList(
+	args: string,
+	flag: string,
+	envVar: string,
+	fallback: string[],
+): string[] {
+	const match = args.match(new RegExp(`--${flag}[\\s=](\\S+)`));
+	const raw = match?.[1] ?? process.env[envVar];
+	if (!raw) return fallback;
+	if (raw.toLowerCase() === "none") return [];
+	return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+// B11: this tool's own development sessions dominate worst-turn and friction
+// signals meant to reflect the user's other work; excluded by default,
+// overridable with --exclude-projects/OMP_INSIGHTS_EXCLUDE_PROJECTS (comma
+// separated, substring-matched against project_path; "none" opts out entirely).
+const DEFAULT_EXCLUDE_PROJECTS = ["oh-my-pi-insights"];
+
 // ─── Main Command Handler ─────────────────────────────────────────────────────
 
 async function runInsights(
@@ -179,6 +204,12 @@ async function runInsights(
 	const sinceDays = sinceMatch
 		? Number(sinceMatch[1]) * (sinceMatch[2] === "w" ? 7 : 1)
 		: 0;
+	const excludeProjects = resolveProjectList(
+		args,
+		"exclude-projects",
+		"OMP_INSIGHTS_EXCLUDE_PROJECTS",
+		DEFAULT_EXCLUDE_PROJECTS,
+	);
 
 	const limits = {
 		maxSessions: resolveLimit(args, "max-sessions", "OMP_INSIGHTS_MAX_SESSIONS", DEFAULT_MAX_SESSIONS_TO_LOAD),
@@ -206,6 +237,10 @@ async function runInsights(
 	// Fetched before the LLM phases: the facet phase needs the smol model role
 	// out of it, and the section prompts need the installed-skills list.
 	const userCtx = await gatherUserContext();
+	// B9: config.yml.bak-* snapshots, skill/hook install dates and AGENTS.md
+	// mtime, diffed against the report window further down once date_range is
+	// known (fs-only, costs no tokens, so gathered alongside userCtx).
+	const harnessState = await gatherHarnessState();
 	// The subprocess would otherwise use the configured default; pin it to the
 	// model actually active in this session so the report reflects /model.
 	const activeModel =
@@ -233,6 +268,7 @@ async function runInsights(
 		excluded_unparsed: 0,
 		excluded_not_substantive: 0,
 		excluded_by_since: 0,
+		excluded_tooling: 0,
 		facet_failures: 0,
 		facets_analyzed: 0,
 		reused_stale_sections: false,
@@ -484,11 +520,25 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	]);
 
 	// ── Phase 4: Aggregate + Insight Prompts ─────────────────────────────────────
-	const agg = aggregateData(kept, facetsMap);
-	scan.included = kept.length;
+	// B11: drop this tool's own dev sessions before any downstream analysis —
+	// see excludeToolingSessions for why this is a full exclude, not a tag.
+	const analyzed = excludeToolingSessions(kept, excludeProjects);
+	scan.excluded_tooling = kept.length - analyzed.length;
+	const agg = aggregateData(analyzed, facetsMap);
+	scan.included = analyzed.length;
 	scan.facets_analyzed = agg.sessions_with_facets;
-	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
-	const temporal = computeTemporalData(kept, facetsMap);
+	scan.cost_unavailable = analyzed.filter((m) => m.cost_recorded === false).length;
+	const temporal = computeTemporalData(analyzed, facetsMap);
+	// B9: a separate, config/filesystem-derived "what changed" signal — see
+	// src/harness.ts. Only meaningful once a date range exists to diff against.
+	if (agg.date_range.start && agg.date_range.end) {
+		const harnessChanges: HarnessChange[] = detectHarnessChanges(
+			harnessState,
+			agg.date_range.start,
+			agg.date_range.end,
+		);
+		if (harnessChanges.length) temporal.harness_changes = harnessChanges;
+	}
 	const facts = buildFacts(agg, temporal);
 	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx, facts);
 	const sectionPrompts = buildSectionPrompts(dataBlock, temporal, userCtx, agg);
@@ -534,6 +584,16 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 			]);
 		}),
 	);
+
+	// B8: drop suggestions naming an unavailable feature or an installed skill,
+	// whether the section came fresh or from cache — the live harness state can
+	// change (e.g. memory.backend) after a cached run was generated.
+	if (sectionResults.suggestions) {
+		sectionResults.suggestions = filterSuggestions(
+			sectionResults.suggestions as SuggestionSections,
+			userCtx,
+		);
+	}
 
 	let synthesis: Record<string, string> = cachedSections?.synthesis ?? {};
 	if (useLlm && !cachedSections) {
@@ -607,7 +667,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 					output_tokens: agg.total_output_tokens,
 				},
 				fact_check: { flags: factFlags, facts },
-				sessions: kept.map((m) => ({
+				sessions: analyzed.map((m) => ({
 					session_id: m.session_id,
 					path: m.session_path,
 					log_signature: m.log_signature,
@@ -678,12 +738,17 @@ export {
 	createClaudeSessionSource,
 	createLimiter,
 	aggregateData,
+	buildFeaturesReference,
 	buildSessionMeta,
 	computeTemporalData,
 	createOmpSessionSource,
 	detectConcurrentSessions,
+	detectHarnessChanges,
+	excludeToolingSessions,
 	extractSessionStats,
 	extractSidecarUsage,
+	filterSuggestions,
+	gatherHarnessState,
 	gatherUserContext,
 	generateHTML,
 	generateMarkdown,
@@ -699,11 +764,13 @@ export type {
 	AggregatedData,
 	ExtensionAPI,
 	ExtensionCommandContext,
+	HarnessState,
 	ScanSummary,
 	SessionFacets,
 	SessionMeta,
 	SessionRef,
 	SessionSource,
+	SuggestionSections,
 	TemporalData,
 	Fact,
 	UserContext,

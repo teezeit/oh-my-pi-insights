@@ -40,10 +40,13 @@ export function generateMarkdown(
 	lines.push(`> ${agg.date_range.start} to ${agg.date_range.end} | ${agg.total_sessions} sessions | Generated ${new Date().toLocaleDateString()}`);
 	lines.push("");
 
-	if (temporal.diff_headlines.length || temporal.major_transition) {
+	if (temporal.diff_headlines.length || temporal.major_transition || temporal.harness_changes?.length) {
 		lines.push(`## \u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}`);
 		for (const h of temporal.diff_headlines) lines.push(`- ${h}`);
 		if (temporal.major_transition) lines.push(`- **Major shift (${temporal.major_transition.when}):** ${temporal.major_transition.what}. ${temporal.major_transition.impact}`);
+		for (const c of temporal.harness_changes ?? []) {
+			lines.push(`- **Harness change (${c.when.slice(0, 10)}):** ${c.detail}${c.too_recent ? " _(too recent to assess impact)_" : ""}`);
+		}
 		lines.push("");
 	}
 
@@ -218,6 +221,7 @@ export function generateMarkdown(
 	lines.push(`| Unparseable | ${scan.excluded_unparsed} |`);
 	lines.push(`| Below substance floor (<2 user messages or <1 min) | ${scan.excluded_not_substantive} |`);
 	lines.push(`| Outside --since window | ${scan.excluded_by_since} |`);
+	lines.push(`| Tooling (this repo's own dev sessions) | ${scan.excluded_tooling} |`);
 	lines.push(`| **Included** | **${scan.included}** |`);
 	lines.push("");
 	lines.push(

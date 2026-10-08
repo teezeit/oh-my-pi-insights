@@ -4,8 +4,10 @@
 
 
 // The facet-extraction prompt, the shared data block, the eight section
-// prompts and the synthesis prompt. The OMP_FEATURES_REFERENCE list is
-// load-bearing: the model can only suggest features it is told exist.
+// prompts and the synthesis prompt. buildFeaturesReference is load-bearing:
+// the model can only suggest features it is told exist, so it is built from
+// live harness state rather than a hardcoded list (see B8).
+
 
 import { top8 } from "./aggregate.ts";
 import { displayLabel } from "./stats.ts";
@@ -144,19 +146,32 @@ ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
 	);
 }
 
-// Why this list is load-bearing: the model can only suggest features it is
-// told exist, so a wrong or Pi-shaped list is the main way the report turns
-// into useless advice. Keep it aligned with omp's real surface.
-export const OMP_FEATURES_REFERENCE = `## OMP FEATURES REFERENCE:
+// B8: the features reference is built at run time from the live harness
+// state (memory backend, installed skills/hooks) rather than a hardcoded,
+// Pi-shaped list — the model can only suggest features it is told exist, so
+// a wrong list is the main way the report turns into useless advice.
+function memoryFeatureBlock(ctx: UserContext): string {
+	if (ctx.memory_backend === "mnemopi") {
+		return `2. Memory (mnemopi: retain/recall) — durable project/user facts recorded via
+   the retain tool, searched via recall or synthesised with reflect,
+   summarised at memory://root. autolearn is off, so nothing is written
+   without an explicit retain call.
+   - Good for: conventions, non-obvious fixes, user preferences that must survive sessions`;
+	}
+	return `2. Memory (learn tool) — durable project/user facts recorded to long-term
+   memory, summarised at memory://root
+   - Good for: conventions, non-obvious fixes, user preferences that must survive sessions`;
+}
+
+export function buildFeaturesReference(ctx: UserContext): string {
+	return `## OMP FEATURES REFERENCE:
 1. Skills — SKILL.md procedures in ~/.omp/agent/skills/ (user-authored) and
    ~/.omp/agent/managed-skills/ (agent-authored via the manage_skill tool);
    surfaced automatically by name/description match, read with skill://<name>
    - Good for: repeatable procedures, debugging recipes, project workflows
    - Rule: never suggest a skill whose name already appears in the installed list
 
-2. Memory (learn tool) — durable project/user facts recorded to long-term
-   memory, summarised at memory://root
-   - Good for: conventions, non-obvious fixes, user preferences that must survive sessions
+${memoryFeatureBlock(ctx)}
 
 3. Hooks — executables under ~/.omp/agent/hooks/<event>/ (e.g. pre/) that run
    on tool lifecycle events and can block or annotate a call
@@ -191,6 +206,90 @@ export const OMP_FEATURES_REFERENCE = `## OMP FEATURES REFERENCE:
 10. AGENTS.md — per-repo instruction files, plus scoped
    .agent/instructions/*.instructions.md with applyTo globs
    - Good for: team conventions and per-path rules the agent always follows`;
+}
+
+export type SuggestionSections = {
+	config_additions?: Array<{ addition: string; why: string; where: string }>;
+	features_to_try?: Array<{ feature: string; one_liner: string; why_for_you: string; example: string }>;
+	usage_patterns?: Array<{ title: string; suggestion: string; detail: string; copyable_prompt: string }>;
+	stop_doing?: Array<{ what: string; why: string; alternative: string }>;
+};
+
+// Filler words that show up in both naming phrases and skill slugs without
+// signalling an actual topic match (e.g. every suggestion title is a "skill"
+// or mentions "with"); dropped before comparing tokens below.
+const SKILL_MATCH_STOPWORDS: Record<string, true> = {
+	skill: true,
+	skills: true,
+	with: true,
+	your: true,
+	that: true,
+	this: true,
+};
+
+/**
+ * "Close match" between a suggestion's naming phrase and an installed skill:
+ * an exact substring match, or enough shared significant (len > 3,
+ * non-filler) tokens relative to the shorter phrase's token count. The
+ * suggestion phrase is normally short (a feature/skill name, not a full
+ * sentence), so a single shared keyword against a short phrase is already a
+ * majority overlap.
+ */
+function isNearDuplicateSkill(candidateText: string, installedSkill: string): boolean {
+	const a = candidateText.toLowerCase().replace(/[-_]/g, " ").replace(/\s+/g, " ").trim();
+	const b = installedSkill.toLowerCase().replace(/[-_]/g, " ").replace(/\s+/g, " ").trim();
+	if (!a || !b) return false;
+	if (b.length >= 4 && a.includes(b)) return true;
+	const significant = (t: string) => t.length > 3 && !SKILL_MATCH_STOPWORDS[t];
+	const ta = new Set(a.split(" ").filter(significant));
+	const tb = new Set(b.split(" ").filter(significant));
+	const shared = [...ta].filter((t) => tb.has(t));
+	const minLen = Math.min(ta.size, tb.size);
+	return minLen > 0 && shared.length / minLen >= 0.5;
+}
+
+function primaryName(item: Record<string, unknown>): string {
+	for (const key of ["feature", "what", "title", "addition"]) {
+		const v = item[key];
+		if (typeof v === "string") return v;
+	}
+	return "";
+}
+
+function mentionsInstalledSkill(item: Record<string, unknown>, ctx: UserContext): boolean {
+	const name = primaryName(item);
+	if (!/skill/i.test(name)) return false;
+	const installed = [...ctx.installed_skills, ...ctx.installed_managed_skills];
+	return installed.some((skill) => isNearDuplicateSkill(name, skill));
+}
+
+function keepSuggestion(item: Record<string, unknown>, ctx: UserContext): boolean {
+	const allText = Object.values(item)
+		.filter((v): v is string => typeof v === "string")
+		.join(" ");
+	const unavailableFeature = ctx.memory_backend !== "learn" && /\blearn tool\b|memory \(learn\)/i.test(allText);
+	return !unavailableFeature && !mentionsInstalledSkill(item, ctx);
+}
+
+/**
+ * Drops suggestions naming an unavailable feature (e.g. the learn tool when
+ * memory.backend isn't "learn") or an already-installed skill (name or close
+ * match), after the model has generated them. Prompt-side instructions alone
+ * are not reliable enough to prevent this — see the `oh-my-pi-insights`
+ * "ticket-kickoff" / "orchestrating-peach-ticket-wave-with-orca-omp-workers"
+ * overlap this was built to catch.
+ */
+export function filterSuggestions(
+	suggestions: SuggestionSections,
+	ctx: UserContext,
+): SuggestionSections {
+	return {
+		config_additions: suggestions.config_additions?.filter((i) => keepSuggestion(i, ctx)),
+		features_to_try: suggestions.features_to_try?.filter((i) => keepSuggestion(i, ctx)),
+		usage_patterns: suggestions.usage_patterns?.filter((i) => keepSuggestion(i, ctx)),
+		stop_doing: suggestions.stop_doing?.filter((i) => keepSuggestion(i, ctx)),
+	};
+}
 
 export function buildSectionPrompts(data: string, temporal: TemporalData, userCtx: UserContext, agg: AggregatedData) {
 	return {
@@ -287,7 +386,7 @@ ${data}`,
 
 		suggestions: `Analyze this usage data and suggest improvements for working with omp.
 
-${OMP_FEATURES_REFERENCE}
+${buildFeaturesReference(userCtx)}
 
 CRITICAL: The user's existing setup is in the data below. DO NOT suggest:
 - Rules already in their AGENTS.md

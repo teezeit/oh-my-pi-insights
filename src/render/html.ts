@@ -352,13 +352,16 @@ export function generateHTML(
   <a href="#model-efficiency">Model Spend</a>
 </nav>
 
-${temporal.diff_headlines.length || temporal.major_transition ? `
+${(temporal.diff_headlines.length || temporal.major_transition || temporal.harness_changes?.length) ? `
 <div style="background:linear-gradient(135deg,#1a2332,#1e2a3a);border:1px solid var(--border2);border-radius:var(--radius);padding:24px 28px;margin-bottom:32px">
   <h3 style="color:var(--accent2);font-size:13px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:14px">\u{1F4C8} What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}</h3>
   <div style="display:flex;flex-wrap:wrap;gap:10px">
     ${temporal.diff_headlines.map(h => `<div style="background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 14px;font-size:14px;color:var(--text)">${esc(h)}</div>`).join("\n    ")}
   </div>
   ${temporal.major_transition ? `<div style="margin-top:14px;padding:10px 14px;background:var(--bg);border-radius:var(--radius-sm);border-left:3px solid var(--purple);font-size:13px;color:var(--dim)"><strong style="color:var(--purple)">Major shift (${esc(temporal.major_transition.when)}):</strong> ${esc(temporal.major_transition.what)}. Impact: ${esc(temporal.major_transition.impact)}</div>` : ""}
+  ${temporal.harness_changes?.length ? `<div style="margin-top:14px;display:flex;flex-direction:column;gap:6px">
+    ${temporal.harness_changes.map(c => `<div style="padding:8px 14px;background:var(--bg);border-radius:var(--radius-sm);border-left:3px solid var(--accent2);font-size:13px;color:var(--dim)"><strong style="color:var(--accent2)">Harness change (${esc(c.when.slice(0, 10))}):</strong> ${esc(c.detail)}${c.too_recent ? ` <em>(too recent to assess impact)</em>` : ""}</div>`).join("\n    ")}
+  </div>` : ""}
 </div>` : ""}
 
 <!-- ── At a Glance ── -->

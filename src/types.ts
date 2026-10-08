@@ -318,6 +318,8 @@ export type UserContext = {
 	model_roles: Record<string, string>;
 	fallback_chains: Record<string, string[]>;
 	default_model: string;
+	/** "learn" (omp's built-in memory tool) unless ~/.omp/agent/config.yml sets memory.backend to something else (e.g. "mnemopi"). Drives which memory feature the suggestions prompt is allowed to recommend. */
+	memory_backend: string;
 };
 
 /** What the scan itself saw — reported so the numbers can be audited. */
@@ -335,6 +337,8 @@ export type ScanSummary = {
 	excluded_unparsed: number;
 	excluded_not_substantive: number;
 	excluded_by_since: number;
+	/** Sessions dropped because their project matched the tooling exclude list (this repo's own dev sessions by default); see excludeToolingSessions. */
+	excluded_tooling: number;
 	/** Sessions whose facet extraction failed or returned nothing usable. */
 	facet_failures: number;
 	facets_analyzed: number;
@@ -354,6 +358,15 @@ export type TemporalDelta = {
 	errors_per_session: { before: number; after: number; pct: number };
 };
 
+/** A detected change to the harness itself (config, skills, hooks, AGENTS.md) inside the report window. */
+export type HarnessChange = {
+	type: "memory_backend" | "skill_added" | "hook_added" | "agents_md_updated";
+	when: string;
+	detail: string;
+	/** Fewer than 7 days of corpus data exist after this change; too early to say whether it helped. */
+	too_recent: boolean;
+};
+
 export type TemporalData = {
 	diff_headlines: string[];
 	this_week: { sessions: number; avg_cost: number; errors_per_session: number; primary_model: string } | null;
@@ -371,7 +384,10 @@ export type TemporalData = {
 	 * printed delta now quotes this object.
 	 */
 	delta: TemporalDelta | null;
+	/** Optional: populated by index.ts from gatherHarnessState/detectHarnessChanges, outside computeTemporalData (src/temporal.ts owns only the facet-derived week-over-week diff). */
+	harness_changes?: HarnessChange[];
 };
+
 
 
 // Why an interface: Stage 3 adds a ~/.claude/projects adapter. Everything

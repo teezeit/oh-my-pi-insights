@@ -167,6 +167,24 @@ export function activeHoursByDay(metas: SessionMeta[]): Record<string, number> {
 	return out;
 }
 
+/**
+ * B11: this tool's own development sessions (scanner port, friction-analysis
+ * implementation) are naturally turn/tool-call heavy builds against this very
+ * codebase, and would otherwise dominate worst-turn and friction signals
+ * meant to reflect the user's other work. Dropped before aggregation
+ * entirely — including from totals, not just friction/worst-turns — so
+ * every number in the report describes only non-tooling work; callers
+ * audit how many were dropped via ScanSummary.excluded_tooling.
+ */
+export function excludeToolingSessions(
+	metas: SessionMeta[],
+	excludeProjects: string[],
+): SessionMeta[] {
+	const needles = excludeProjects.map((p) => p.toLowerCase()).filter(Boolean);
+	if (!needles.length) return metas;
+	return metas.filter((m) => !needles.some((n) => m.project_path.toLowerCase().includes(n)));
+}
+
 export function aggregateData(
 	metas: SessionMeta[],
 	facetsMap: Map<string, SessionFacets>,

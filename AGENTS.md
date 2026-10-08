@@ -17,12 +17,13 @@ Port of Observal/pi-insights (Pi harness) to omp. AGPL-3.0-only; keep SPDX heade
 | `src/sources/omp.ts` | omp log walker: sidecar discovery, dedupe by session id, transcript formatting | `createOmpSessionSource`, `formatTranscript` |
 | `src/sources/claude.ts` | Claude Code adapter for `~/.claude/projects` | `createClaudeSessionSource`, `extractClaudeStats` |
 | `src/stats.ts` | Per-session deterministic extraction | `extractSessionStats`, `buildSessionMeta`, `readUsage`, `toolErrorCategory`, `classifyErrorMessage` |
-| `src/aggregate.ts` | Corpus aggregation, 10-day decay weighting, concurrency | `aggregateData`, `detectConcurrentSessions` |
+| `src/aggregate.ts` | Corpus aggregation, 10-day decay weighting, concurrency, tooling-session exclusion | `aggregateData`, `detectConcurrentSessions`, `excludeToolingSessions` |
 | `src/temporal.ts` | Week-over-week deltas, anomalies, trajectory | `computeTemporalData` |
+| `src/harness.ts` | Harness-change detection (config/skills/hooks/AGENTS.md, separate from temporal.ts) | `detectHarnessChanges`, `gatherHarnessState` |
 | `src/cache.ts` | session-meta / facets / sections caches | `loadCachedMeta`, `saveMeta`, `loadCachedSections`, `pruneSections` |
-| `src/context.ts` | User context from `~/.omp/agent` (config.yml, skills, managed-skills, extensions) | `gatherUserContext`, `parseSimpleYaml` |
+| `src/context.ts` | User context from `~/.omp/agent` (config.yml incl. memory backend, skills, managed-skills, extensions) | `gatherUserContext`, `parseSimpleYaml` |
 | `src/model.ts` | Shells out to `omp -p` | `callModel`, `parseJsonFromResponse` |
-| `src/prompts.ts` | Facet/section/synthesis prompts | `FACET_EXTRACT_PROMPT`, `OMP_FEATURES_REFERENCE`, `buildSectionPrompts` |
+| `src/prompts.ts` | Facet/section/synthesis prompts | `FACET_EXTRACT_PROMPT`, `buildFeaturesReference`, `filterSuggestions`, `buildSectionPrompts` |
 | `src/render/html.ts`, `src/render/md.ts` | Report output | `generateHTML`, `generateMarkdown` |
 
 Pipeline in `runInsights`:
@@ -101,7 +102,7 @@ No build step, no linter, no formatter. TypeScript runs directly via Node type s
 
 ## Important Files
 
-- `index.ts`: entry point; `runInsights` orchestrator; `OMP_FEATURES_REFERENCE` (LLM feature list, must stay accurate to omp: skills + managed-skills, hooks, extensions, subagents, xd:// devices, MCP, model roles, fallback chains, advisor).
+- `index.ts`: entry point; `runInsights` orchestrator; `src/prompts.ts#buildFeaturesReference` (LLM feature list built from live state, must stay accurate to omp: skills + managed-skills, hooks, extensions, subagents, xd:// devices, MCP, model roles, fallback chains, advisor, memory backend).
 - `package.json`: `omp.extensions` discovery, scripts, `engines.node >=22.6`.
 - `README.md`: provenance (upstream `Observal/pi-insights`, AGPL), port status, usage flags, data layout. Upstream itself derives from a Claude Code command; never copy from leaked Claude Code source.
 - `CHANGELOG.md`: Added/Changed/Removed/Fixed sections; update with user-visible changes.

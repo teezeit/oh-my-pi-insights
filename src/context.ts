@@ -110,6 +110,7 @@ export async function gatherUserContext(): Promise<UserContext> {
 		model_roles: {},
 		fallback_chains: {},
 		default_model: "",
+		memory_backend: "learn",
 	};
 
 	// Global instructions. omp has no ~/.omp/agent/AGENTS.md; the user-level
@@ -154,6 +155,11 @@ export async function gatherUserContext(): Promise<UserContext> {
 				if (Array.isArray(list)) ctx.fallback_chains[role] = list;
 			}
 		}
+		// Absent means the default built-in memory tool, named "learn" in the
+		// features reference; only an explicit override (e.g. mnemopi) changes it.
+		const memory = yamlMap(cfg, "memory");
+		const backend = memory?.backend;
+		if (typeof backend === "string" && backend) ctx.memory_backend = backend;
 	} catch {}
 
 	// Both skill dirs matter: a suggestion recommending an already-installed

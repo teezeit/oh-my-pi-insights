@@ -68,6 +68,26 @@ upstream verbatim; every entry below is a diff against it.
   dollar amounts only; bare integers are not checked.
 - `n=` sample size on every stat card and chart in the HTML report;
   facet charts are labelled decay-weighted.
+- **Live features reference** (`buildFeaturesReference`): swaps the Memory
+  entry for retain/recall when `memory.backend` isn't the default `learn`,
+  instead of always advertising the `learn` tool.
+- **Suggestion filtering** (`filterSuggestions`): drops a generated
+  suggestion if it names a feature unavailable in the live harness state
+  (e.g. the `learn` tool when `memory.backend` is `mnemopi`) or an
+  already-installed skill (exact name or close token-overlap match).
+- **Harness-change detection** (`src/harness.ts`): diffs
+  `config.yml.bak-*` snapshots, skill/hook install dates and `AGENTS.md`
+  mtime against the report window, surfacing memory-backend switches and
+  other harness changes in "What Changed This Week" (flagged `too_recent`
+  when fewer than 7 days of corpus data exist after the change) — a signal
+  independent of `src/temporal.ts`'s facet-derived model-switch diff.
+- **Tooling-session exclusion** (`excludeToolingSessions`): this repo's own
+  development sessions are dropped before aggregation entirely (totals
+  included), so they no longer dominate worst-turn and friction signals.
+  Configurable via `--exclude-projects` / `OMP_INSIGHTS_EXCLUDE_PROJECTS`
+  (comma-separated, substring-matched; `none` opts out), default excludes
+  `oh-my-pi-insights`. The excluded count is reported in the corpus audit
+  table and the session-set.json manifest.
 
 ### Changed
 
@@ -77,8 +97,13 @@ upstream verbatim; every entry below is a diff against it.
   `managed-skills/`, `extensions/`, `hooks/<event>/`, `mcp.json`, and
   `~/.claude/CLAUDE.md`.
 - `PI_FEATURES_REFERENCE` rewritten as `OMP_FEATURES_REFERENCE` for omp's
-  feature set. Getting this list wrong is the main way the report becomes
-  useless, because the model can only suggest features it is told exist.
+  feature set, then that static constant replaced by
+  `buildFeaturesReference(ctx)` built from the live `UserContext` (memory
+  backend) rather than a hardcoded list. Getting this list wrong is the main
+  way the report becomes useless, because the model can only suggest
+  features it is told exist.
+- `gatherUserContext` also reads `memory.backend` from `config.yml`
+  (`UserContext.memory_backend`, default `"learn"`).
 - Model calls go through an `omp -p` subprocess with the prompt on stdin. omp
   exposes credentials to extensions but no completion client; shelling out
   inherits every provider dialect and auth scheme omp supports instead of
