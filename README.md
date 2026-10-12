@@ -3,9 +3,49 @@
 
 # omp Insights
 
-Personal usage analytics for the **omp** coding harness. Scans your session
-history, extracts deterministic stats, and generates a report covering your
-workflows, spend and friction points.
+Personal usage analytics for the **omp** coding harness. Run `/insights` in
+omp and get an HTML report of your workflows, spend and friction points,
+built from your local session history.
+
+![Example report (synthetic data)](docs/report-screenshot.png)
+
+*Example report rendered from synthetic data.*
+
+## Install
+
+Current release: **`v0.1.0-rc.1`** (release candidate; not yet on npm).
+Requires omp `>=18.8.4 <19` (check with `omp --version`).
+
+```bash
+omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.1"
+omp plugin list            # shows the installed version and path
+omp plugin doctor          # verifies the install
+```
+
+Always install from the tag, not `#main`: `main` moves. To update, re-run the
+install with the newer tag. To remove: `omp plugin uninstall @teezeit/omp-insights`
+(the caches under `~/.omp/agent/usage-data/` stay; delete that folder too for a
+clean slate).
+
+From a checkout instead: `omp -e ./index.ts` (one session, no install) or
+`omp plugin link .` (links the checkout).
+
+### First run
+
+1. Start omp in any project and run `/insights`. The first run reads every
+   session and classifies up to 50 of them, so it takes minutes, not seconds.
+2. The report opens in your browser; it is also at
+   `~/.omp/agent/usage-data/report.html`. Add `--md` for a Markdown copy.
+3. Re-render without any model calls: `/insights --no-llm`.
+4. Feedback: open an issue on this repository with the report section, what
+   you expected, and (if relevant) a screenshot. Do not attach `report.html`
+   or session logs unless you are fine sharing their content.
+
+Known limits in this release: untested on Windows; the Claude Code source
+(`--source claude`) has no interruption or per-tool timing data; nav links
+jump to a collapsed section's header but do not open it.
+
+## Provenance
 
 This is a port of [`Observal/pi-insights`](https://github.com/Observal/pi-insights)
 (AGPL-3.0-only) from the Pi coding agent to omp, built by the Observal team
@@ -70,39 +110,6 @@ Added or changed, and why:
 - Profile-aware agent dir resolution (`OMP_PROFILE` / `PI_PROFILE` / `PI_CODING_AGENT_DIR`) instead of a hardcoded path.
 - A redesigned report: light theme, collapsible sections, an action list, evidence links, config diffs, report-to-report diffs.
 - A test suite (node --test, no dependencies); upstream shipped none.
-
-## Install
-
-Current release: **`v0.1.0-rc.1`** (release candidate; not yet on npm).
-
-```bash
-omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.1"
-omp plugin list            # shows the installed version and path
-omp plugin doctor          # verifies the install
-```
-
-Always install from the tag, not `#main`: `main` moves. To update, re-run the
-install with the newer tag. To remove: `omp plugin uninstall @teezeit/omp-insights`
-(the caches under `~/.omp/agent/usage-data/` stay; delete that folder too for a
-clean slate).
-
-From a checkout instead: `omp -e ./index.ts` (one session, no install) or
-`omp plugin link .` (links the checkout).
-
-### First run
-
-1. Start omp in any project and run `/insights`. The first run reads every
-   session and classifies up to 50 of them, so it takes minutes, not seconds.
-2. The report opens in your browser; it is also at
-   `~/.omp/agent/usage-data/report.html`. Add `--md` for a Markdown copy.
-3. Re-render without any model calls: `/insights --no-llm`.
-4. Feedback: open an issue on this repository with the report section, what
-   you expected, and (if relevant) a screenshot. Do not attach `report.html`
-   or session logs unless you are fine sharing their content.
-
-Known limits in this release: untested on Windows; the Claude Code source
-(`--source claude`) has no interruption or per-tool timing data; nav links
-jump to a collapsed section's header but do not open it.
 
 ## Data and cost
 
