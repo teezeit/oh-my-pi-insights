@@ -62,7 +62,12 @@ export async function ensureDirs(): Promise<void> {
 // because the cache hit and the backfill made the miss invisible. A schema
 // version is the correct fix; bump it whenever SessionMeta gains a field
 // that must not read as a false zero.
-export const META_SCHEMA_VERSION = 6;
+//
+// v7: a forked session's log embeds a full copy of its parent's history
+// (same record ids, same cost); every cached fork meta built before this
+// version double-counted that shared prefix. The bump forces every cached
+// meta to recompute once so forks pick up the dedupe, not just new sessions.
+export const META_SCHEMA_VERSION = 7;
 
 export async function loadCachedMeta(
 	sourceName: string,

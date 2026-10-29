@@ -76,6 +76,85 @@ export async function collectSidecars(
 }
 
 /**
+ * omp forks a session by writing a new log whose header carries
+ * `parentSession` and which embeds a full copy of the parent's history up to
+ * the fork point: same record ids, same usage/cost, same tool calls. Summing
+ * a fork's log in full double-counts every record it shares with its
+ * ancestor chain, so a fork's build must drop any record whose id already
+ * appears in an ancestor's log - by id, never by position, since the new
+ * (unique) records are appended after the copied prefix, not at a fixed
+ * offset.
+ *
+ * A sidecar's own `session` record also carries `parentSession`, but as the
+ * parent's absolute log path rather than a bare session id (subagent/advisor
+ * nesting, not a fork); only a path-free value marks a real fork.
+ */
+export async function resolveForkExcludedIds(
+	sessionsDir: string,
+	entries: AnyEntry[],
+): Promise<Set<string> | null> {
+	const excluded = new Set<string>();
+	const visited = new Set<string>();
+	let header = entries.find((e) => e.type === "session");
+	let parentId = typeof header?.parentSession === "string" ? header.parentSession : undefined;
+
+	while (parentId && !parentId.includes("/") && !visited.has(parentId)) {
+		visited.add(parentId);
+		const parentPath = await findSessionPath(sessionsDir, parentId);
+		if (!parentPath) break;
+
+		let parentEntries: AnyEntry[];
+		try {
+			parentEntries = await readJsonl(parentPath);
+		} catch {
+			break;
+		}
+		for (const e of parentEntries) {
+			if (typeof e.id === "string") excluded.add(e.id);
+		}
+
+		header = parentEntries.find((e) => e.type === "session");
+		parentId = typeof header?.parentSession === "string" ? header.parentSession : undefined;
+	}
+
+	return excluded.size > 0 ? excluded : null;
+}
+
+/**
+ * Locate a top-level session log by id. The id is encoded in the filename
+ * (`<ISO-ts>_<session-id>.jsonl`), so this never has to read file content;
+ * only direct children of each project dir are candidates, matching
+ * `listSessions` (sidecars live one directory level deeper and are never a
+ * fork's parent).
+ */
+async function findSessionPath(sessionsDir: string, sessionId: string): Promise<string | null> {
+	let projects: DirEntry[] = [];
+	try {
+		projects = await readdir(sessionsDir, { withFileTypes: true });
+	} catch {
+		return null;
+	}
+	for (const project of projects) {
+		if (!project.isDirectory()) continue;
+		const projectDir = join(sessionsDir, project.name);
+		let entries: DirEntry[] = [];
+		try {
+			entries = await readdir(projectDir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (entry.isDirectory() || !entry.name.endsWith(".jsonl")) continue;
+			const base = entry.name.slice(0, -".jsonl".length);
+			const sep = base.indexOf("_");
+			const id = sep >= 0 ? base.slice(sep + 1) : base;
+			if (id === sessionId) return join(projectDir, entry.name);
+		}
+	}
+	return null;
+}
+
+/**
  * ~/.omp/agent/sessions/<slugified-cwd>/<ISO-ts>_<session-id>.jsonl, with an
  * optional sibling directory of the same basename holding __advisor.jsonl,
  * subagent logs and tool-output spill.
@@ -91,7 +170,13 @@ export function createOmpSessionSource(sessionsDir: string = SESSIONS_DIR): Sess
 		root: sessionsDir,
 		readEntries: readJsonl,
 		isMetaSession,
-		buildMeta: buildSessionMeta,
+		async buildMeta(ref, entries, sidecars) {
+			const excludeIds = await resolveForkExcludedIds(sessionsDir, entries);
+			const filtered = excludeIds
+				? entries.filter((e) => !(typeof e.id === "string" && excludeIds.has(e.id)))
+				: entries;
+			return buildSessionMeta(ref, filtered, sidecars);
+		},
 		readSidecar: extractSidecarUsage,
 		formatTranscript,
 		async listSessions(): Promise<SessionScan> {

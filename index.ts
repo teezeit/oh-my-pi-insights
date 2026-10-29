@@ -36,7 +36,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { createClaudeSessionSource } from "./src/sources/claude.ts";
-import { createOmpSessionSource, ompSessionSource } from "./src/sources/omp.ts";
+import { createOmpSessionSource, ompSessionSource, resolveForkExcludedIds } from "./src/sources/omp.ts";
 import { flattenYaml, gatherUserContext, parseSimpleYaml } from "./src/context.ts";
 import {
 	AGENT_DIR,
@@ -381,7 +381,7 @@ async function runInsights(
 						})),
 					);
 
-					const meta = source.buildMeta(ref, entries, sidecars);
+					const meta = await source.buildMeta(ref, entries, sidecars);
 					await saveMeta(source.name, meta);
 					metas.push(meta);
 				} catch {
@@ -871,6 +871,7 @@ export {
 	readUsage,
 	readProviderAuth,
 	resolveAgentDir,
+	resolveForkExcludedIds,
 	resolveSafeSessionId,
 	isSafeSessionId,
 	FACETS_DIR,

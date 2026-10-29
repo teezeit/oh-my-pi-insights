@@ -9,11 +9,66 @@
 // reimplementing them.
 
 import { execFile as execFileCb } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // The omp binary this extension shells out to for model calls. Overridable so
 // a non-PATH install still works.
 export const OMP_BIN = process.env.OMP_INSIGHTS_OMP_BIN || "omp";
 export const MODEL_CALL_TIMEOUT_MS = 300_000;
+
+// `omp -p` has no flag to turn off long-term memory recall/retention
+// (mnemopi), so the child's memory backend is switched off per-run with a
+// `--config` overlay instead: `omp config list` confirms `memory.backend`
+// accepts `off` alongside `local|hindsight|mnemopi|sharpshooter`, and
+// `--config=<value>` ("Load an extra config.yml-style overlay for this run")
+// applies it without touching the user's `~/.omp/agent/config.yml`. Without
+// this the child inherited the user's `memory.backend: mnemopi` and retained
+// the facet-extraction prompt into the project's memory bank, which then
+// leaked into unrelated sessions.
+let memoryOffConfigPath: string | undefined;
+
+/** Path to a one-off `--config` overlay that sets `memory.backend: off`. */
+export function getMemoryOffConfigPath(): string {
+	if (memoryOffConfigPath) return memoryOffConfigPath;
+	const dir = mkdtempSync(join(tmpdir(), "omp-insights-memoff-"));
+	const path = join(dir, "memory-off.yml");
+	writeFileSync(path, "memory:\n  backend: off\n");
+	memoryOffConfigPath = path;
+	return path;
+}
+
+/**
+ * argv for the `omp -p` child `callModel` spawns. Pulled out as a pure
+ * function so the lockdown flags are testable without spawning a process.
+ *
+ * `--no-session` keeps these calls out of the session corpus this report
+ * reads; `--no-tools --no-extensions --no-skills` keep the child from doing
+ * anything but answering; `--no-context-files --no-rules` keep it from
+ * loading AGENTS.md/CLAUDE.md or repo rules it does not need, since the
+ * facet/section/synthesis prompts are fully self-contained. There is no
+ * documented flag to disable hooks or MCP servers for a single `-p` run, so
+ * those still load (a child may print MCP connection warnings to stderr,
+ * which `callModel` ignores on success); this is unrelated to the memory
+ * leak and left as-is.
+ */
+export function buildModelArgs(opts: { model?: string }): string[] {
+	const args = [
+		"--no-session",
+		"--no-tools",
+		"--no-extensions",
+		"--no-skills",
+		"--no-context-files",
+		"--no-rules",
+		"--no-title",
+		"--config",
+		getMemoryOffConfigPath(),
+	];
+	if (opts.model) args.push("--model", opts.model);
+	args.push("-p");
+	return args;
+}
 
 /**
  * omp hands extensions credentials (`ctx.modelRegistry.getApiKeyAndHeaders`)
@@ -26,18 +81,15 @@ export const MODEL_CALL_TIMEOUT_MS = 300_000;
  * anthropic-messages, openai-responses and github-copilot and would rot the
  * first time a model role moved. The prompt goes over stdin, not argv, so
  * transcript-sized prompts cannot hit an argument-length limit.
- *
  * `--no-session` keeps these calls out of the session corpus this report
- * reads, and `--no-tools --no-extensions --no-skills` keeps them from doing
- * anything but answering.
+ * reads; `buildModelArgs` adds the rest of the lockdown flags (see its
+ * doc comment), including the per-run memory-off overlay.
  */
 export async function callModel(
 	prompt: string,
 	opts: { model?: string; timeoutMs?: number } = {},
 ): Promise<string> {
-	const args = ["--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-title"];
-	if (opts.model) args.push("--model", opts.model);
-	args.push("-p");
+	const args = buildModelArgs({ model: opts.model });
 
 	const child = execFileCb(
 		OMP_BIN,

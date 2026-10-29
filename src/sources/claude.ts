@@ -366,7 +366,7 @@ export function createClaudeSessionSource(projectsDir: string = CLAUDE_PROJECTS_
 		readEntries: readJsonl,
 		isMetaSession,
 		readSidecar: extractSidecarUsage,
-		buildMeta: (ref, entries) => buildClaudeMeta(ref, entries),
+		buildMeta: async (ref, entries) => buildClaudeMeta(ref, entries),
 		formatTranscript(entries, meta) {
 			const lines: string[] = [
 				`Session: ${meta.session_id.slice(0, 8)}`,

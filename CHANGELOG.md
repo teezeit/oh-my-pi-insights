@@ -9,6 +9,23 @@ Versioning restarts at `0.1.0` for this fork. Upstream
 `1.2.3`; carrying that number forward would have implied a continuity of
 package identity that does not exist, since this targets a different harness.
 
+## Unreleased
+
+### Fixed
+
+- **Forked sessions no longer recount their parent's history.** omp writes a
+  fork as a new log carrying a copy of the parent's records (same ids, same
+  usage). The omp source now drops records whose ids appear in the parent
+  chain, so cost, tokens, messages, tool calls and errors, commits and pushes
+  count once. A fork whose parent log is gone is counted in full. On one
+  corpus, 19.1% of assistant messages were such copies. Session-meta schema
+  bumped to 7, so every cached meta recomputes once.
+- **Model calls no longer write to long-term memory.** The `omp -p` child
+  inherited the user's memory backend (mnemopi) and retained facet and section
+  prompts, which were then recalled in unrelated sessions. The child now runs
+  with a `--config` overlay setting `memory.backend: off`, plus
+  `--no-context-files --no-rules`.
+
 ## 0.1.0-rc.1 - 2026-10-08
 
 Release candidate (not yet published to npm). Install from git tag

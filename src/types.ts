@@ -470,13 +470,14 @@ export type SessionSource = {
 	/**
 	 * Fold a log and its sidecars into one SessionMeta. Owned by the source
 	 * because record schemas differ per harness; everything above this
-	 * boundary only ever sees SessionMeta.
+	 * boundary only ever sees SessionMeta. Async: a forked log (omp only)
+	 * must read its ancestor chain to drop records already counted there.
 	 */
 	buildMeta(
 		ref: SessionRef,
 		entries: AnyEntry[],
 		sidecars: Array<{ kind: SidecarKind; usage: SidecarUsage }>,
-	): SessionMeta;
+	): Promise<SessionMeta>;
 	readSidecar(entries: AnyEntry[]): SidecarUsage;
 	formatTranscript(entries: AnyEntry[], meta: SessionMeta): string;
 };
