@@ -1,6 +1,6 @@
 {
   "name": "@teezeit/omp-insights",
-  "version": "0.1.0-rc.2",
+  "version": "0.1.0-rc.3",
   "type": "module",
   "description": "omp Insights extension: generates a personal usage insights report from your omp session history",
   "author": "Hari Srinivasan <harisrini21@gmail.com>",

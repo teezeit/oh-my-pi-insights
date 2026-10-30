@@ -9,7 +9,12 @@ Versioning restarts at `0.1.0` for this fork. Upstream
 `1.2.3`; carrying that number forward would have implied a continuity of
 package identity that does not exist, since this targets a different harness.
 
-## Unreleased
+## 0.1.0-rc.3 - 2026-10-30
+
+Release candidate. Install from git tag `v0.1.0-rc.3`; requires omp
+`>=18.8.4 <19`. The plugin's data moves to `~/.omp/agent/omp-insights/`
+(renamed automatically from `usage-data/` on the first run), and retros
+name their project and link the session log.
 
 ### Changed
 
