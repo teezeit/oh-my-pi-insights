@@ -106,3 +106,27 @@ test("resolved_friction excludes a type still present in the current run's frict
 	const withCurrent = computeTemporalData(metas, facetsMap, { wrong_approach: 5 });
 	assert.ok(!withCurrent.resolved_friction.includes("wrong_approach"));
 });
+
+test("below MIN_WINDOW_SESSIONS sessions total, trajectory reports insufficient data with no 'decreasing' claim", () => {
+	const metas = [];
+	for (let d = 1; d <= 15; d++) metas.push(session(`s${d}`, d, "anthropic/claude-opus-5", 20 - d, 5));
+
+	const t = computeTemporalData(metas, new Map());
+
+	assert.equal(t.trajectory.cost, "insufficient");
+	assert.equal(t.trajectory.errors, "insufficient");
+	assert.match(t.trajectory.note, /not enough sessions/i);
+	assert.doesNotMatch(t.trajectory.note, /decreasing/);
+});
+
+test("with 45 sessions split across a falling-cost window, trajectory computes a trend", () => {
+	const metas = [];
+	for (let d = 1; d <= 25; d++) metas.push(session(`old${d}`, d, "anthropic/claude-opus-5", 10, 10));
+	for (let d = 26; d <= 45; d++) metas.push(session(`new${d}`, d, "anthropic/claude-opus-5", 5, 4));
+
+	const t = computeTemporalData(metas, new Map());
+
+	assert.equal(t.trajectory.cost, "decreasing");
+	assert.equal(t.trajectory.errors, "decreasing");
+	assert.match(t.trajectory.note, /cost decreasing, errors decreasing/);
+});

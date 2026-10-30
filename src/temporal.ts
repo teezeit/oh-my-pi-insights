@@ -43,21 +43,39 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 	const tw = periodSummary(thisWeekSessions);
 	const lw = periodSummary(lastWeekSessions);
 
-	// Trajectory: direction only. Why: a percentage here was a third delta over
-	// yet another window; the single quoted delta is `delta` below.
+	// Trajectory: direction only, gated by MIN_WINDOW_SESSIONS the same way
+	// `delta` is. Why: a 10-vs-10 session swing is noise (see the gate
+	// comment above); below the threshold this must not claim a trend.
 	const recent10 = sorted.slice(-10);
 	const older = sorted.slice(0, -10);
 	const recentCost = recent10.reduce((s, m) => s + m.total_cost, 0) / recent10.length;
 	const olderCost = older.length ? older.reduce((s, m) => s + m.total_cost, 0) / older.length : recentCost;
 	const recentErrors = recent10.reduce((s, m) => s + m.tool_errors, 0) / recent10.length;
 	const olderErrors = older.length ? older.reduce((s, m) => s + m.tool_errors, 0) / older.length : recentErrors;
-	const costTrend = recentCost > olderCost * 1.2 ? "increasing" : recentCost < olderCost * 0.8 ? "decreasing" : "stable";
-	const errorTrend = recentErrors > olderErrors * 1.2 ? "increasing" : recentErrors < olderErrors * 0.8 ? "decreasing" : "stable";
-	const trajectory = {
-		cost: costTrend,
-		errors: errorTrend,
-		note: older.length ? `Recent 10 vs earlier ${older.length} sessions: cost ${costTrend}, errors ${errorTrend}` : "Not enough history",
-	};
+
+	const recentWindow = sorted.slice(-MIN_WINDOW_SESSIONS);
+	const olderWindow = sorted.slice(0, -MIN_WINDOW_SESSIONS);
+	const trajectoryInsufficient = recentWindow.length < MIN_WINDOW_SESSIONS || olderWindow.length < MIN_WINDOW_SESSIONS;
+	let trajectory: TemporalData["trajectory"];
+	if (trajectoryInsufficient) {
+		trajectory = {
+			cost: "insufficient",
+			errors: "insufficient",
+			note: `Not enough sessions for a cost/error trend (need ${MIN_WINDOW_SESSIONS}+ per window)`,
+		};
+	} else {
+		const windowRecentCost = recentWindow.reduce((s, m) => s + m.total_cost, 0) / recentWindow.length;
+		const windowOlderCost = olderWindow.reduce((s, m) => s + m.total_cost, 0) / olderWindow.length;
+		const windowRecentErrors = recentWindow.reduce((s, m) => s + m.tool_errors, 0) / recentWindow.length;
+		const windowOlderErrors = olderWindow.reduce((s, m) => s + m.tool_errors, 0) / olderWindow.length;
+		const costTrend = windowRecentCost > windowOlderCost * 1.2 ? "increasing" : windowRecentCost < windowOlderCost * 0.8 ? "decreasing" : "stable";
+		const errorTrend = windowRecentErrors > windowOlderErrors * 1.2 ? "increasing" : windowRecentErrors < windowOlderErrors * 0.8 ? "decreasing" : "stable";
+		trajectory = {
+			cost: costTrend,
+			errors: errorTrend,
+			note: `Recent ${MIN_WINDOW_SESSIONS} vs earlier ${olderWindow.length} sessions: cost ${costTrend}, errors ${errorTrend}`,
+		};
+	}
 
 	// Anomalies
 	const anomalies: TemporalData["anomalies"] = [];

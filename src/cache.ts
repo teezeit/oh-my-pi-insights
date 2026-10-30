@@ -76,8 +76,13 @@ export async function ensureDirs(): Promise<void> {
 // byte into a fork's sidecar directory. v7 deduped the primary log by
 // record id but left sidecars folded in full, double-counting
 // cost_subagent (and sidecar tokens/tool calls/errors). The bump forces
-// cached fork metas to recompute with sidecar dedupe applied.
-export const META_SCHEMA_VERSION = 8;
+// v9: current omp logs carry `parentSession` as the parent's absolute log
+// path, not a bare session id, for real top-level forks too (not just
+// sidecar nesting). The old dedupe walk only followed bare-id values, so
+// forks in this (now common) shape were never deduped against their parent
+// at all - full double count of every shared record. The bump forces cached
+// fork metas to recompute with path-shaped parentSession also deduped.
+export const META_SCHEMA_VERSION = 9;
 
 export async function loadCachedMeta(
 	sourceName: string,

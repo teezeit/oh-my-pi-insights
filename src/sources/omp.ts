@@ -85,9 +85,13 @@ export async function collectSidecars(
  * (unique) records are appended after the copied prefix, not at a fixed
  * offset.
  *
- * A sidecar's own `session` record also carries `parentSession`, but as the
- * parent's absolute log path rather than a bare session id (subagent/advisor
- * nesting, not a fork); only a path-free value marks a real fork.
+ * `parentSession` has carried two shapes across omp versions: a bare parent
+ * session id (older logs; resolved via `findSessionPath`, a directory walk)
+ * and the parent's absolute log path (current logs; usable directly). Both
+ * mark a real fork here - this is only ever called on a top-level session's
+ * own entries (`buildMeta` below), never on a sidecar's, so there is no
+ * ambiguity to resolve between the two shapes; only the lookup strategy
+ * differs.
  */
 export async function resolveForkExcludedIds(
 	sessionsDir: string,
@@ -98,9 +102,9 @@ export async function resolveForkExcludedIds(
 	let header = entries.find((e) => e.type === "session");
 	let parentId = typeof header?.parentSession === "string" ? header.parentSession : undefined;
 
-	while (parentId && !parentId.includes("/") && !visited.has(parentId)) {
+	while (parentId && !visited.has(parentId)) {
 		visited.add(parentId);
-		const parentPath = await findSessionPath(sessionsDir, parentId);
+		const parentPath = parentId.includes("/") ? parentId : await findSessionPath(sessionsDir, parentId);
 		if (!parentPath) break;
 
 		let parentEntries: AnyEntry[];
@@ -140,9 +144,9 @@ export async function resolveForkSidecarExcludedIds(
 	let header = entries.find((e) => e.type === "session");
 	let parentId = typeof header?.parentSession === "string" ? header.parentSession : undefined;
 
-	while (parentId && !parentId.includes("/") && !visited.has(parentId)) {
+	while (parentId && !visited.has(parentId)) {
 		visited.add(parentId);
-		const parentPath = await findSessionPath(sessionsDir, parentId);
+		const parentPath = parentId.includes("/") ? parentId : await findSessionPath(sessionsDir, parentId);
 		if (!parentPath) break;
 
 		const parentSidecarDir = parentPath.slice(0, -".jsonl".length);

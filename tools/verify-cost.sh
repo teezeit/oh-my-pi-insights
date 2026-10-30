@@ -113,13 +113,20 @@ resolve_fork_exclusions() {
 	local parent_id parent_path parent_sidecar_dir safe
 	parent_id="$(header_parent_session "$path")"
 
-	# A bare session id never contains "/"; a path (sidecar nesting, not a
-	# fork) does, which is how resolveForkExcludedIds tells the two apart.
-	while [ -n "$parent_id" ] && [ "${parent_id#*/}" = "$parent_id" ]; do
+	# `parentSession` has carried two shapes across omp versions: a bare
+	# session id (older logs; resolved via find_session_path, a directory
+	# walk) and the parent's absolute log path (current logs; usable
+	# directly). Both mark a real fork; only the lookup strategy differs
+	# (mirrors resolveForkExcludedIds in src/sources/omp.ts).
+	while [ -n "$parent_id" ]; do
 		grep -qxF "$parent_id" "$visited" 2>/dev/null && break
 		printf '%s\n' "$parent_id" >>"$visited"
 
-		parent_path="$(find_session_path "$parent_id")"
+		if [ "${parent_id#*/}" != "$parent_id" ]; then
+			parent_path="$parent_id"
+		else
+			parent_path="$(find_session_path "$parent_id")"
+		fi
 		[ -n "$parent_path" ] && [ -f "$parent_path" ] || break
 
 		get_ids_cached "$parent_path" >>"$primary_out"

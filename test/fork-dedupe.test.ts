@@ -35,6 +35,8 @@ const ORPHAN_ID = "00000000-0000-7000-8000-00000000a003";
 const MISSING_PARENT_ID = "00000000-0000-7000-8000-00000000a999";
 const SIDECAR_PARENT_ID = "00000000-0000-7000-8000-00000000a004";
 const SIDECAR_FORK_ID = "00000000-0000-7000-8000-00000000a005";
+const PATH_PARENT_ID = "00000000-0000-7000-8000-00000000a008";
+const PATH_FORK_ID = "00000000-0000-7000-8000-00000000a009";
 
 let root: string;
 
@@ -171,6 +173,37 @@ before(async () => {
 	await writeFile(join(projDir, scForkDirName, "shared-sub.jsonl"), sharedSubagentContent);
 	// Genuinely new sidecar: only this fork has it.
 	await writeFile(join(projDir, scForkDirName, "fork-only-sub.jsonl"), forkOnlySubagentContent);
+
+	// Real-world fork shape observed in production omp logs (2026-10): the
+	// fork's `parentSession` header field is the parent's absolute log path,
+	// not a bare session id. The dedupe walk must treat this the same as the
+	// bare-id form, or a fork like this double-counts every record it shares
+	// with its parent (e.g. two `worst_turn` facts for the same turn).
+	const pathSharedHuman = human("path-shared-human-1", "please commit this too", 1_788_000_400_000);
+	const pathSharedAssistant = assistantWithBashCommit("path-shared-asst-1", 6.0, 600, "tc-path-shared", 1_788_000_410_000);
+	const pathSharedToolResult = toolResultError("path-shared-toolresult-1", "tc-path-shared", 1_788_000_420_000);
+
+	const pathNewHuman = human("path-fork-human-2", "now commit the rest too", 1_788_000_500_000);
+	const pathNewAssistant = assistantWithBashCommit("path-fork-asst-2", 7.0, 700, "tc-path-fork", 1_788_000_510_000);
+	const pathNewToolResult = toolResultError("path-fork-toolresult-2", "tc-path-fork", 1_788_000_520_000);
+
+	const pathParentLines = [sessionHeader(PATH_PARENT_ID), pathSharedHuman, pathSharedAssistant, pathSharedToolResult];
+	const pathParentPath = join(projDir, `2026-09-07T16-00-00-000Z_${PATH_PARENT_ID}.jsonl`);
+	await writeFile(pathParentPath, pathParentLines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+	const pathForkLines = [
+		sessionHeader(PATH_FORK_ID, pathParentPath),
+		pathSharedHuman,
+		pathSharedAssistant,
+		pathSharedToolResult,
+		pathNewHuman,
+		pathNewAssistant,
+		pathNewToolResult,
+	];
+	await writeFile(
+		join(projDir, `2026-09-07T17-00-00-000Z_${PATH_FORK_ID}.jsonl`),
+		pathForkLines.map((l) => JSON.stringify(l)).join("\n") + "\n",
+	);
 });
 
 after(async () => {
@@ -241,4 +274,28 @@ test("the parent's own cost_subagent is unaffected by the fork's copied sidecar"
 	const parentMeta = await buildMetaFor(SIDECAR_PARENT_ID);
 
 	assert.equal(parentMeta.cost_subagent, 3.0);
+});
+
+test("a fork whose parentSession is an absolute path (not a bare id) still dedupes against its parent", async () => {
+	const forkMeta = await buildMetaFor(PATH_FORK_ID);
+
+	assert.equal(forkMeta.assistant_message_count, 1, "only the new assistant message, not the copied one too");
+	assert.equal(forkMeta.user_message_count, 1, "only the new human message");
+	assert.equal(forkMeta.total_cost, 7.0, "only the new assistant's cost, not 6.0 (shared) + 7.0 (new)");
+	assert.equal(forkMeta.input_tokens, 700, "only the new assistant's input tokens");
+	assert.equal(forkMeta.tool_counts.bash, 1, "only the new bash tool call");
+	assert.equal(forkMeta.git_commits, 1, "only the new git commit, not the shared one counted again");
+	assert.equal(forkMeta.tool_errors, 1, "only the new tool error, not the shared one counted again");
+});
+
+test("the path-parentSession fork's parent meta is unaffected by the fork existing", async () => {
+	const parentMeta = await buildMetaFor(PATH_PARENT_ID);
+
+	assert.equal(parentMeta.assistant_message_count, 1);
+	assert.equal(parentMeta.user_message_count, 1);
+	assert.equal(parentMeta.total_cost, 6.0);
+	assert.equal(parentMeta.input_tokens, 600);
+	assert.equal(parentMeta.tool_counts.bash, 1);
+	assert.equal(parentMeta.git_commits, 1);
+	assert.equal(parentMeta.tool_errors, 1);
 });

@@ -35,12 +35,14 @@ package identity that does not exist, since this targets a different harness.
   parent's sidecar logs into a fork's directory; sidecar records whose ids
   appear in the parent chain's sidecar at the same relative path are now
   dropped, so `cost_subagent`, tokens, tool calls and errors count once.
-  Session-meta schema bumped to 8.
-- **No trend claims from thin windows (#8).** Cost/error deltas need at
-  least 20 sessions per window; below that the report says there is not
-  enough data, the model-switch impact quotes no numbers, and no delta facts
-  reach the section prompts. The calendar-week "Model shifted" line is gone,
-  so at most one model-shift statement appears.
+  Forks whose `parentSession` is the parent's absolute log path (not only a
+  bare session id) are now deduped too. Session-meta schema bumped to 9.
+- **No trend claims from thin windows (#8).** Cost/error deltas and the
+  cost/error trajectory fed to the section prompts need at least 20
+  sessions per window; below that the report says there is not enough data,
+  the model-switch impact quotes no numbers, and the prompts forbid trend
+  claims. The calendar-week "Model shifted" line is gone, so at most one
+  model-shift statement appears.
 - **"Resolved" friction matches the chart (#9).** A friction type still
   present in this run's friction counts is never listed as resolved, in the
   HTML, the Markdown or the prompts.
