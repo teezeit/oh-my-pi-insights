@@ -267,6 +267,7 @@ test("retro path and header pick up the project slug and full session id from th
 	assert.match(result!.additionalContext, /retros[\\/].*peach-develop-content_5d4f9ebf\.md/);
 	assert.match(result!.additionalContext, new RegExp(`Session: ${fullId}`));
 	assert.match(result!.additionalContext, new RegExp(`Reopen: omp -r ${fullId}`));
+	assert.ok(result!.additionalContext.includes(`Log: ${file}`), "header names the session log file");
 	assert.match(result!.additionalContext, /Project: \/x\/peach\/\.worktrees\/develop-content/);
 	assert.match(result!.additionalContext, /# Retro \d{4}-\d{2}-\d{2} \d{2}:\d{2} - peach-develop-content/);
 });

@@ -205,6 +205,8 @@ export type RetroRequestData = {
 	project: string;
 	sessionId: string;
 	cwd: string;
+	/** Absolute path of the session's .jsonl log, so the retro links straight to it. */
+	sessionFile: string;
 };
 
 /**
@@ -230,6 +232,7 @@ export function buildRetroContext(data: RetroRequestData, retroPath: string): st
 		"",
 		`Session: ${data.sessionId}`,
 		`Reopen: omp -r ${data.sessionId}`,
+		`Log: ${data.sessionFile}`,
 		`Project: ${data.cwd}`,
 		"",
 		"Then these sections:",
@@ -295,7 +298,7 @@ export async function buildRetroResult(
 	await mkdir(join(options.dataDir, "retros"), { recursive: true });
 
 	const additionalContext = buildRetroContext(
-		{ wallClockMinutes, toolCalls, toolErrors, split, now, project, sessionId, cwd },
+		{ wallClockMinutes, toolCalls, toolErrors, split, now, project, sessionId, cwd, sessionFile: event.session_file },
 		retroPath,
 	);
 	return { continue: true, additionalContext };
