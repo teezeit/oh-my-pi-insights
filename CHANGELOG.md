@@ -11,6 +11,17 @@ package identity that does not exist, since this targets a different harness.
 
 ## Unreleased
 
+### Changed
+
+- **Retro prompt names no issue number.** The hidden retro instruction no
+  longer says "(issue #21)", so retros don't cite this repo's issue tracker.
+
+## 0.1.0-rc.2 - 2026-10-30
+
+Release candidate. Install from git tag `v0.1.0-rc.2`; requires omp
+`>=18.8.4 <19`. Adds `/insights time` and fixes cost double counting for
+forked sessions. Every cached session meta recomputes once on the first run.
+
 ### Added
 
 - **Optional end-of-work retro (#21).** Plugin feature `retro`, off by
@@ -22,15 +33,6 @@ package identity that does not exist, since this targets a different harness.
   omp's `session_stop` hook; skips subagents, headless runs and aborted
   requests. Thresholds via `OMP_INSIGHTS_RETRO_MIN_MINUTES` and
   `OMP_INSIGHTS_RETRO_MIN_TOOL_CALLS`.
-
-## 0.1.0-rc.2 - 2026-10-30
-
-Release candidate. Install from git tag `v0.1.0-rc.2`; requires omp
-`>=18.8.4 <19`. Adds `/insights time` and fixes cost double counting for
-forked sessions. Every cached session meta recomputes once on the first run.
-
-### Added
-
 - **Report history.** Each run still overwrites `report.html` (and
   `report.md` with `--md`), and now also writes a timestamped copy to
   `usage-data/reports/report-<timestamp>.html` / `.md`.

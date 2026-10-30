@@ -172,7 +172,7 @@ export type RetroRequestData = {
  */
 export function buildRetroContext(data: RetroRequestData, retroPath: string): string {
 	return [
-		"This request ran long enough to warrant a retro (issue #21).",
+		"This request ran long enough to warrant a retro.",
 		"",
 		"## Request data",
 		`- Wall clock: ${formatDuration(data.wallClockMinutes * 60)}`,
