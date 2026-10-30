@@ -179,7 +179,12 @@ section.
 Totals sum time across sessions, not unique calendar hours: parallel
 sessions overlap. The "busy elsewhere" split is inferred from messages in
 other selected sessions, not proof of what you did. CI/CD and agent polling
-are classified from command/code patterns. Claude Code timing is
+are classified from command/code patterns. Background subagents and
+background `bash` jobs count from their completion records, but only for
+time when the session was otherwise idle, so parallel work is never counted
+as waiting. Review is decided by the agent type (`reviewer`,
+`security-reviewer`); a job name mentioning review is only a fallback when
+the type is unknown. Claude Code timing is
 best-effort from message and tool timestamps; it lacks omp's detailed
 generation and tool-start records.
 

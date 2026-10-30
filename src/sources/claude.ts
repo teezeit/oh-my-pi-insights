@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { readJsonl } from "./omp.ts";
 import type { DirEntry } from "./omp.ts";
 import { activityIntervals, countNewlines, extractSidecarUsage, getLanguageFromPath, isMetaSession, resolveSafeSessionId, toolErrorCategory } from "../stats.ts";
-import { classifyWait, commandFamily, IDLE_CAP_SEC, partitionIntervals } from "../time.ts";
+import { classifyWait, commandFamily, IDLE_CAP_SEC, partitionIntervals, textNamesReview } from "../time.ts";
 import type { TaggedInterval } from "../time.ts";
 import type {
 	AnyEntry,
@@ -286,12 +286,10 @@ export function extractClaudeStats(entries: AnyEntry[]) {
 // time; anything left uncovered - most commonly the wait before the next
 // human message - falls to the same you/idle cap as extractTimeSplit, via
 // the shared partitionIntervals sweep.
-const REVIEW_TASK_RE = /\b(review|reviewer)\b/i;
-
 function isReviewTask(input: Record<string, unknown>): boolean {
 	const subagentType = typeof input.subagent_type === "string" ? (input.subagent_type as string) : "";
 	const description = typeof input.description === "string" ? (input.description as string) : "";
-	return REVIEW_TASK_RE.test(subagentType) || REVIEW_TASK_RE.test(description);
+	return textNamesReview(subagentType) || textNamesReview(description);
 }
 
 function classifyClaudeToolBucket(toolName: string, text: string, input: Record<string, unknown>): TimeBucket {

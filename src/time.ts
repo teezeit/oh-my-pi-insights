@@ -57,7 +57,34 @@ const ORCA_BLOCKING_RE =
 // kind of wait in practice.
 const POLL_HELPER_CALL_RE = /\bpoll\w*\s*\(/i;
 const POLL_LABEL_RE = /\b(?:action|label)\s*=\s*['"]([^'"]*)['"]/i;
-const REVIEW_LABEL_RE = /review|reviewer|verdict|approv/i;
+// Whole-token review matching, not substring: "preview"/"ModelPreview"
+// contain "review" as a substring but are never review wording in
+// practice, so text is split into tokens (on non-alphanumerics and
+// camelCase/letter-digit boundaries, e.g. "ReviewMR188" -> review, mr,
+// 188) before testing each token against the exact review vocabulary.
+// Exported so src/sources/claude.ts's Task subagent_type/description
+// check uses the same rule instead of a second, drifting regex.
+const REVIEW_TOKENS: Record<string, true> = {
+	review: true,
+	reviews: true,
+	reviewer: true,
+	reviewers: true,
+	reviewed: true,
+	reviewing: true,
+	verdict: true,
+	approve: true,
+	approved: true,
+	approval: true,
+};
+const TOKEN_BOUNDARY_RE = /[^a-zA-Z0-9]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])/g;
+
+export function textNamesReview(text: string): boolean {
+	return text
+		.split(TOKEN_BOUNDARY_RE)
+		.filter(Boolean)
+		.some((token) => REVIEW_TOKENS[token.toLowerCase()] === true);
+}
+
 const CI_LABEL_RE = /pipeline|\bci\b|deploy/i;
 const AGENTS_LABEL_RE = /worker|dispatch|agent/i;
 
@@ -65,12 +92,11 @@ function classifyPollHelper(text: string): WaitKind {
 	const labelMatch = POLL_LABEL_RE.exec(text);
 	if (!POLL_HELPER_CALL_RE.test(text) && !labelMatch) return null;
 	const label = labelMatch ? labelMatch[1]! : text;
-	if (REVIEW_LABEL_RE.test(label)) return "review";
+	if (textNamesReview(label)) return "review";
 	if (CI_LABEL_RE.test(label)) return "ci";
 	if (AGENTS_LABEL_RE.test(label)) return "agents";
 	return "polling";
 }
-
 // The single source of truth behind both `classifyWait` and
 // `commandFamily`'s `polling: <target>` label, so the two can never
 // disagree (see the "classifyWait and commandFamily agree" regression
@@ -94,7 +120,7 @@ function classifyBashEvalWait(text: string): { kind: Exclude<WaitKind, null>; ta
 	}
 
 	if (ORCA_BLOCKING_RE.test(text)) {
-		if (REVIEW_LABEL_RE.test(text)) return { kind: "review", target: "review" };
+		if (textNamesReview(text)) return { kind: "review", target: "review" };
 		return { kind: "agents", target: "orca" };
 	}
 
@@ -190,36 +216,46 @@ function evalLanguageFamily(language: string | undefined, text: string): string 
 // and injects this notice immediately, then delivers the actual result as a
 // later toolResult for the same toolCallId once the job finishes.
 const BACKGROUND_PROVISIONAL_RE = /\bBackgrounded as job bg_\d+/i;
+// Captures the job id out of that same notice, so #20's async-result
+// handling can map it back to the triggering toolCallId.
+const BACKGROUND_PROVISIONAL_ID_RE = /\bBackgrounded as job (bg_\d+)/i;
 
-// `wait` tool result: review if any job this wait returned is a review,
-// scoped to each job's own `<task-result ...>` tag or a "label: ..." line
-// naming it, so an unrelated mention of "review" inside a job's own output
-// text doesn't flip the whole wait to Review.
+// `wait` tool result: review if any job this wait returned is a review.
+// Each job's own `<task-result ...>` tag decides by agent type first (the
+// `agent="..."` attribute alone, so an id like "ReviewExtract" on a
+// non-reviewer agent doesn't flip it) and only falls back to scanning the
+// whole tag's text (id included) when the tag carries no agent attribute at
+// all (e.g. an older/foreign task-result shape). A "label: ..." line (no
+// task-result tag, how backgrounded bash jobs report back) always falls
+// back to its own text.
 const TASK_RESULT_TAG_RE = /<task-result\b[^>]*>/gi;
+const TASK_RESULT_AGENT_ATTR_RE = /\bagent\s*=\s*["']([^"']*)["']/i;
 const JOB_LABEL_LINE_RE = /^.*\blabel\s*:.*$/gim;
 
 function waitResultHasReviewJob(resultText: string): boolean {
 	for (const tag of resultText.match(TASK_RESULT_TAG_RE) ?? []) {
-		if (REVIEW_LABEL_RE.test(tag)) return true;
+		const agentAttr = TASK_RESULT_AGENT_ATTR_RE.exec(tag);
+		if (agentAttr) {
+			if (textNamesReview(agentAttr[1]!)) return true;
+		} else if (textNamesReview(tag)) return true;
 	}
 	for (const line of resultText.match(JOB_LABEL_LINE_RE) ?? []) {
-		if (REVIEW_LABEL_RE.test(line)) return true;
+		if (textNamesReview(line)) return true;
 	}
 	return false;
 }
 
-// `task` tool call: review if any dispatched subagent is a reviewer, read
+// `task` tool call: review if any dispatched subagent's agent type names
+// review (by agent type first, same rule as waitResultHasReviewJob), read
 // from the call's own arguments (its result may never mention the agent
 // type by name).
-const REVIEW_AGENT_NAMES: Record<string, true> = { reviewer: true, "security-reviewer": true };
-
 function taskArgsHaveReviewAgent(args: Record<string, unknown> | undefined): boolean {
 	if (!args) return false;
-	if (typeof args.agent === "string" && REVIEW_AGENT_NAMES[args.agent]) return true;
+	if (typeof args.agent === "string" && textNamesReview(args.agent)) return true;
 	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
 	for (const t of tasks) {
 		const agent = (t as Record<string, unknown> | undefined)?.agent;
-		if (typeof agent === "string" && REVIEW_AGENT_NAMES[agent]) return true;
+		if (typeof agent === "string" && textNamesReview(agent)) return true;
 	}
 	return false;
 }
@@ -254,10 +290,25 @@ export function commandFamily(toolName: string, text: string, language?: string)
 	return toolName || "unknown";
 }
 
-export type TaggedInterval = { start: number; end: number; bucket: TimeBucket };
+// `background`: this interval comes from an async-result job span (#20),
+// not from a call the parent was actively waiting on. It only ever wins a
+// segment that no real (non-background) interval covers: see
+// BACKGROUND_PRIORITY below.
+export type TaggedInterval = { start: number; end: number; bucket: TimeBucket; background?: true };
 
 // Why: "elsewhere" is never produced per session (aggregateTime decides it cross-session), so its priority is irrelevant here.
 const BUCKET_PRIORITY: Record<TimeBucket, number> = { ci: 5, review: 4, agents: 3, tools: 2, model: 1, you: 0, elsewhere: 0, idle: -1 };
+
+// A background interval's effective priority sits strictly between "you"
+// (0) and "model" (1): it fills a gap the session was otherwise idle in
+// (above you, so it isn't miscounted as waiting on the user), but it never
+// overrides real model/tool/agent/review/ci work the parent was actively
+// doing (below all of those). Its own bucket (ci/review/agents/tools)
+// still orders it against other background intervals it overlaps.
+const BACKGROUND_PRIORITY = 0.5;
+function intervalPriority(iv: TaggedInterval): number {
+	return iv.background ? BACKGROUND_PRIORITY + BUCKET_PRIORITY[iv.bucket] / 1000 : BUCKET_PRIORITY[iv.bucket];
+}
 
 /**
  * Resolves overlapping intervals to a partition of [rangeStart, rangeEnd):
@@ -284,7 +335,7 @@ function mergeCoverage(
 	const covered: Partial<Record<TimeBucket, number>> = {};
 	if (rangeEnd <= rangeStart) return { covered, gaps: [], youCovered: [] };
 	const clipped = intervals
-		.map((iv) => ({ start: Math.max(iv.start, rangeStart), end: Math.min(iv.end, rangeEnd), bucket: iv.bucket }))
+		.map((iv) => ({ start: Math.max(iv.start, rangeStart), end: Math.min(iv.end, rangeEnd), bucket: iv.bucket, background: iv.background }))
 		.filter((iv) => iv.end > iv.start);
 
 	const points = new Set<number>([rangeStart, rangeEnd]);
@@ -303,8 +354,8 @@ function mergeCoverage(
 		let bestBucket: TimeBucket | null = null;
 		let bestPriority = -Infinity;
 		for (const iv of clipped) {
-			if (iv.start <= segStart && iv.end >= segEnd && BUCKET_PRIORITY[iv.bucket] > bestPriority) {
-				bestPriority = BUCKET_PRIORITY[iv.bucket];
+			if (iv.start <= segStart && iv.end >= segEnd && intervalPriority(iv) > bestPriority) {
+				bestPriority = intervalPriority(iv);
 				bestBucket = iv.bucket;
 			}
 		}
@@ -449,6 +500,18 @@ export function extractTimeSplit(
 	const busyByTool: Record<string, number> = {};
 	const busyByCommand: Record<string, number> = {};
 	const humanMessages: Array<{ ts: number; text: string }> = [];
+	// #20: a `task` call's own `tasks[].name -> agent` mapping, collected as
+	// we scan assistant toolCall blocks, so a later async-result job (keyed
+	// by that same name as its jobId) can be classified by agent type
+	// without needing to see the call's own toolResult at all (dispatch and
+	// completion are two independent events for a backgrounded subagent).
+	const taskJobAgent = new Map<string, string>();
+	// #20: maps a backgrounded bash job's `bg_N` id (parsed out of the
+	// provisional "Backgrounded as job bg_N" toolResult) back to the
+	// triggering toolCallId, so the real async-result delivery can look up
+	// that call's original command/meta and replace its provisional
+	// interval exactly like a same-id follow-up toolResult would.
+	const bgJobToolCallId = new Map<string, string>();
 	let lastEntryMs = 0;
 	// Why: a session with no human message of its own (an assistant-only
 	// subagent/advisor sidecar) has no humanMessages[0] to anchor rangeStart;
@@ -465,6 +528,89 @@ export function extractTimeSplit(
 		if (wk === "review") return "review";
 		if (wk === "agents") return "agents";
 		return "tools";
+	}
+
+	// #20: classifies a background `task` job's async-result span. Known
+	// agent type (found via taskJobAgent, including the "task" default for
+	// an omitted `agent`) decides by type alone, matching
+	// waitResultHasReviewJob's "agent type first" rule; an unknown type
+	// (the spawning call didn't make it into this session's own entries,
+	// e.g. dropped as a fork copy) falls back to scanning the job's id and
+	// label for review wording.
+	function classifyBackgroundTaskJob(jobId: string, label: string): TimeBucket {
+		const agentType = taskJobAgent.get(jobId);
+		if (agentType !== undefined) return textNamesReview(agentType) ? "review" : "agents";
+		return textNamesReview(`${jobId} ${label}`) ? "review" : "agents";
+	}
+
+	// #20: classifies a background bash job's async-result span by the same
+	// rule as a live bash call (classifyWait on its full command), so a CI
+	// polling loop that gets backgrounded stays CI for its whole lifetime
+	// the same way a non-backgrounded one does.
+	function classifyBackgroundBashJob(command: string): TimeBucket {
+		const wk = classifyWait("bash", command);
+		if (wk === "ci") return "ci";
+		if (wk === "review") return "review";
+		if (wk === "agents") return "agents";
+		return "tools";
+	}
+
+	// #20: an async-result `custom_message` reports one or more background
+	// jobs that finished independently of anything the parent explicitly
+	// waited on. Each job's span is [delivery - durationMs, delivery]; a
+	// bash job whose provisional toolCallId is known replaces that call's
+	// provisional interval/busy-time exactly like a real follow-up
+	// toolResult would (so it isn't double-counted), otherwise (and for
+	// every task job, which has no 1:1 provisional slice to replace) a new
+	// background-tagged interval is pushed that only wins gaps the session
+	// was otherwise idle in (see BACKGROUND_PRIORITY).
+	function processAsyncResult(entry: AnyEntry) {
+		const deliveryTs = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+		if (Number.isNaN(deliveryTs)) return;
+		if (deliveryTs > lastEntryMs) lastEntryMs = deliveryTs;
+		const details = entry.details as Record<string, unknown> | undefined;
+		const jobs = Array.isArray(details?.jobs) ? (details.jobs as Array<Record<string, unknown>>) : [];
+		for (const job of jobs) {
+			const jobId = typeof job.jobId === "string" ? job.jobId : "";
+			const jobType = typeof job.type === "string" ? job.type : "";
+			const durationMs = typeof job.durationMs === "number" ? job.durationMs : 0;
+			const label = typeof job.label === "string" ? job.label : "";
+			if (!jobId || durationMs <= 0) continue;
+			const spanStart = deliveryTs - durationMs;
+			const spanEnd = deliveryTs;
+			if (spanEnd <= spanStart) continue;
+			if (firstEntryMs === null || spanStart < firstEntryMs) firstEntryMs = spanStart;
+
+			if (jobType === "task") {
+				intervals.push({ start: spanStart, end: spanEnd, bucket: classifyBackgroundTaskJob(jobId, label), background: true });
+				continue;
+			}
+			if (jobType !== "bash") continue;
+
+			const toolCallId = bgJobToolCallId.get(jobId);
+			const meta = toolCallId ? toolCallMeta.get(toolCallId) : undefined;
+			const command = meta?.text || label;
+			const bucket = classifyBackgroundBashJob(command);
+			const durationSec = durationMs / 1000;
+			const prior = toolCallId ? toolCallDelivered.get(toolCallId) : undefined;
+			if (toolCallId && prior) {
+				const deltaSec = durationSec - prior.durationSec;
+				intervals[prior.intervalIndex] = { start: spanStart, end: spanEnd, bucket, background: true };
+				busyByTool.bash = (busyByTool.bash ?? 0) + deltaSec;
+				const commandKey = bucket === "tools" ? commandFamily("bash", command, meta?.language) : null;
+				if (commandKey) busyByCommand[commandKey] = (busyByCommand[commandKey] ?? 0) + deltaSec;
+				toolCallDelivered.set(toolCallId, { intervalIndex: prior.intervalIndex, commandKey, durationSec });
+				toolCallStarts.delete(toolCallId);
+				toolCallDelivered.delete(toolCallId);
+			} else {
+				intervals.push({ start: spanStart, end: spanEnd, bucket, background: true });
+				busyByTool.bash = (busyByTool.bash ?? 0) + durationSec;
+				if (bucket === "tools") {
+					const commandKey = commandFamily("bash", command, meta?.language);
+					busyByCommand[commandKey] = (busyByCommand[commandKey] ?? 0) + durationSec;
+				}
+			}
+		}
 	}
 
 	for (const entry of entries) {
@@ -487,6 +633,10 @@ export function extractTimeSplit(
 				toolCallStarts.set(toolCallId, { toolName, startedAtMs });
 				if (startedAtMs > lastEntryMs) lastEntryMs = startedAtMs;
 			}
+			continue;
+		}
+		if (entry.type === "custom_message" && entry.customType === "async-result") {
+			processAsyncResult(entry);
 			continue;
 		}
 		if (entry.type !== "message") continue;
@@ -528,6 +678,14 @@ export function extractTimeSplit(
 								: "";
 					const language = toolName === "eval" && typeof args.language === "string" ? args.language : undefined;
 					toolCallMeta.set(toolId, { toolName, text, language, args });
+					if (toolName === "task") {
+						for (const t of Array.isArray(args.tasks) ? args.tasks : []) {
+							const tRec = t as Record<string, unknown> | undefined;
+							const name = typeof tRec?.name === "string" ? tRec.name : "";
+							if (!name) continue;
+							taskJobAgent.set(name, typeof tRec?.agent === "string" ? tRec.agent : "task");
+						}
+					}
 				}
 			}
 			continue;
@@ -581,6 +739,11 @@ export function extractTimeSplit(
 					// eventual follow-up (same toolCallId) can extend this
 					// call's interval to its real finish time instead of
 					// being lost when the provisional result is processed.
+					// #20: also remember which bg_N id this call became, so
+					// an async-result delivery for that id (instead of a
+					// same-id follow-up toolResult) can find it back.
+					const bgIdMatch = BACKGROUND_PROVISIONAL_ID_RE.exec(resultText);
+					if (bgIdMatch) bgJobToolCallId.set(bgIdMatch[1]!, toolCallId);
 				} else {
 					toolCallStarts.delete(toolCallId);
 					toolCallDelivered.delete(toolCallId);

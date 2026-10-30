@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { IDLE_CAP_SEC, classifyWait, commandFamily, extractTimeSplit } from "../src/time.ts";
+import { IDLE_CAP_SEC, classifyWait, commandFamily, extractTimeSplit, textNamesReview } from "../src/time.ts";
 import type { AnyEntry } from "../src/types.ts";
 
 // ── classifyWait ──────────────────────────────────────────────────────────
@@ -105,6 +105,27 @@ test("classifyWait: non-blocking orca calls (send, worker-read, worker-list, ter
 	assert.equal(classifyWait("bash", "orca terminal send term-1 'hi'"), null);
 	assert.equal(classifyWait("bash", "orca terminal read term-1"), null);
 	assert.equal(classifyWait("bash", "orca terminal list"), null);
+});
+
+test("classifyWait: a poll helper labeled with 'preview' deploy wording is a CI wait, not review (substring 'review' in 'preview' doesn't count)", () => {
+	assert.equal(classifyWait("eval", 'poll3(action="Waiting for preview deploy")'), "ci");
+});
+
+// ── textNamesReview: whole-token matching, not substring ───────────────────
+
+test("textNamesReview: matches whole-word and camelCase/digit-boundary review tokens", () => {
+	assert.equal(textNamesReview("ReviewMR188"), true);
+	assert.equal(textNamesReview("Review498AccessModule"), true);
+	assert.equal(textNamesReview("MiaFullReview"), true);
+	assert.equal(textNamesReview("jar-review-brief.md"), true);
+	assert.equal(textNamesReview("reviewer verdict"), true);
+	assert.equal(textNamesReview("security-reviewer"), true);
+});
+
+test("textNamesReview: does not match 'preview'/'ModelPreview' (substring, not a whole token)", () => {
+	assert.equal(textNamesReview("ModelPreview"), false);
+	assert.equal(textNamesReview("preview-bot"), false);
+	assert.equal(textNamesReview("Waiting for preview deploy"), false);
 });
 
 
@@ -706,4 +727,176 @@ test("extractTimeSplit: ci overlapping review wins", () => {
 	const split = extractTimeSplit(entries, "sess-r8", "/Users/me/projects/webapp");
 	assert.equal(split.buckets.ci, 20);
 	assert.equal(split.buckets.review, 20);
+});
+
+// ── extractTimeSplit: background jobs (async-result) ───────────────────────
+
+function asyncResult(at: number, jobs: Array<{ jobId: string; type: "task" | "bash"; label: string; durationMs: number }>) {
+	return {
+		type: "custom_message",
+		customType: "async-result",
+		id: `async-${at}`,
+		timestamp: new Date(at).toISOString(),
+		attribution: "agent",
+		content: "<system-notice>Background job has completed</system-notice>",
+		details: { jobs: jobs.map((j) => ({ jobId: j.jobId, type: j.type, status: "completed", agentId: j.jobId, label: j.label, durationMs: j.durationMs })) },
+	};
+}
+
+function bgSession(id: string) {
+	return { type: "session", version: 3, id, timestamp: new Date(0).toISOString(), cwd: "/Users/me/projects/webapp" };
+}
+const bgHuman = (text: string, at: number) => ({
+	type: "message",
+	timestamp: new Date(at).toISOString(),
+	message: { role: "user", attribution: "user", content: [{ type: "text", text }], timestamp: at },
+});
+const bgAssistant = (ttft: number, duration: number, completedAt: number, blocks: unknown[]) => ({
+	type: "message",
+	timestamp: new Date(completedAt).toISOString(),
+	message: { role: "assistant", model: "claude-opus-5", ttft, duration, completedAt, content: blocks, timestamp: completedAt - ttft - duration },
+});
+const bgToolCall = (id: string, name: string, args: Record<string, unknown> = {}) => ({ type: "toolCall", id, name, arguments: args });
+const bgToolStart = (toolCallId: string, toolName: string, startedAt: number) => ({
+	type: "custom",
+	customType: "tool_execution_start",
+	timestamp: new Date(startedAt).toISOString(),
+	data: { toolCallId, toolName, startedAt },
+});
+const bgToolResult = (toolCallId: string, toolName: string, at: number, text: string) => ({
+	type: "message",
+	timestamp: new Date(at).toISOString(),
+	message: { role: "toolResult", toolName, toolCallId, isError: false, content: [{ type: "text", text }], timestamp: at },
+});
+
+test("extractTimeSplit: a background task job (agent=reviewer) fills the review bucket, not you/idle", () => {
+	// task spawned at t=0, parent turn ends at t=12s (model covers [0, 12000]);
+	// async-result at t=40min, durationMs=40min -> span [0, 2_400_000], fully
+	// swallowing the model interval. Next human message at t=41min.
+	const entries: AnyEntry[] = [
+		bgSession("00000000-0000-7000-8000-000000000007"),
+		bgHuman("review this", 0),
+		bgAssistant(2_000, 10_000, 12_000, [bgToolCall("task-1", "task", { tasks: [{ name: "ReviewMR9", agent: "reviewer" }] })]),
+		asyncResult(2_400_000, [{ jobId: "ReviewMR9", type: "task", label: "ReviewMR9", durationMs: 2_400_000 }]),
+		bgHuman("thanks", 2_460_000),
+	];
+	const split = extractTimeSplit(entries, "sess-bg1", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.model, 12);
+	assert.equal(split.buckets.review, 2388);
+	assert.equal(split.buckets.you, 60);
+	assert.equal(split.buckets.idle, 0);
+});
+
+test("extractTimeSplit: a background task job with a non-review agent fills the agents bucket", () => {
+	const entries: AnyEntry[] = [
+		bgSession("00000000-0000-7000-8000-000000000008"),
+		bgHuman("look into this", 0),
+		bgAssistant(2_000, 10_000, 12_000, [bgToolCall("task-1", "task", { tasks: [{ name: "LaneC1", agent: "scout" }] })]),
+		asyncResult(2_400_000, [{ jobId: "LaneC1", type: "task", label: "LaneC1", durationMs: 2_400_000 }]),
+		bgHuman("thanks", 2_460_000),
+	];
+	const split = extractTimeSplit(entries, "sess-bg2", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.agents, 2388);
+	assert.equal(split.buckets.review, 0);
+	assert.equal(split.buckets.you, 60);
+});
+
+test("extractTimeSplit: a background span overlapping real model/tools work never overrides it", () => {
+	const entries: AnyEntry[] = [
+		bgSession("00000000-0000-7000-8000-000000000009"),
+		bgHuman("start", 0),
+		bgAssistant(0, 5_000, 5_000, [bgToolCall("bash-1", "bash", { command: "npm test" }), bgToolCall("task-1", "task", { tasks: [{ name: "ReviewMR1", agent: "reviewer" }] })]),
+		bgToolStart("bash-1", "bash", 5_000),
+		bgToolResult("bash-1", "bash", 15_000, "ok"),
+		asyncResult(20_000, [{ jobId: "ReviewMR1", type: "task", label: "ReviewMR1", durationMs: 20_000 }]),
+		bgHuman("thanks", 25_000),
+	];
+	const split = extractTimeSplit(entries, "sess-bg3", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.model, 5);
+	assert.equal(split.buckets.tools, 10);
+	assert.equal(split.buckets.review, 5);
+	assert.equal(split.buckets.you, 5);
+	assert.equal(split.buckets.idle, 0);
+});
+
+test("extractTimeSplit: a backgrounded bash job (CI loop) replaces the provisional slice once, in both buckets.ci and busy_by_tool.bash", () => {
+	const command = 'for i in $(seq 1 40); do glab api "projects/x/pipelines?ref=main"; sleep 30; done';
+	const entries: AnyEntry[] = [
+		bgSession("00000000-0000-7000-8000-000000000010"),
+		bgHuman("watch ci", 0),
+		bgAssistant(0, 0, 0, [bgToolCall("bash-1", "bash", { command })]),
+		bgToolStart("bash-1", "bash", 0),
+		bgToolResult("bash-1", "bash", 5_000, "Backgrounded as job bg_1 (killed once it has run 600s in total); its output is injected later. Do NOT poll for it."),
+		asyncResult(1_205_000, [{ jobId: "bg_1", type: "bash", label: command.slice(0, 40), durationMs: 1_200_000 }]),
+		bgHuman("thanks", 1_210_000),
+	];
+	const split = extractTimeSplit(entries, "sess-bg4", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.ci, 1200);
+	assert.equal(split.buckets.tools, 0);
+	assert.equal(split.busy_by_tool.bash, 1200);
+	assert.deepEqual(split.busy_by_command, {});
+	assert.equal(split.buckets.you, 10);
+	assert.equal(split.buckets.idle, 0);
+});
+
+test("extractTimeSplit: an async-result task job whose spawn call is missing falls back to job id/label matching (review)", () => {
+	const entries: AnyEntry[] = [
+		bgSession("00000000-0000-7000-8000-000000000011"),
+		bgHuman("do it", 0),
+		bgAssistant(0, 1_000, 1_000, []),
+		asyncResult(61_000, [{ jobId: "ReviewMR7", type: "task", label: "ReviewMR7", durationMs: 60_000 }]),
+		bgHuman("thanks", 65_000),
+	];
+	const split = extractTimeSplit(entries, "sess-bg5", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.review, 60);
+	assert.equal(split.buckets.agents, 0);
+});
+
+test("extractTimeSplit: an async-result task job whose spawn call is missing falls back to job id/label matching (agents)", () => {
+	const entries: AnyEntry[] = [
+		bgSession("00000000-0000-7000-8000-000000000012"),
+		bgHuman("do it", 0),
+		bgAssistant(0, 1_000, 1_000, []),
+		asyncResult(61_000, [{ jobId: "LaneC1", type: "task", label: "LaneC1", durationMs: 60_000 }]),
+		bgHuman("thanks", 65_000),
+	];
+	const split = extractTimeSplit(entries, "sess-bg6", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.agents, 60);
+	assert.equal(split.buckets.review, 0);
+});
+
+test("extractTimeSplit: an async-result task job with agent type 'ModelPreview' is agents, not review (substring 'review' in 'Preview' doesn't count)", () => {
+	const entries: AnyEntry[] = [
+		bgSession("00000000-0000-7000-8000-000000000013"),
+		bgHuman("try the new model", 0),
+		bgAssistant(0, 1_000, 1_000, [bgToolCall("task-1", "task", { tasks: [{ name: "Preview1", agent: "ModelPreview" }] })]),
+		asyncResult(61_000, [{ jobId: "Preview1", type: "task", label: "Preview1", durationMs: 60_000 }]),
+		bgHuman("thanks", 65_000),
+	];
+	const split = extractTimeSplit(entries, "sess-bg13", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.agents, 60);
+	assert.equal(split.buckets.review, 0);
+});
+
+// ── extractTimeSplit: review decided by agent type first (not job id) ──────
+
+test("extractTimeSplit: a <task-result agent=\"task\"> whose id merely contains 'review' is NOT review (agent type decides, not the name)", () => {
+	const resultText = '<task-result id="ReviewExtract" agent="task" status="completed">done</task-result>';
+	const split = extractTimeSplit(buildWaitFixture("wait", {}, resultText), "sess-bg7", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.agents, 60);
+	assert.equal(split.buckets.review, 0);
+});
+
+test("extractTimeSplit: a <task-result agent=\"reviewer\"> is review regardless of its id", () => {
+	const resultText = '<task-result id="X" agent="reviewer" status="completed">LGTM</task-result>';
+	const split = extractTimeSplit(buildWaitFixture("wait", {}, resultText), "sess-bg8", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.review, 60);
+	assert.equal(split.buckets.agents, 0);
+});
+
+test("extractTimeSplit: a bash bg job's 'label: ...' line mentioning review (no task-result tag, no agent attribute) still falls back to review", () => {
+	const resultText = "job bg_1 finished\nlabel: review gate check\n";
+	const split = extractTimeSplit(buildWaitFixture("wait", {}, resultText), "sess-bg9", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.review, 60);
+	assert.equal(split.buckets.agents, 0);
 });

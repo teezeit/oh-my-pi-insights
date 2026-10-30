@@ -95,7 +95,9 @@ export async function ensureDirs(): Promise<void> {
 // v12: time_split gained you_gaps and the "elsewhere" bucket.
 // v13: classify eval/setup commands and account for final background results.
 // v14: "review" bucket (reviewer-agent waits, review/verdict polling) and CI API polling (glab/gh api pipelines) counted as CI again.
-export const META_SCHEMA_VERSION = 14;
+// v15: background jobs delivered via async-result count (only where the session was otherwise idle); review by agent type before job name.
+// v16: review wording matched by whole word ("ModelPreview" is no review).
+export const META_SCHEMA_VERSION = 16;
 
 export async function loadCachedMeta(
 	sourceName: string,

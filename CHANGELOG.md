@@ -32,6 +32,14 @@ package identity that does not exist, since this targets a different harness.
   helper calls are classified by their label. Pipeline API polling
   (`glab api .../pipelines`, `gh api .../check-runs`) counts as CI/CD
   again. Session-meta schema bumped to 14.
+- **Background jobs count in the time view (#20).** Subagents and
+  background `bash` jobs that report back on their own (`async-result`
+  records) were ignored, so their time showed up as waiting on you or idle
+  (14 days measured: 6.6h reviewer, 14.5h other subagent, 18.1h background
+  bash incl. CI polling loops). Their spans now count, classified by agent
+  type or by the job's full command, and only where the session was
+  otherwise idle. Review is decided by agent type before job name.
+  Session-meta schema bumped to 15.
 
 ### Fixed
 

@@ -17,6 +17,7 @@ import { createClaudeSessionSource, type SessionRef } from "../index.ts";
 
 const SID = "00000000-0000-4000-8000-000000000003";
 const REVIEW_SID = "44444444-5555-6666-7777-888888888888";
+const PREVIEW_SID = "66666666-7777-8888-9999-aaaaaaaaaaaa";
 const TIME_SID = "33333333-4444-5555-6666-777777777777";
 let root: string;
 let source: ReturnType<typeof createClaudeSessionSource>;
@@ -150,6 +151,30 @@ before(async () => {
 			line({ type: "user", sessionId: REVIEW_SID, cwd: CWD, timestamp: "2026-09-23T08:01:30.000Z", isSidechain: false, message: { role: "user", content: "thanks" } }),
 		].join(""),
 	);
+	// Regression: subagent_type "ModelPreview" contains "review" only as a
+	// substring ("Preview") and must NOT be mistaken for review wording.
+	await writeFile(
+		join(dir, `${PREVIEW_SID}.jsonl`),
+		[
+			line({ type: "user", sessionId: PREVIEW_SID, cwd: CWD, timestamp: "2026-09-24T08:00:00.000Z", isSidechain: false, message: { role: "user", content: "preview the new model" } }),
+			line({
+				type: "assistant",
+				sessionId: PREVIEW_SID,
+				cwd: CWD,
+				uuid: "preview-a1",
+				requestId: "req-preview-1",
+				timestamp: "2026-09-24T08:00:00.000Z",
+				message: {
+					role: "assistant",
+					model: "claude-opus-5",
+					usage,
+					content: [{ type: "tool_use", id: "tu-preview-1", name: "Task", input: { subagent_type: "ModelPreview", description: "render a preview" } }],
+				},
+			}),
+			line({ type: "user", sessionId: PREVIEW_SID, timestamp: "2026-09-24T08:01:00.000Z", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu-preview-1", is_error: false }] } }),
+			line({ type: "user", sessionId: PREVIEW_SID, cwd: CWD, timestamp: "2026-09-24T08:01:30.000Z", isSidechain: false, message: { role: "user", content: "thanks" } }),
+		].join(""),
+	);
 });
 
 after(async () => {
@@ -165,7 +190,7 @@ async function metaFor(id: string) {
 
 test("lists sessions from the flat per-project layout", async () => {
 	const { sessions, duplicate_logs } = await source.listSessions();
-	assert.equal(sessions.length, 4);
+	assert.equal(sessions.length, 5);
 	assert.equal(duplicate_logs, 0);
 	assert.ok(sessions.every((s: SessionRef) => s.sidecars.length === 0));
 });
@@ -273,4 +298,11 @@ test("#19: a Task tool with subagent_type naming a reviewer is review time, not 
 	const { buckets } = meta.time_split;
 	assert.equal(buckets.review, 60);
 	assert.equal(buckets.agents, 0);
+});
+
+test("#19 (regression): a Task tool with subagent_type 'ModelPreview' is agents, not review (substring 'review' in 'Preview' doesn't count)", async () => {
+	const meta = await metaFor(PREVIEW_SID);
+	const { buckets } = meta.time_split;
+	assert.equal(buckets.agents, 60);
+	assert.equal(buckets.review, 0);
 });
