@@ -124,6 +124,135 @@ export function top8(rec: Record<string, number>): [string, number][] {
 }
 
 /**
+ * The canonical friction_counts taxonomy: the only keys FACET_EXTRACT_PROMPT
+ * asks the facet model for, the only keys normalizeFrictionCounts maps
+ * free-form variants onto, and (via its `label`) the only source stats.ts's
+ * LABEL_MAP draws friction display labels from - one definition instead of
+ * three places that can drift apart.
+ *
+ * The last four (user_rephrased/agent_wrong_direction/agent_too_slow/
+ * abandoned) mirror FACET_EXTRACT_PROMPT's abort_labels enum: the model is
+ * already primed with that exact vocabulary for "why was this generation
+ * aborted", and reuses it heavily for friction_counts too (the real facets
+ * cache shows these as some of the most common raw keys written). Treating
+ * them as free-form variants fed them through the word-order fallback and
+ * produced unreadable keys like "agent_direction_wrong"; canonicalizing
+ * them keeps the model's own natural phrasing as the chart label.
+ */
+export const FRICTION_TAXONOMY: Record<string, { label: string; description: string }> = {
+	misunderstood_request: { label: "Misunderstood Request", description: "assistant interpreted the request incorrectly" },
+	wrong_approach: { label: "Wrong Approach", description: "right goal, wrong solution method" },
+	buggy_code: { label: "Buggy Code", description: "code didn't work correctly" },
+	user_rejected_action: { label: "User Rejected Action", description: "user said no/stop to a proposed action" },
+	assistant_got_blocked: { label: "Assistant Got Blocked", description: "assistant could not proceed (missing access, unclear state, external blocker)" },
+	user_stopped_early: { label: "User Stopped Early", description: "user ended the session before the task was done" },
+	wrong_file_or_location: { label: "Wrong File / Location", description: "assistant edited or looked at the wrong file or path" },
+	excessive_changes: { label: "Excessive Changes", description: "over-engineered or changed too much" },
+	slow_or_verbose: { label: "Slow / Verbose", description: "assistant took too long or produced more than needed" },
+	tool_failed: { label: "Tool Failed", description: "a tool call failed for reasons outside the assistant's judgment" },
+	user_unclear: { label: "User Unclear", description: "the user's own request was ambiguous or underspecified" },
+	external_issue: { label: "External Issue", description: "blocked by something outside the assistant's or user's control (network, service outage, etc.)" },
+	user_rephrased: { label: "User Rephrased", description: "the user restarted with a slightly different ask rather than continuing the same request" },
+	agent_wrong_direction: { label: "Agent Wrong Direction", description: "the assistant was headed the wrong way and the user cut it off" },
+	agent_too_slow: { label: "Agent Too Slow", description: "the assistant was on the right track but took too long or too many steps" },
+	abandoned: { label: "Abandoned", description: "the user dropped the thread with no related follow-up" },
+};
+
+// Why: a resolution/success word anywhere in a friction_counts key means the
+// model wrote an outcome, not a friction type (issue #12, "Technical Issue
+// Resolved" as a friction row). Checked per-token, not substring, so
+// "investigation_unresolved" (token "unresolved", not "resolved") is
+// unaffected and "wrong_file_or_location" (no such token) is unaffected.
+const FRICTION_DROP_TOKENS: Record<string, true> = {
+	resolved: true,
+	fixed: true,
+	success: true,
+	succeeded: true,
+	solved: true,
+	worked: true,
+};
+
+function frictionKeyTokens(key: string): string[] {
+	return key
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "_")
+		.split("_")
+		.filter(Boolean);
+}
+
+// Why: "tool_failures" and "tool_failure" (or any other plural/singular
+// spelling of the same word) are the same concept; stripping a trailing "s"
+// (but not from an already-doubled "ss", e.g. "access") before grouping
+// lets them land in the same bucket without a real morphology dependency.
+function singularizeToken(token: string): string {
+	if (token.length > 3 && token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
+	return token;
+}
+
+const CANONICAL_FRICTION_BY_SORTED_TOKENS: Record<string, string> = Object.fromEntries(
+	Object.keys(FRICTION_TAXONOMY).map((k) => [frictionKeyTokens(k).sort().join("_"), k]),
+);
+
+/**
+ * Issue #11/#12: the facet model writes free-form friction_counts keys, so
+ * word-order/plural/synonym variants ("unclear_communication" vs
+ * "communication_unclear", "tool_failures" vs "tool_failure") summed as
+ * separate chart rows, and outcome words ("technical_issue_resolved")
+ * summed in as if they were friction. Applied wherever a SessionFacets
+ * object enters the pipeline (src/cache.ts loadCachedFacets, the
+ * fresh-extraction path in index.ts) and again, on the already-merged
+ * dict, at the two places that fold many sessions' facets into one chart
+ * (aggregateData's agg.friction, computeTemporalData's recent/older
+ * friction) - a second pass is required there because this function only
+ * sees one session's friction_counts at a time, so two sessions each
+ * writing a different single spelling cannot be reconciled within one
+ * call; calling it again on the merged dict regroups those cross-session
+ * variants the same way. Idempotent either way, and old cached facets
+ * written before this normalization existed still read correctly without
+ * --refresh (cache files themselves are never rewritten).
+ *
+ * - Keys are lowercased/snake_cased and trimmed; non-positive counts and
+ *   keys containing a resolution/success token are dropped.
+ * - A key whose token set exactly matches a FRICTION_TAXONOMY key's tokens
+ *   (in any order) maps onto that canonical key.
+ * - Otherwise keys are grouped by their singularized token set (so
+ *   "tool_failures"/"tool_failure" group together); the emitted key is the
+ *   lexicographically smallest of the normalized variants seen within
+ *   this call - a natural spelling the model actually wrote, never a
+ *   sorted-token mash-up like "agent_direction_wrong". This choice does
+ *   not depend on counts, so it stays stable call to call.
+ */
+export function normalizeFrictionCounts(
+	counts: Record<string, number> | null | undefined,
+): Record<string, number> {
+	const result: Record<string, number> = {};
+	if (!counts) return result;
+
+	const nonCanonical: Record<string, Array<{ key: string; count: number }>> = {};
+	for (const [rawKey, rawCount] of Object.entries(counts)) {
+		if (!(rawCount > 0)) continue;
+		const tokens = frictionKeyTokens(rawKey);
+		if (!tokens.length) continue;
+		if (tokens.some((t) => FRICTION_DROP_TOKENS[t])) continue;
+		const sortedKey = [...tokens].sort().join("_");
+		const canonicalKey = CANONICAL_FRICTION_BY_SORTED_TOKENS[sortedKey];
+		if (canonicalKey) {
+			result[canonicalKey] = (result[canonicalKey] ?? 0) + rawCount;
+			continue;
+		}
+		const groupKey = [...tokens].map(singularizeToken).sort().join("_");
+		(nonCanonical[groupKey] ??= []).push({ key: tokens.join("_"), count: rawCount });
+	}
+	for (const variants of Object.values(nonCanonical)) {
+		const key = variants.map((v) => v.key).sort()[0]!;
+		const count = variants.reduce((sum, v) => sum + v.count, 0);
+		result[key] = (result[key] ?? 0) + count;
+	}
+	return result;
+}
+
+/**
  * Active hours per local calendar day: the union of every session's
  * activity runs (SessionMeta.active_intervals), split at local midnight.
  * Why: summing durations counted parallel sessions once each (198h/day), and
@@ -479,14 +608,18 @@ export function aggregateData(
 			}
 			mergeWeighted(agg.satisfaction, facets.user_satisfaction_counts, w);
 			agg.sample_sizes.satisfaction_signals += Object.values(facets.user_satisfaction_counts ?? {}).reduce((a, b) => a + b, 0);
-			if (Object.values(facets.friction_counts ?? {}).some((v) => v > 0)) agg.sample_sizes.friction_sessions++;
+			// Issue #11/#12: normalize here too (not just at the facet entry
+			// point) so facets built before normalizeFrictionCounts existed,
+			// still cached on disk, read correctly without --refresh.
+			const friction = normalizeFrictionCounts(facets.friction_counts);
+			if (Object.values(friction).some((v) => v > 0)) agg.sample_sizes.friction_sessions++;
 			if (facets.assistant_helpfulness)
 				agg.helpfulness[facets.assistant_helpfulness] =
 					(agg.helpfulness[facets.assistant_helpfulness] ?? 0) + w;
 			if (facets.session_type)
 				agg.session_types[facets.session_type] =
 					(agg.session_types[facets.session_type] ?? 0) + w;
-			mergeWeighted(agg.friction, facets.friction_counts, w);
+			mergeWeighted(agg.friction, friction, w);
 			if (facets.primary_success && facets.primary_success !== "none") {
 				agg.success[facets.primary_success] =
 					(agg.success[facets.primary_success] ?? 0) + w;
@@ -794,6 +927,11 @@ export function aggregateData(
 	for (const [model, usage] of Object.entries(agg.model_usage)) {
 		usage.tier = MODEL_TIERS[model] || "mid";
 	}
+
+	// Second normalization pass: regroups cross-session friction_counts
+	// variants (each mergeWeighted call above only normalized one session's
+	// dict at a time - see normalizeFrictionCounts).
+	agg.friction = normalizeFrictionCounts(agg.friction);
 
 	return agg;
 }

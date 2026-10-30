@@ -61,7 +61,7 @@ import {
 	SESSION_SET_PATH,
 } from "./src/cache.ts";
 import { computeTemporalData, MIN_WINDOW_SESSIONS } from "./src/temporal.ts";
-import { aggregateData, detectConcurrentSessions, excludeToolingSessions } from "./src/aggregate.ts";
+import { aggregateData, detectConcurrentSessions, excludeToolingSessions, normalizeFrictionCounts } from "./src/aggregate.ts";
 import { readProviderAuth } from "./src/auth.ts";
 import {
 	detectHarnessChanges,
@@ -512,6 +512,9 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 							const facets: SessionFacets = {
 								...parsed,
 								session_id: meta.session_id,
+								// Issue #11/#12: normalize at the facet entry point so
+								// every downstream consumer sees canonical friction keys.
+								friction_counts: normalizeFrictionCounts(parsed.friction_counts),
 							};
 							await saveFacets(facets);
 							facetsMap.set(meta.session_id, facets);
@@ -853,6 +856,7 @@ export {
 	detectHarnessChanges,
 	enforceBudget,
 	excludeToolingSessions,
+	normalizeFrictionCounts,
 	extractSessionStats,
 	extractSidecarUsage,
 	filterByEvidence,

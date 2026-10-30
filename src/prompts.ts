@@ -9,7 +9,7 @@
 // live harness state rather than a hardcoded list (see B8).
 
 
-import { top8 } from "./aggregate.ts";
+import { top8, FRICTION_TAXONOMY } from "./aggregate.ts";
 import { displayLabel } from "./stats.ts";
 import { formatFactsForPrompt, type Fact } from "./facts.ts";
 import type { AggregatedData, TemporalData, UserContext } from "./types.ts";
@@ -40,12 +40,8 @@ CRITICAL GUIDELINES:
    - "that's not right", "try again" → dissatisfied
    - "this is broken", "I give up" → frustrated
 
-3. friction_counts: Be specific about what went wrong.
-   - misunderstood_request: assistant interpreted the request incorrectly
-   - wrong_approach: right goal, wrong solution method
-   - buggy_code: code didn't work correctly
-   - user_rejected_action: user said no/stop to a proposed action
-   - excessive_changes: over-engineered or changed too much
+3. friction_counts: use ONLY these exact keys - never invent a new one, never reorder the words, and never use a key for a resolution or a success (a fix or a positive outcome is not friction; that goes in primary_success instead, not here):
+${Object.entries(FRICTION_TAXONOMY).map(([key, v]) => `   - ${key}: ${v.description}`).join("\n")}
 
 4. user_instructions_to_assistant: direct instructions the user gave, e.g. "always show diffs before editing". Include only reusable instructions (not one-off requests).
 

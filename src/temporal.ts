@@ -6,6 +6,7 @@
 // Week-over-week diffs, trajectory, anomalies and friction resolution over
 // the session corpus.
 
+import { normalizeFrictionCounts } from "./aggregate.ts";
 import type { DeltaWindow, SessionFacets, SessionMeta, TemporalData, TemporalDelta } from "./types.ts";
 
 // Why: a 10-vs-10 session cost/error swing is well within normal noise; both
@@ -145,10 +146,16 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 	const recentCutoff = now - 14 * 86400000;
 	const recentMetas = sorted.filter(m => new Date(m.start_time).getTime() >= recentCutoff);
 	const olderMetas = sorted.filter(m => new Date(m.start_time).getTime() < recentCutoff);
-	const recentFriction: Record<string, number> = {};
-	const olderFriction: Record<string, number> = {};
-	for (const m of recentMetas) { const f = facetsMap.get(m.session_id); if (f) for (const [k, v] of Object.entries(f.friction_counts)) if (v > 0) recentFriction[k] = (recentFriction[k] || 0) + v; }
-	for (const m of olderMetas) { const f = facetsMap.get(m.session_id); if (f) for (const [k, v] of Object.entries(f.friction_counts)) if (v > 0) olderFriction[k] = (olderFriction[k] || 0) + v; }
+	let recentFriction: Record<string, number> = {};
+	let olderFriction: Record<string, number> = {};
+	// Issue #11/#12: normalize so word-order/synonym variants merge and
+	// resolution/success keys never count as friction here either.
+	for (const m of recentMetas) { const f = facetsMap.get(m.session_id); if (f) for (const [k, v] of Object.entries(normalizeFrictionCounts(f.friction_counts))) if (v > 0) recentFriction[k] = (recentFriction[k] || 0) + v; }
+	for (const m of olderMetas) { const f = facetsMap.get(m.session_id); if (f) for (const [k, v] of Object.entries(normalizeFrictionCounts(f.friction_counts))) if (v > 0) olderFriction[k] = (olderFriction[k] || 0) + v; }
+	// Second pass: regroup cross-session variants (each loop above only
+	// normalized one session's dict at a time - see normalizeFrictionCounts).
+	recentFriction = normalizeFrictionCounts(recentFriction);
+	olderFriction = normalizeFrictionCounts(olderFriction);
 	const resolved_friction: string[] = [];
 	const ongoing_friction: TemporalData["ongoing_friction"] = [];
 	// Why: a type absent from the last 14 days can still rank in agg.friction

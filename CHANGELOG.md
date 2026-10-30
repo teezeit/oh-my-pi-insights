@@ -46,6 +46,13 @@ package identity that does not exist, since this targets a different harness.
 - **"Resolved" friction matches the chart (#9).** A friction type still
   present in this run's friction counts is never listed as resolved, in the
   HTML, the Markdown or the prompts.
+- **One chart row per friction category (#11).** Facet `friction_counts`
+  keys are normalized on extraction and on cache load: format, the canonical
+  taxonomy (shared by the facet prompt and the display labels), and word-order
+  or plural variants merge into one natural-order key.
+- **Resolutions are not friction (#12).** Keys describing a resolution or
+  success (`resolved`, `fixed`, `solved`, ...) are dropped from
+  `friction_counts`, and the facet prompt allows only taxonomy keys.
 - **Skills from every omp root (#10).** The harness snapshot and user context
   now discover skills (a directory or symlink with `SKILL.md`) under
   `~/.agents/skills`, `~/.claude/skills` and the project `.agents/skills`,

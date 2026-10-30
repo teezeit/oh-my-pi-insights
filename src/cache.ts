@@ -9,6 +9,7 @@
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { normalizeFrictionCounts } from "./aggregate.ts";
 import type { SessionFacets, SessionMeta } from "./types.ts";
 
 /**
@@ -196,6 +197,10 @@ export async function loadCachedFacets(
 		// Basic schema check
 		if (!parsed.session_id || !parsed.brief_summary || !parsed.outcome)
 			return null;
+		// Issue #11/#12: normalize in memory only (never rewrite the cache
+		// file) so facets cached before normalizeFrictionCounts existed read
+		// correctly without --refresh.
+		parsed.friction_counts = normalizeFrictionCounts(parsed.friction_counts);
 		return parsed;
 	} catch {
 		return null;

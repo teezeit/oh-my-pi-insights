@@ -8,7 +8,7 @@
 // tool names, ttsr/reset events), the per-turn pass and per-tool wall clock.
 
 import { extname } from "node:path";
-import { median, percentile } from "./aggregate.ts";
+import { FRICTION_TAXONOMY, median, percentile } from "./aggregate.ts";
 import { isSafeSessionId } from "./cache.ts";
 import type {
 	AbortEvent,
@@ -70,18 +70,10 @@ export const LABEL_MAP: Record<string, string> = {
 	multi_file_changes: "Multi-file Changes",
 	handled_complexity: "Multi-file Changes",
 	good_debugging: "Good Debugging",
-	misunderstood_request: "Misunderstood Request",
-	wrong_approach: "Wrong Approach",
-	buggy_code: "Buggy Code",
-	user_rejected_action: "User Rejected Action",
-	assistant_got_blocked: "Assistant Got Blocked",
-	user_stopped_early: "User Stopped Early",
-	wrong_file_or_location: "Wrong File / Location",
-	excessive_changes: "Excessive Changes",
-	slow_or_verbose: "Slow / Verbose",
-	tool_failed: "Tool Failed",
-	user_unclear: "User Unclear",
-	external_issue: "External Issue",
+	// Friction labels: one definition, aggregate.ts's FRICTION_TAXONOMY
+	// (also the facet-extraction prompt's taxonomy and normalizeFrictionCounts'
+	// canonical key set), so all three stay in lockstep.
+	...Object.fromEntries(Object.entries(FRICTION_TAXONOMY).map(([k, v]) => [k, v.label])),
 	frustrated: "Frustrated",
 	dissatisfied: "Dissatisfied",
 	likely_satisfied: "Likely Satisfied",
