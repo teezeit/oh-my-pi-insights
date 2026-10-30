@@ -10,6 +10,7 @@
 import { extname } from "node:path";
 import { FRICTION_TAXONOMY, median, percentile } from "./aggregate.ts";
 import { isSafeSessionId } from "./cache.ts";
+import { extractTimeSplit } from "./time.ts";
 import type {
 	AbortEvent,
 	AnyEntry,
@@ -270,7 +271,7 @@ export function classifyErrorMessage(text: string): string {
 // so counting errors by tool name blamed the browser's failures on eval and
 // produced "stop scripting in eval" advice. Attribution is by the call's
 // input (its code), never by matching the error text.
-const BROWSER_IN_CODE_RE = /\bbrowser\s*\./;
+export const BROWSER_IN_CODE_RE = /\bbrowser\s*\./;
 
 // Why: a session left open for days spans its whole wall-clock life, so
 // [start, end] read as ~23h/day. Activity is the run of message records
@@ -383,6 +384,10 @@ export function extractSidecarUsage(entries: AnyEntry[]): SidecarUsage {
 		cost_by_provider: costByProvider,
 		tool_calls: toolCalls,
 		tool_errors: toolErrors,
+		// Why "" / "": a sidecar's own id/project are irrelevant here - only
+		// its active_sec (folded into the parent's time_split.subagent_busy_sec
+		// by buildSessionMeta) is used; its own slowest_requests are discarded.
+		active_sec: extractTimeSplit(entries, "", "").active_sec,
 	};
 }
 
@@ -959,6 +964,7 @@ export function buildSessionMeta(
 	let utilityCost = stats.utilityCost;
 	let sidecarToolCalls = 0;
 	let sidecarToolErrors = 0;
+	let subagentBusySec = 0;
 	const sidecarCounts = { advisor: 0, subagent: 0 };
 	const costByProvider: Record<string, number> = { ...stats.cost_by_provider };
 
@@ -968,6 +974,7 @@ export function buildSessionMeta(
 		utilityCost += sidecar.usage.utility_cost;
 		sidecarToolCalls += sidecar.usage.tool_calls;
 		sidecarToolErrors += sidecar.usage.tool_errors;
+		subagentBusySec += sidecar.usage.active_sec;
 		if (sidecar.kind === "advisor") costAdvisor += sidecar.usage.totals.cost;
 		else costSubagent += sidecar.usage.totals.cost;
 		for (const [provider, cost] of Object.entries(sidecar.usage.cost_by_provider)) {
@@ -1038,10 +1045,16 @@ export function buildSessionMeta(
 			? stats.totals.cacheRead / (stats.totals.input + stats.totals.cacheRead)
 			: 0;
 
+	// Issue #18 "where did the time go": the parent's own split, with
+	// subagent_busy_sec (left 0 by extractTimeSplit, which only sees this
+	// session's own entries) filled in from the sidecars folded above.
+	const projectPath = stats.projectPath || ref.project_path;
+	const timeSplit = { ...extractTimeSplit(entries, sessionId, projectPath), subagent_busy_sec: subagentBusySec };
+
 	return {
 		session_id: sessionId,
 		session_path: ref.path,
-		project_path: stats.projectPath || ref.project_path,
+		project_path: projectPath,
 		start_time: startTime,
 		duration_minutes: Math.max(
 			0,
@@ -1108,5 +1121,6 @@ export function buildSessionMeta(
 		tool_calls_with_intent: stats.tool_calls_with_intent,
 		cache_hit_ratio: cacheHitRatio,
 		edits_by_file: editsByFileCapped,
+		time_split: timeSplit,
 	};
 }

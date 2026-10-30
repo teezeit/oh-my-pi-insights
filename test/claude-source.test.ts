@@ -16,6 +16,7 @@ import { createClaudeSessionSource, type SessionRef } from "../index.ts";
 //   - subagent turns are inline, flagged isSidechain
 
 const SID = "00000000-0000-4000-8000-000000000003";
+const TIME_SID = "33333333-4444-5555-6666-777777777777";
 let root: string;
 let source: ReturnType<typeof createClaudeSessionSource>;
 
@@ -93,6 +94,38 @@ before(async () => {
 			line(assistantEntry("2026-09-21T09:00:05.000Z", "req-9", usage, [])),
 		].join(""),
 	);
+
+	// #18 best-effort time split from timestamps alone: Bash tool_use ->
+	// tool_result 30s apart (tools), Task tool_use -> tool_result 60s apart
+	// (agents), then a 20min gap before the next human message (you capped
+	// at IDLE_CAP_SEC=900, 300s overflow into idle).
+	await writeFile(
+		join(dir, `${TIME_SID}.jsonl`),
+		[
+			line({ type: "user", sessionId: TIME_SID, cwd: CWD, timestamp: "2026-09-22T08:00:00.000Z", isSidechain: false, message: { role: "user", content: "run the tests" } }),
+			line({
+				type: "assistant",
+				sessionId: TIME_SID,
+				cwd: CWD,
+				uuid: "time-a1",
+				requestId: "req-time-1",
+				timestamp: "2026-09-22T08:00:00.000Z",
+				message: { role: "assistant", model: "claude-opus-5", usage, content: [{ type: "tool_use", id: "tu-time-1", name: "Bash", input: { command: "npm test" } }] },
+			}),
+			line({ type: "user", sessionId: TIME_SID, timestamp: "2026-09-22T08:00:30.000Z", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu-time-1", is_error: false }] } }),
+			line({
+				type: "assistant",
+				sessionId: TIME_SID,
+				cwd: CWD,
+				uuid: "time-a2",
+				requestId: "req-time-2",
+				timestamp: "2026-09-22T08:00:30.000Z",
+				message: { role: "assistant", model: "claude-opus-5", usage, content: [{ type: "tool_use", id: "tu-time-2", name: "Task", input: {} }] },
+			}),
+			line({ type: "user", sessionId: TIME_SID, timestamp: "2026-09-22T08:01:30.000Z", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu-time-2", is_error: false }] } }),
+			line({ type: "user", sessionId: TIME_SID, cwd: CWD, timestamp: "2026-09-22T08:21:30.000Z", isSidechain: false, message: { role: "user", content: "looks good, ship it" } }),
+		].join(""),
+	);
 });
 
 after(async () => {
@@ -108,7 +141,7 @@ async function metaFor(id: string) {
 
 test("lists sessions from the flat per-project layout", async () => {
 	const { sessions, duplicate_logs } = await source.listSessions();
-	assert.equal(sessions.length, 2);
+	assert.equal(sessions.length, 3);
 	assert.equal(duplicate_logs, 0);
 	assert.ok(sessions.every((s: SessionRef) => s.sidecars.length === 0));
 });
@@ -185,4 +218,28 @@ test("the transcript keeps human turns and tool names, drops sidechains", async 
 	assert.match(transcript, /\[User\]: trace my great-grandmother/);
 	assert.match(transcript, /\[Tool: Read\]/);
 	assert.equal(transcript.includes("subagent instructions"), false);
+});
+
+test("#18: best-effort time_split for Claude Code logs is derived from tool_use/tool_result timestamps", async () => {
+	const meta = await metaFor(TIME_SID);
+	const { buckets, busy_by_command } = meta.time_split;
+
+	assert.equal(buckets.tools, 30);
+	assert.equal(buckets.agents, 60);
+	assert.equal(buckets.you, 900);
+	assert.equal(buckets.idle, 300);
+	assert.equal(busy_by_command["npm test"], 30);
+});
+
+test("#18: you_gaps sums to buckets.you and elsewhere is 0 for Claude Code logs", async () => {
+	const meta = await metaFor(TIME_SID);
+	const { buckets, you_gaps } = meta.time_split;
+	assert.equal(buckets.elsewhere, 0);
+	const total = you_gaps.reduce((acc, [s, e]) => acc + (e - s) / 1000, 0);
+	assert.equal(total, buckets.you);
+	const rangeStart = Date.parse("2026-09-22T08:00:00.000Z");
+	const rangeEnd = Date.parse("2026-09-22T08:21:30.000Z");
+	for (const [s, e] of you_gaps) {
+		assert.ok(s >= rangeStart && e <= rangeEnd, `interval [${s}, ${e}] outside session range`);
+	}
 });

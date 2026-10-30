@@ -11,11 +11,12 @@ import { displayLabel } from "../stats.ts";
 import { fmtCost, fmtHours, fmtTokens } from "./md.ts";
 import { trajectoryLine } from "../temporal.ts";
 import { buildActionList, type ActionItem } from "./actions.ts";
+import { renderTimeSection } from "./time.ts";
 import { buildEvidenceLinks } from "./evidence.ts";
 import { diffReports, type ReportDiffEntry } from "./reportDiff.ts";
 import { diffConfigAddition } from "./configDiff.ts";
 import { type CopyKind, configAdditionTitle, copyKindForWhere, copyLabel, copyTooltip, isFillerText, itemTitle, stripEmoji } from "./text.ts";
-import type { AggregatedData, TemporalData, UserContext } from "../types.ts";
+import type { AggregatedData, TemporalData, TimeAggregate, UserContext } from "../types.ts";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -273,12 +274,187 @@ function adviceCard(opts: {
     </div>`;
 }
 
+/** The report's full CSS, extracted so standalone sub-pages (e.g. /insights time)
+ * can reuse the exact same look without duplicating the stylesheet. */
+export const PAGE_STYLE = `
+  :root {
+    --bg: #faf8f4; --bg2: #ffffff; --bg3: #f3f1ec;
+    --border: #e4e7eb; --border2: #d3d8de;
+    --text: #1f2933; --dim: #3e4c59; --muted: #616e7c;
+    --accent: #2f6f9e; --accent2: #0f6e8c;
+    --green: #2f7a4f; --yellow: #a9790a; --red: #b84b43;
+    --purple: #5d5fa0; --teal: #0f6e8c;
+    --radius: 10px; --radius-sm: 6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; font-weight: 400; line-height: 1.6; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  strong { font-weight: 600; }
+
+  .container { max-width: 1040px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { text-align: center; padding: 40px 0 32px; border-bottom: 1px solid var(--border); margin-bottom: 40px; }
+  header h1 { font-size: 28px; font-weight: 600; color: var(--text); letter-spacing: -0.3px; }
+  header .subtitle { color: var(--muted); margin-top: 8px; font-size: 13px; }
+
+  nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 40px; }
+  nav a { background: var(--bg3); border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px; color: var(--dim); font-size: 13px; transition: all 0.15s; }
+  nav a:hover { color: var(--text); border-color: var(--border2); text-decoration: none; background: var(--bg2); }
+
+  /* Why: single rule for vertical rhythm between Top Actions, Summary and every following section. */
+  .rpt-section { margin-top: 48px; display: block; }
+  /* Collapsible heavy sections (By the Numbers, Model Spend) and their nested
+     chart blocks (Numbers, Flagged Sessions): native <details>/<summary>, no JS.
+     Narrative sections stay plain <section> and are never collapsible. */
+  details > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before {
+    content: ""; width: 7px; height: 7px; flex-shrink: 0;
+    border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+    transform: rotate(-45deg); transition: transform 0.15s ease;
+  }
+  details[open] > summary::before { transform: rotate(45deg); }
+  details > summary:hover { background: var(--bg3); border-radius: var(--radius-sm); }
+  details.rpt-section > summary { border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 24px; }
+  details.rpt-section > summary > h2 { flex: 1; margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+  details.nested-collapse > summary > h3 { flex: 1; margin-bottom: 0; }
+  h2 { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  /* Category pills: the same pill marks a friction type in the chart and on
+     the friction cards, so a card visibly belongs to a chart row. */
+  .category-pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; line-height: 1.6; white-space: nowrap; text-transform: none; letter-spacing: 0; }
+  .category-pill.friction { background: #fdf3e1; color: #8a5a12; border: 1px solid #f0d9ae; }
+  a.category-pill { text-decoration: none; }
+  a.category-pill:hover { border-color: #d9a94f; }
+  .bar-row:target .category-pill { box-shadow: 0 0 0 2px #f0d9ae; }
+  /* Why: a pill label must shrink with an ellipsis inside its rounded border, not get clipped mid-pill. */
+  .bar-label .category-pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+  .bar-row:has(.category-pill) .bar-label { width: 190px; }
+  h3 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+
+  .evidence { margin-top: 8px; font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+  .evidence-link { display: flex; align-items: center; gap: 6px; }
+  .evidence-cmd { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--accent2); font-size: 11px; }
+  .file-icon-link { color: var(--accent); display: inline-flex; align-items: center; gap: 3px; font-size: 11px; text-decoration: none; }
+  .file-icon-link:hover { color: var(--accent2); text-decoration: underline; }
+  .config-diff { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+  .config-diff-row { margin-top: 4px; color: var(--text); }
+  .config-diff-row code { color: var(--accent2); }
+  .config-diff-old { color: var(--red); text-decoration: line-through; }
+  .config-diff-new { color: var(--green); }
+
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; }
+  .card + .card { margin-top: 12px; }
+  .card-grid { display: grid; gap: 12px; }
+  .card-grid.cols2 { grid-template-columns: repeat(2, 1fr); }
+  .card-grid.cols3 { grid-template-columns: repeat(3, 1fr); }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; text-align: center; }
+  .stat-value { font-size: 24px; font-weight: 600; color: var(--accent); }
+  .stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 14px; }
+  .bar-row.compact { margin-bottom: 2px; }
+  .bar-label { width: 140px; flex-shrink: 0; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-track { flex: 1; height: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
+  .bar-count { width: 40px; text-align: right; color: var(--muted); flex-shrink: 0; }
+
+  .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+  .chart-box { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+  .chart-box h3 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; }
+
+  .at-a-glance { background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius); overflow: hidden; }
+  .at-a-glance-part { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+  .at-a-glance-part:last-child { border-bottom: none; }
+  .at-a-glance-part h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--accent); margin-bottom: 10px; }
+  .at-a-glance-part p { color: var(--text); line-height: 1.6; }
+  .at-a-glance-part.since-last-report { background: var(--bg3); }
+  .at-a-glance-part.since-last-report h3 { color: var(--accent2); }
+  .since-list { margin: 0; padding-left: 18px; color: var(--text); line-height: 1.6; }
+  .since-list li + li { margin-top: 4px; }
+
+  .area-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+  .area-card h3 { color: var(--text); font-size: 15px; }
+  .area-card .count { color: var(--muted); font-size: 12px; margin-left: 8px; }
+  .area-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
+
+  .workflow-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+  .workflow-card h3 { color: var(--text); font-size: 15px; }
+  .workflow-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
+
+  .style-block-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
+  .style-block-card h3 { color: var(--text); font-size: 15px; }
+  .style-block-card p { color: var(--muted); margin-top: 6px; font-size: 14px; }
+
+  .friction-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+  .friction-card h3 { color: var(--text); font-size: 15px; }
+  .friction-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
+  .friction-card .examples { margin-top: 10px; }
+  .friction-card .example { font-size: 13px; color: var(--muted); padding: 4px 0 4px 14px; border-left: 2px solid var(--border2); margin-top: 6px; }
+
+  /* Advice cards: the one layout shared by Top Actions, config
+     additions, features to try, usage patterns, stop-doing and ongoing
+     friction, colored by type with a thin left border. */
+  .advice-card { background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 16px 20px; }
+  .advice-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 0; }
+  .advice-reason { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .advice-instead { color: var(--accent); font-size: 13px; margin-top: 6px; }
+  .advice-instead strong { color: var(--text); }
+
+  .action-list { list-style: decimal; padding-left: 22px; }
+  .action-item { margin-bottom: 14px; }
+  .action-item::marker { color: var(--muted); }
+  .action-item:last-child { margin-bottom: 0; }
+  .action-item .advice-card { padding: 14px 18px; }
+
+  .meta-row { margin-top: 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px; }
+  .meta-chip { text-transform: none; letter-spacing: 0; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--text); font-size: 12px; }
+  .file-target { display: inline-flex; align-items: center; gap: 5px; text-transform: none; letter-spacing: 0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--dim); }
+  .file-target svg { color: var(--muted); flex-shrink: 0; }
+  a.file-target-link { color: var(--accent); text-decoration: none; }
+  a.file-target-link svg { color: currentColor; }
+  a.file-target-link:hover span { text-decoration: underline; }
+
+  .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .cost-table th, .cost-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  .cost-table th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.4px; }
+
+  .copy-box { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--teal); white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 10px; }
+  /* Why: buttons are the only interactive controls in a card; an accent tint separates them from the grey chips and code blocks around them. */
+  .copy-btn { display: inline-flex; align-items: center; gap: 6px; background: #e8f0fa; border: 1px solid #b9cde6; color: #1f4f8a; font-family: inherit; font-weight: 500; font-size: 12px; padding: 5px 12px; border-radius: var(--radius-sm); cursor: pointer; margin-top: 8px; transition: all 0.15s; }
+  .copy-btn:hover { background: #d6e5f6; border-color: #8fb0d8; color: #163d6d; }
+  .copy-btn.tiny { padding: 2px 8px; margin-top: 0; font-size: 11px; }
+  .copy-all-btn { background: var(--accent); color: #fff; font-weight: 600; border: none; padding: 8px 18px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; margin-top: 16px; transition: opacity 0.15s; }
+  .copy-all-btn:hover { opacity: 0.85; }
+
+  .horizon-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; }
+  .horizon-card h3 { color: var(--text); font-size: 15px; }
+  .horizon-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
+  .horizon-card .how { color: var(--muted); font-size: 13px; margin-top: 8px; }
+
+  .muted { color: var(--muted); font-size: 14px; }
+  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+  .badge.green { background: rgba(47,122,79,0.12); color: var(--green); }
+  .badge.yellow { background: rgba(169,121,10,0.12); color: var(--yellow); }
+  .badge.red { background: rgba(184,75,67,0.12); color: var(--red); }
+
+  @media (max-width: 700px) {
+    .card-grid.cols2, .card-grid.cols3 { grid-template-columns: 1fr; }
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    .charts-grid { grid-template-columns: 1fr; }
+  }
+`;
+
+
+
 export function generateHTML(
 	agg: AggregatedData,
 	sections: Record<string, unknown>,
 	synthesis: Record<string, string>,
 	temporal: TemporalData,
-	opts: { prevSections?: Record<string, unknown>; sessionPaths?: Record<string, string>; userCtx?: UserContext } = {},
+	opts: { prevSections?: Record<string, unknown>; sessionPaths?: Record<string, string>; userCtx?: UserContext; timeAgg?: TimeAggregate } = {},
 ): string {
 	const sessionPaths = opts.sessionPaths ?? {};
 	const liveConfig = opts.userCtx?.config_yml_flat ?? {};
@@ -475,174 +651,7 @@ export function generateHTML(
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>omp Insights - ${esc(agg.date_range.start)} to ${esc(agg.date_range.end)}</title>
 <style>
-  :root {
-    --bg: #faf8f4; --bg2: #ffffff; --bg3: #f3f1ec;
-    --border: #e4e7eb; --border2: #d3d8de;
-    --text: #1f2933; --dim: #3e4c59; --muted: #616e7c;
-    --accent: #2f6f9e; --accent2: #0f6e8c;
-    --green: #2f7a4f; --yellow: #a9790a; --red: #b84b43;
-    --purple: #5d5fa0; --teal: #0f6e8c;
-    --radius: 10px; --radius-sm: 6px;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 15px; font-weight: 400; line-height: 1.6; }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  strong { font-weight: 600; }
-
-  .container { max-width: 1040px; margin: 0 auto; padding: 40px 24px 80px; }
-  header { text-align: center; padding: 40px 0 32px; border-bottom: 1px solid var(--border); margin-bottom: 40px; }
-  header h1 { font-size: 28px; font-weight: 600; color: var(--text); letter-spacing: -0.3px; }
-  header .subtitle { color: var(--muted); margin-top: 8px; font-size: 13px; }
-
-  nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 40px; }
-  nav a { background: var(--bg3); border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px; color: var(--dim); font-size: 13px; transition: all 0.15s; }
-  nav a:hover { color: var(--text); border-color: var(--border2); text-decoration: none; background: var(--bg2); }
-
-  /* Why: single rule for vertical rhythm between Top Actions, Summary and every following section. */
-  .rpt-section { margin-top: 48px; display: block; }
-  /* Collapsible heavy sections (By the Numbers, Model Spend) and their nested
-     chart blocks (Numbers, Flagged Sessions): native <details>/<summary>, no JS.
-     Narrative sections stay plain <section> and are never collapsible. */
-  details > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; }
-  details > summary::-webkit-details-marker { display: none; }
-  details > summary::before {
-    content: ""; width: 7px; height: 7px; flex-shrink: 0;
-    border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
-    transform: rotate(-45deg); transition: transform 0.15s ease;
-  }
-  details[open] > summary::before { transform: rotate(45deg); }
-  details > summary:hover { background: var(--bg3); border-radius: var(--radius-sm); }
-  details.rpt-section > summary { border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 24px; }
-  details.rpt-section > summary > h2 { flex: 1; margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
-  details.nested-collapse > summary > h3 { flex: 1; margin-bottom: 0; }
-  h2 { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
-  /* Category pills: the same pill marks a friction type in the chart and on
-     the friction cards, so a card visibly belongs to a chart row. */
-  .category-pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; line-height: 1.6; white-space: nowrap; text-transform: none; letter-spacing: 0; }
-  .category-pill.friction { background: #fdf3e1; color: #8a5a12; border: 1px solid #f0d9ae; }
-  a.category-pill { text-decoration: none; }
-  a.category-pill:hover { border-color: #d9a94f; }
-  .bar-row:target .category-pill { box-shadow: 0 0 0 2px #f0d9ae; }
-  /* Why: a pill label must shrink with an ellipsis inside its rounded border, not get clipped mid-pill. */
-  .bar-label .category-pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
-  .bar-row:has(.category-pill) .bar-label { width: 190px; }
-  h3 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
-
-  .evidence { margin-top: 8px; font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
-  .evidence-link { display: flex; align-items: center; gap: 6px; }
-  .evidence-cmd { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--accent2); font-size: 11px; }
-  .file-icon-link { color: var(--accent); display: inline-flex; align-items: center; gap: 3px; font-size: 11px; text-decoration: none; }
-  .file-icon-link:hover { color: var(--accent2); text-decoration: underline; }
-  .config-diff { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
-  .config-diff-row { margin-top: 4px; color: var(--text); }
-  .config-diff-row code { color: var(--accent2); }
-  .config-diff-old { color: var(--red); text-decoration: line-through; }
-  .config-diff-new { color: var(--green); }
-
-  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; }
-  .card + .card { margin-top: 12px; }
-  .card-grid { display: grid; gap: 12px; }
-  .card-grid.cols2 { grid-template-columns: repeat(2, 1fr); }
-  .card-grid.cols3 { grid-template-columns: repeat(3, 1fr); }
-
-  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
-  .stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; text-align: center; }
-  .stat-value { font-size: 24px; font-weight: 600; color: var(--accent); }
-  .stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .stat-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-
-  .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 14px; }
-  .bar-row.compact { margin-bottom: 2px; }
-  .bar-label { width: 140px; flex-shrink: 0; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .bar-track { flex: 1; height: 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
-  .bar-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
-  .bar-count { width: 40px; text-align: right; color: var(--muted); flex-shrink: 0; }
-
-  .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
-  .chart-box { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .chart-box h3 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; }
-
-  .at-a-glance { background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius); overflow: hidden; }
-  .at-a-glance-part { padding: 20px 24px; border-bottom: 1px solid var(--border); }
-  .at-a-glance-part:last-child { border-bottom: none; }
-  .at-a-glance-part h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--accent); margin-bottom: 10px; }
-  .at-a-glance-part p { color: var(--text); line-height: 1.6; }
-  .at-a-glance-part.since-last-report { background: var(--bg3); }
-  .at-a-glance-part.since-last-report h3 { color: var(--accent2); }
-  .since-list { margin: 0; padding-left: 18px; color: var(--text); line-height: 1.6; }
-  .since-list li + li { margin-top: 4px; }
-
-  .area-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .area-card h3 { color: var(--text); font-size: 15px; }
-  .area-card .count { color: var(--muted); font-size: 12px; margin-left: 8px; }
-  .area-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
-
-  .workflow-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .workflow-card h3 { color: var(--text); font-size: 15px; }
-  .workflow-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
-
-  .style-block-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
-  .style-block-card h3 { color: var(--text); font-size: 15px; }
-  .style-block-card p { color: var(--muted); margin-top: 6px; font-size: 14px; }
-
-  .friction-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .friction-card h3 { color: var(--text); font-size: 15px; }
-  .friction-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
-  .friction-card .examples { margin-top: 10px; }
-  .friction-card .example { font-size: 13px; color: var(--muted); padding: 4px 0 4px 14px; border-left: 2px solid var(--border2); margin-top: 6px; }
-
-  /* Advice cards: the one layout shared by Top Actions, config
-     additions, features to try, usage patterns, stop-doing and ongoing
-     friction, colored by type with a thin left border. */
-  .advice-card { background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius); padding: 16px 20px; }
-  .advice-title { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 0; }
-  .advice-reason { color: var(--muted); font-size: 13px; margin-top: 6px; }
-  .advice-instead { color: var(--accent); font-size: 13px; margin-top: 6px; }
-  .advice-instead strong { color: var(--text); }
-
-  .action-list { list-style: decimal; padding-left: 22px; }
-  .action-item { margin-bottom: 14px; }
-  .action-item::marker { color: var(--muted); }
-  .action-item:last-child { margin-bottom: 0; }
-  .action-item .advice-card { padding: 14px 18px; }
-
-  .meta-row { margin-top: 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 6px; }
-  .meta-chip { text-transform: none; letter-spacing: 0; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--text); font-size: 12px; }
-  .file-target { display: inline-flex; align-items: center; gap: 5px; text-transform: none; letter-spacing: 0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--dim); }
-  .file-target svg { color: var(--muted); flex-shrink: 0; }
-  a.file-target-link { color: var(--accent); text-decoration: none; }
-  a.file-target-link svg { color: currentColor; }
-  a.file-target-link:hover span { text-decoration: underline; }
-
-  .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .cost-table th, .cost-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
-  .cost-table th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.4px; }
-
-  .copy-box { background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: var(--teal); white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 10px; }
-  /* Why: buttons are the only interactive controls in a card; an accent tint separates them from the grey chips and code blocks around them. */
-  .copy-btn { display: inline-flex; align-items: center; gap: 6px; background: #e8f0fa; border: 1px solid #b9cde6; color: #1f4f8a; font-family: inherit; font-weight: 500; font-size: 12px; padding: 5px 12px; border-radius: var(--radius-sm); cursor: pointer; margin-top: 8px; transition: all 0.15s; }
-  .copy-btn:hover { background: #d6e5f6; border-color: #8fb0d8; color: #163d6d; }
-  .copy-btn.tiny { padding: 2px 8px; margin-top: 0; font-size: 11px; }
-  .copy-all-btn { background: var(--accent); color: #fff; font-weight: 600; border: none; padding: 8px 18px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; margin-top: 16px; transition: opacity 0.15s; }
-  .copy-all-btn:hover { opacity: 0.85; }
-
-  .horizon-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; }
-  .horizon-card h3 { color: var(--text); font-size: 15px; }
-  .horizon-card p { color: var(--muted); margin-top: 8px; font-size: 14px; }
-  .horizon-card .how { color: var(--muted); font-size: 13px; margin-top: 8px; }
-
-  .muted { color: var(--muted); font-size: 14px; }
-  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
-  .badge.green { background: rgba(47,122,79,0.12); color: var(--green); }
-  .badge.yellow { background: rgba(169,121,10,0.12); color: var(--yellow); }
-  .badge.red { background: rgba(184,75,67,0.12); color: var(--red); }
-
-  @media (max-width: 700px) {
-    .card-grid.cols2, .card-grid.cols3 { grid-template-columns: 1fr; }
-    .stat-grid { grid-template-columns: repeat(2, 1fr); }
-    .charts-grid { grid-template-columns: 1fr; }
-  }
+${PAGE_STYLE}
 </style>
 </head>
 <body>
@@ -662,6 +671,7 @@ export function generateHTML(
 <nav>
   <a href="#at-a-glance">Summary</a>
   <a href="#stats">Numbers</a>
+  <a href="#time">Time</a>
   <a href="#projects">Where You Worked</a>
   <a href="#style">How You Work</a>
   <a href="#what-works">Wins</a>
@@ -765,6 +775,8 @@ ${actionListHtml}
   </div>
   </details>
 </details>
+
+${opts.timeAgg ? renderTimeSection(opts.timeAgg) : ""}
 
 <!-- ── Project Areas ── -->
 <details class="rpt-section" id="projects">

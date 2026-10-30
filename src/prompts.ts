@@ -12,7 +12,7 @@
 import { top8, FRICTION_TAXONOMY } from "./aggregate.ts";
 import { displayLabel } from "./stats.ts";
 import { formatFactsForPrompt, type Fact } from "./facts.ts";
-import type { AggregatedData, TemporalData, UserContext } from "./types.ts";
+import type { AggregatedData, TemporalData, TimeAggregate, UserContext } from "./types.ts";
 
 export const CHUNK_SUMMARIZE_PROMPT = `Summarize this portion of a session transcript. Focus on:
 1. What the user asked for
@@ -57,7 +57,7 @@ ${Object.entries(FRICTION_TAXONOMY).map(([key, v]) => `   - ${key}: ${v.descript
 SESSION:
 `;
 
-export function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData, userCtx: UserContext, facts: Fact[]): string {
+export function buildSharedDataBlock(agg: AggregatedData, temporal: TemporalData, userCtx: UserContext, facts: Fact[], timeAgg?: TimeAggregate): string {
 	return (
 		// Why first: the facts are the only numbers the prose may quote as a
 		// percentage or dollar amount; checkFacts flags anything else.
@@ -118,7 +118,7 @@ ${agg.subscription_cost > 0 ? `NOTE: cost_usd below is API-equivalent cost (the 
 				turn_p50: agg.turn_p50,
 				turn_p90: agg.turn_p90,
 				worst_turns_corpus: agg.worst_turns_corpus,
-				tool_time_share: agg.tool_time_share.slice(0, 10),
+				time_split: timeAgg ? { shares: timeAgg.shares, buckets: timeAgg.buckets, top_levers: timeAgg.levers.slice(0, 3).map((l) => ({ id: l.id, title: l.title, detail: l.detail })) } : undefined,
 				cache_hit_ratio_pct: (agg.cache_hit_ratio * 100).toFixed(1),
 				worst_cache_sessions: agg.worst_cache_sessions,
 				most_churned_files: agg.most_churned_files,
@@ -138,7 +138,7 @@ USER INSTRUCTIONS TO ASSISTANT:
 ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
 		`\n\nFRICTION SIGNALS:\nInterruption rate: ${(agg.interruption_rate * 100).toFixed(1)}% of human messages were aborted mid-flight or steered ((${agg.aborted_generations} aborted - ${agg.aborted_at_session_end} ended-at-session + ${agg.total_steering} steered) / ${agg.total_messages} human messages).\nAbort outcome labels: ${Object.entries(agg.abort_labels).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nProvider errors: ${agg.error_generations} total, by class: ${Object.entries(agg.error_classes).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nInvented tool names (never real tools, excluded from tool error rates): ${Object.entries(agg.tool_not_found).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nPer-tool error rate (>=5 calls, worst first; "browser" includes eval calls whose code drives the browser global, so "eval" is plain scripting only): ${agg.tool_error_rate_table.slice(0, 8).map(r => `${r.tool} ${(r.rate * 100).toFixed(1)}% (${r.errors}/${r.calls})`).join(", ") || "none"}\nTTSR rule injections (harness caught a bad generation and injected a rule): ${agg.ttsr_injections} total, rules: ${Object.entries(agg.ttsr_rules).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}\nContext reset boundaries (a path was abandoned and context rewound): ${agg.reset_boundaries}` +
 		`\n\nPER-TURN PATHOLOGY (a turn = one human message to the next; the expensive failure mode is one request costing many LLM round trips and tool calls):\n${agg.total_turns} turns across ${agg.total_sessions} sessions. p50: ${agg.turn_p50.round_trips} round trips, ${agg.turn_p50.tool_calls} tool calls, ${agg.turn_p50.exploration} exploration calls before first edit, ${agg.turn_p50.wall_sec.toFixed(0)}s wall clock. p90: ${agg.turn_p90.round_trips} round trips, ${agg.turn_p90.tool_calls} tool calls, ${agg.turn_p90.exploration} exploration calls, ${agg.turn_p90.wall_sec.toFixed(0)}s wall clock.\nWorst turns across the corpus (name these specifically): ${agg.worst_turns_corpus.map(t => `"${t.prompt}" (${t.project}): ${t.llm_round_trips} round trips, ${t.tool_calls} tool calls, ${t.exploration_before_first_mutation} exploration-before-edit, ${t.wall_sec.toFixed(0)}s, $${t.cost.toFixed(2)}`).join("; ") || "none"}` +
-		`\n\nPER-TOOL WALL CLOCK (startedAt paired with the matching toolResult by toolCallId${agg.tool_calls_with_intent > 0 ? `; ${agg.tool_calls_with_intent} of these calls also carry an "intent" field: use it to explain why a slow tool call happened, not just which tool` : ""}):\n${agg.tool_time_share.slice(0, 8).map(t => `${t.tool}: ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}` +
+		`\n\nWHERE THE TIME WENT${agg.tool_calls_with_intent > 0 ? ` (tool_execution_start records pair startedAt with the matching toolResult by toolCallId; ${agg.tool_calls_with_intent} of these calls also carry an "intent" field: use it to explain why a slow tool call happened, not just which tool)` : ""}:\n${timeAgg ? Object.entries(timeAgg.shares).map(([b, s]) => `${b}: ${(s * 100).toFixed(0)}% (${timeAgg.buckets[b as keyof typeof timeAgg.buckets].toFixed(0)}s)`).join(", ") : "not computed"}` +
 		`\n\nCACHE EFFICIENCY:\nOverall cache hit ratio: ${(agg.cache_hit_ratio * 100).toFixed(1)}% (cacheRead / (input + cacheRead)). A low ratio on a large prompt is the resumed-stale-session tax: money and latency burned re-reading context.\nWorst sessions by ratio (>=50k input+cacheRead tokens): ${agg.worst_cache_sessions.map(s => `${s.project} (${s.tokens} tok, $${s.cost.toFixed(2)}): ${(s.ratio * 100).toFixed(1)}%`).join("; ") || "none"}` +
 		`\n\nEDIT CHURN (same file edited repeatedly across the corpus = the model did not understand it the first time):\n${agg.most_churned_files.map(f => `${f.path}: ${f.edits} edits across ${f.sessions} session(s)`).join("; ") || "none"}` +
 		`\n\nTEMPORAL CONTEXT:\n${temporal.delta?.insufficient ? temporal.diff_headlines.join("; ") : temporal.diff_headlines.length ? "Before/after delta (the only one in the report; quote it with its windows, never compute another): " + temporal.diff_headlines.join("; ") : "No significant before/after change."}\nTrajectory: ${temporal.trajectory.cost === "insufficient" ? temporal.trajectory.note + " - do not claim any cost or error trend is rising, falling, improving or worsening." : temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
@@ -340,7 +340,7 @@ export function filterByEvidence(suggestions: SuggestionSections): SuggestionSec
 	};
 }
 
-export function buildSectionPrompts(data: string, temporal: TemporalData, userCtx: UserContext, agg: AggregatedData) {
+export function buildSectionPrompts(data: string, temporal: TemporalData, userCtx: UserContext, agg: AggregatedData, timeAgg?: TimeAggregate) {
 	return {
 		project_areas: `Analyze this usage data and identify project areas.
 
@@ -422,7 +422,7 @@ FRICTION SIGNALS (from toolResult.isError and stopReason, not text heuristics):
 - Invented tool names that always fail (excluded from per-tool rates below, but a real bug on their own): ${Object.entries(agg.tool_not_found).map(([k, v]) => `${k} (${v}x)`).join(", ") || "none"}.
 - Worst real per-tool error rates (>=5 calls): ${agg.tool_error_rate_table.slice(0, 5).map(r => `${r.tool} ${(r.rate * 100).toFixed(0)}% (${r.errors}/${r.calls})`).join(", ") || "none"}.
 - Per-turn pathology: p50 is ${agg.turn_p50.round_trips} round trips / ${agg.turn_p50.tool_calls} tool calls per request; p90 is ${agg.turn_p90.round_trips} round trips / ${agg.turn_p90.tool_calls} tool calls. The expensive failure mode is ONE request costing many LLM round trips and tool calls to make a small change; name the worst turns specifically (prompt + round trips + tool calls), don't just cite the percentile.
-- Per-tool wall clock (startedAt paired with the matching toolResult${agg.tool_calls_with_intent > 0 ? `; ${agg.tool_calls_with_intent} calls also carry an "intent" field` : ""}): ${agg.tool_time_share.slice(0, 5).map(t => `${t.tool} ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}. "The model is slow" and "the model is waiting on your test suite" are different findings; name the tool, not just the session.
+- Where the time went${agg.tool_calls_with_intent > 0 ? ` (tool_execution_start records pair startedAt with the matching toolResult; ${agg.tool_calls_with_intent} calls also carry an "intent" field)` : ""}: ${timeAgg ? Object.entries(timeAgg.shares).map(([b, s]) => `${b} ${(s * 100).toFixed(0)}%`).join(", ") : "not computed"}. "The model is slow" and "the model is waiting on your test suite" are different findings; name the bucket and the dominant command family, not just the session.
 - Edit churn: files edited repeatedly across the corpus are a model that did not understand them the first time: ${agg.most_churned_files.slice(0, 5).map(f => `${f.path} (${f.edits}x across ${f.sessions} session(s))`).join(", ") || "none"}.
 
 Focus on ONGOING friction. Mention resolved items briefly as wins.
@@ -594,6 +594,39 @@ DATA:
 ${data}`;
 		})(),
 	};
+}
+
+/**
+ * Issue #18 "where did the time go": /insights time --explain prompt. Only
+ * the bucket split, levers and slowest requests are given, and the prompt
+ * tells the model to quote them verbatim - no section JSON, no evidence
+ * filtering, since this is a one-off deterministic explanation, not a
+ * cached report section.
+ */
+export function buildTimeExplainPrompt(agg: TimeAggregate): string {
+	const bucketLines = Object.entries(agg.shares)
+		.map(([b, s]) => `${b}: ${(s * 100).toFixed(0)}% (${(agg.buckets as Record<string, number>)[b]!.toFixed(0)}s)`)
+		.join(", ");
+	const leverLines = agg.levers.slice(0, 3).map((l) => `- ${l.title}: ${l.detail}`).join("\n") || "none";
+	const slowestLines =
+		agg.slowest_requests
+			.slice(0, 5)
+			.map((r) => `- "${r.prompt}" (${r.project}): ${r.wall_sec.toFixed(0)}s, dominated by ${r.dominant_bucket}`)
+			.join("\n") || "none";
+	return `Explain where your time went, in your own words. Use second person ("you"). Write 2-4 plain sentences, no bullet lists, no headings, no markdown. Quote ONLY the numbers given below - never compute a new percentage, ratio or total yourself.
+
+BUCKET SPLIT (n=${agg.sessions} sessions, ${agg.date_range.start}..${agg.date_range.end}):
+${bucketLines}
+active_sec: ${agg.active_sec.toFixed(0)}
+subagent_busy_sec (ran in parallel, not part of active time): ${agg.subagent_busy_sec.toFixed(0)}
+
+LEVERS (where to focus):
+${leverLines}
+
+SLOWEST REQUESTS:
+${slowestLines}
+
+RESPOND WITH PLAIN PROSE ONLY.`;
 }
 
 export function buildSynthesisPrompt(

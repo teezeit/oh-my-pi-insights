@@ -51,6 +51,9 @@ export const SESSION_SET_PATH = join(DATA_DIR, "session-set.json");
 // Why: report.html is overwritten every run; each run also keeps a
 // timestamped copy here so earlier reports stay readable.
 export const REPORTS_DIR = join(DATA_DIR, "reports");
+// Issue #18 (/insights time): the standalone time report, same
+// overwritten-plus-timestamped-copy pattern as REPORT_PATH/REPORTS_DIR.
+export const TIME_REPORT_PATH = join(DATA_DIR, "time.html");
 
 export async function ensureDirs(): Promise<void> {
 	await mkdir(META_DIR, { recursive: true });
@@ -86,7 +89,12 @@ export async function ensureDirs(): Promise<void> {
 // v10: tool_calls_by_tool / tool_errors_by_tool dedupe repeat toolResult
 // deliveries per toolCallId (async bash/wait follow-ups), so cached metas
 // must recompute.
-export const META_SCHEMA_VERSION = 10;
+// v11: SessionMeta gains time_split (issue #18, "where did the time go"),
+// computed from entries this cache entry never carried a value for; every
+// cached meta must recompute once so time_split stops reading as all-zero.
+// v12: time_split gained you_gaps and the "elsewhere" bucket.
+// v13: classify eval/setup commands and account for final background results.
+export const META_SCHEMA_VERSION = 13;
 
 export async function loadCachedMeta(
 	sourceName: string,

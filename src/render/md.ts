@@ -14,7 +14,8 @@ import { SESSION_SET_PATH } from "../cache.ts";
 import { buildActionList } from "./actions.ts";
 import { diffConfigAddition } from "./configDiff.ts";
 import { itemTitle, stripEmoji } from "./text.ts";
-import type { AggregatedData, ScanSummary, TemporalData, UserContext } from "../types.ts";
+import { renderTimeMarkdown } from "./time.ts";
+import type { AggregatedData, ScanSummary, TemporalData, TimeAggregate, UserContext } from "../types.ts";
 
 export function fmtHours(h: number): string {
 	if (h < 1) return `${Math.round(h * 60)}m`;
@@ -40,6 +41,7 @@ export function generateMarkdown(
 	temporal: TemporalData,
 	scan: ScanSummary,
 	userCtx: UserContext,
+	timeAgg?: TimeAggregate,
 ): string {
 	// Why: every rendered text field is LLM-sourced or user-supplied, not
 	// chrome; strip emoji from it the same way the HTML renderer does
@@ -117,6 +119,11 @@ export function generateMarkdown(
 	lines.push(`| Median Reply Wait | ${agg.median_response_time.toFixed(0)}s |`);
 	lines.push(`| Parallel Sessions | ${agg.concurrent_sessions.overlap_events} overlap events across ${agg.concurrent_sessions.sessions_involved} sessions |`);
 	lines.push("");
+
+	if (timeAgg) {
+		lines.push(renderTimeMarkdown(timeAgg));
+		lines.push("");
+	}
 
 	lines.push("## Interruptions and Failures");
 	lines.push(`| Metric | Value |`);

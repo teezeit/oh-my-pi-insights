@@ -59,9 +59,11 @@ import {
 	saveMeta,
 	saveSections,
 	SESSION_SET_PATH,
+	TIME_REPORT_PATH,
 } from "./src/cache.ts";
 import { computeTemporalData, MIN_WINDOW_SESSIONS, trajectoryLine } from "./src/temporal.ts";
 import { aggregateData, detectConcurrentSessions, excludeToolingSessions, normalizeFrictionCounts } from "./src/aggregate.ts";
+import { aggregateTime, buildTimeLevers } from "./src/time-aggregate.ts";
 import { readProviderAuth } from "./src/auth.ts";
 import {
 	detectHarnessChanges,
@@ -75,6 +77,7 @@ import {
 	buildSectionPrompts,
 	buildSharedDataBlock,
 	buildSynthesisPrompt,
+	buildTimeExplainPrompt,
 	CHUNK_SUMMARIZE_PROMPT,
 	FACET_EXTRACT_PROMPT,
 	filterByEvidence,
@@ -89,7 +92,8 @@ import {
 import { callModel, createLimiter, parseJsonFromResponse } from "./src/model.ts";
 import { fmtCost, generateMarkdown } from "./src/render/md.ts";
 import { generateHTML, resolveTargetPath } from "./src/render/html.ts";
-import { buildFacts, checkFacts, type Fact } from "./src/facts.ts";
+import { generateTimeHTML, renderTimeMarkdown, renderTimeSection, timeWidgetLines } from "./src/render/time.ts";
+import { buildFacts, buildTimeFacts, checkFacts, type Fact } from "./src/facts.ts";
 import { DEFAULT_WORD_BUDGETS, dedupeIncidents, dedupeRecommendations, enforceBudget } from "./src/postprocess.ts";
 import { buildActionList, type ActionItem } from "./src/render/actions.ts";
 import { configDiff, diffConfigAddition, type ConfigDiffEntry } from "./src/render/configDiff.ts";
@@ -104,14 +108,17 @@ import {
 	resolveSafeSessionId,
 	toolErrorCategory,
 } from "./src/stats.ts";
+import { classifyWait, commandFamily, extractTimeSplit, IDLE_CAP_SEC } from "./src/time.ts";
 import type {
 	AggregatedData,
 	ScanSummary,
 	SessionFacets,
 	SessionMeta,
 	SessionRef,
+	SessionScan,
 	SessionSource,
 	TemporalData,
+	TimeAggregate,
 	UserContext,
 } from "./src/types.ts";
 
@@ -218,6 +225,168 @@ function defaultExcludeProjects(extensionDir: string): string[] {
 }
 const DEFAULT_EXCLUDE_PROJECTS = defaultExcludeProjects(import.meta.dirname);
 
+/** Default lookback window for `/insights time` when `--since` is absent. */
+const DEFAULT_TIME_WINDOW_DAYS = 14;
+
+type SessionScanLoadResult = {
+	scan: ScanSummary;
+	scanned: SessionScan;
+	substantive: SessionMeta[];
+};
+
+/**
+ * The scan + session-meta-cache pipeline shared by `/insights` and
+ * `/insights time`: list logs, load cached metas, parse and cache the rest,
+ * then filter to substantive sessions (and, for the main report, the
+ * `--since` window). Facets, aggregation and rendering are each caller's
+ * own concern - this only produces the SessionMeta[] every mode starts from.
+ */
+async function scanAndLoadSessions(opts: {
+	ctx: ExtensionCommandContext;
+	source: SessionSource;
+	maxSessions: number;
+	currentSessionId: string;
+	/** Restrict to exactly this session id: skips the current-session
+	 * exclusion and the substance/since filters, since the caller asked for
+	 * this one session specifically (used by `/insights time --session`). */
+	onlySessionId?: string;
+	sinceDays: number;
+	widgetHeader: string;
+	/** Shown as the very first progress line, e.g. "Phase 1/5: Scanning session files...". */
+	scanningLabel: string;
+	/** Prefix for the per-batch "Loaded N cached, M/K new" line, e.g. "Phase 2/5". */
+	loadingLabel: string;
+}): Promise<SessionScanLoadResult> {
+	const { ctx, source, maxSessions, currentSessionId, onlySessionId, sinceDays, widgetHeader, scanningLabel, loadingLabel } = opts;
+	const widget = (lines: string[]) => ctx.ui.setWidget("insights", ["", `  ${widgetHeader}`, "  ─────────────────────────────────", ...lines]);
+
+	ctx.ui.setStatus("insights", "🔍 Scanning sessions...");
+	widget([`  ${scanningLabel}`]);
+
+	const scanned = await source.listSessions();
+	const scan: ScanSummary = {
+		sessions_dir: source.root,
+		primary_logs: scanned.sessions.length,
+		duplicate_logs: scanned.duplicate_logs,
+		advisor_logs: 0,
+		subagent_logs: 0,
+		excluded_meta: 0,
+		excluded_current: 0,
+		excluded_unparsed: 0,
+		excluded_not_substantive: 0,
+		excluded_by_since: 0,
+		excluded_tooling: 0,
+		facet_failures: 0,
+		facets_analyzed: 0,
+		reused_stale_sections: false,
+		included: 0,
+		source: source.name,
+		cost_unavailable: 0,
+	};
+	for (const ref of scanned.sessions) {
+		for (const sidecar of ref.sidecars) {
+			if (sidecar.kind === "advisor") scan.advisor_logs++;
+			else scan.subagent_logs++;
+		}
+	}
+
+	// The session running this command is excluded by id (its own transcript
+	// would otherwise be summarised mid-write) - unless the caller asked for
+	// exactly one session, which may be this one (`--session current`).
+	const allRefs = onlySessionId
+		? scanned.sessions.filter((ref) => ref.id === onlySessionId)
+		: scanned.sessions.filter((ref) => {
+				if (ref.id === currentSessionId) {
+					scan.excluded_current++;
+					return false;
+				}
+				return true;
+			});
+
+	widget([`  Scanned ${allRefs.length} sessions, ${scan.advisor_logs} advisor + ${scan.subagent_logs} subagent logs`, `  ${loadingLabel}: Loading session stats...`]);
+
+	const metas: SessionMeta[] = [];
+
+	// Load cached metas first (batch)
+	const cachedMetaIds = new Set<string>();
+	for (let i = 0; i < allRefs.length; i += META_BATCH_SIZE) {
+		const batch = allRefs.slice(i, i + META_BATCH_SIZE);
+		const results = await Promise.all(
+			batch.map((ref) => loadCachedMeta(source.name, ref.id, ref.signature)),
+		);
+		for (let j = 0; j < batch.length; j++) {
+			const cached = results[j];
+			if (cached) {
+				cachedMetaIds.add(batch[j]!.id);
+				metas.push(cached);
+			}
+		}
+	}
+
+	// Parse uncached sessions (up to the load cap)
+	const uncached = allRefs.filter((ref) => !cachedMetaIds.has(ref.id));
+	const toLoad = uncached.slice(0, maxSessions);
+
+	let loadedCount = 0;
+	for (let i = 0; i < toLoad.length; i += LOAD_BATCH_SIZE) {
+		const batch = toLoad.slice(i, i + LOAD_BATCH_SIZE);
+		await Promise.all(
+			batch.map(async (ref) => {
+				try {
+					const entries = await source.readEntries(ref.path);
+
+					if (source.isMetaSession(entries)) {
+						scan.excluded_meta++;
+						return;
+					}
+
+					// Sidecars are read here and folded into the parent: advisor and
+					// subagent spend is real money that belongs to this session.
+					const sidecars = await Promise.all(
+						ref.sidecars.map(async (sidecar) => ({
+							kind: sidecar.kind,
+							usage: source.readSidecar(await source.readEntries(sidecar.path)),
+						})),
+					);
+
+					const meta = await source.buildMeta(ref, entries, sidecars);
+					await saveMeta(source.name, meta);
+					metas.push(meta);
+				} catch {
+					// Skip sessions that fail to load
+					scan.excluded_unparsed++;
+				}
+				loadedCount++;
+			}),
+		);
+		widget([`  ${loadingLabel}: Loaded ${cachedMetaIds.size} cached, ${loadedCount}/${toLoad.length} new`]);
+	}
+
+	// Filter substantive sessions (≥2 user messages, ≥1 min) - skipped
+	// entirely when restricted to one session, which must never come back
+	// empty just because it is short or brand new.
+	const substantive = onlySessionId
+		? metas
+		: metas.filter((m) => {
+				if (m.user_message_count < 2 || m.duration_minutes < 1) {
+					scan.excluded_not_substantive++;
+					return false;
+				}
+				if (sinceDays) {
+					const age = Date.now() - new Date(m.start_time).getTime();
+					if (age >= sinceDays * 86400000) {
+						scan.excluded_by_since++;
+						return false;
+					}
+				}
+				return true;
+			});
+	scan.included = substantive.length;
+
+	return { scan, scanned, substantive };
+}
+
+
 // ─── Main Command Handler ─────────────────────────────────────────────────────
 
 async function runInsights(
@@ -283,145 +452,22 @@ async function runInsights(
 		(ctx.model as { id?: string; provider?: string } | undefined)?.id ?? undefined;
 	const currentSessionId = ctx.sessionManager?.getSessionId?.() ?? "";
 
-	// ── Phase 1: Scan ────────────────────────────────────────────────────────────
-	ctx.ui.setStatus("insights", "🔍 Scanning sessions...");
-	ctx.ui.setWidget("insights", [
-		"",
-		"  📊 omp Insights",
-		"  ─────────────────────────────────",
-		"  Phase 1/5: Scanning session files...",
-	]);
-
-	const scanned = await source.listSessions();
-	const scan: ScanSummary = {
-		sessions_dir: source.root,
-		primary_logs: scanned.sessions.length,
-		duplicate_logs: scanned.duplicate_logs,
-		advisor_logs: 0,
-		subagent_logs: 0,
-		excluded_meta: 0,
-		excluded_current: 0,
-		excluded_unparsed: 0,
-		excluded_not_substantive: 0,
-		excluded_by_since: 0,
-		excluded_tooling: 0,
-		facet_failures: 0,
-		facets_analyzed: 0,
-		reused_stale_sections: false,
-		included: 0,
-		source: source.name,
-		cost_unavailable: 0,
-	};
-	for (const ref of scanned.sessions) {
-		for (const sidecar of ref.sidecars) {
-			if (sidecar.kind === "advisor") scan.advisor_logs++;
-			else scan.subagent_logs++;
-		}
-	}
-
-	// The session running this command is excluded by id: its own transcript
-	// would otherwise be summarised mid-write.
-	const allRefs = scanned.sessions.filter((ref) => {
-		if (ref.id === currentSessionId) {
-			scan.excluded_current++;
-			return false;
-		}
-		return true;
+	const { scan, scanned, substantive } = await scanAndLoadSessions({
+		ctx,
+		source,
+		maxSessions: limits.maxSessions,
+		currentSessionId,
+		sinceDays,
+		widgetHeader: "📊 omp Insights",
+		scanningLabel: "Phase 1/5: Scanning session files...",
+		loadingLabel: "Phase 2/5",
 	});
 
 	ctx.ui.setWidget("insights", [
 		"",
 		"  📊 omp Insights",
 		"  ─────────────────────────────────",
-		`  Phase 1/5 done - ${allRefs.length} sessions, ${scan.advisor_logs} advisor + ${scan.subagent_logs} subagent logs`,
-		"  Phase 2/5: Extracting session stats...",
-	]);
-
-	// ── Phase 2: Session Metadata ────────────────────────────────────────────────
-	const metas: SessionMeta[] = [];
-
-	// Load cached metas first (batch)
-	const cachedMetaIds = new Set<string>();
-	for (let i = 0; i < allRefs.length; i += META_BATCH_SIZE) {
-		const batch = allRefs.slice(i, i + META_BATCH_SIZE);
-		const results = await Promise.all(
-			batch.map((ref) => loadCachedMeta(source.name, ref.id, ref.signature)),
-		);
-		for (let j = 0; j < batch.length; j++) {
-			const cached = results[j];
-			if (cached) {
-				cachedMetaIds.add(batch[j]!.id);
-				metas.push(cached);
-			}
-		}
-	}
-
-	// Parse uncached sessions (up to the load cap)
-	const uncached = allRefs.filter((ref) => !cachedMetaIds.has(ref.id));
-	const toLoad = uncached.slice(0, limits.maxSessions);
-
-	let loadedCount = 0;
-	for (let i = 0; i < toLoad.length; i += LOAD_BATCH_SIZE) {
-		const batch = toLoad.slice(i, i + LOAD_BATCH_SIZE);
-		await Promise.all(
-			batch.map(async (ref) => {
-				try {
-					const entries = await source.readEntries(ref.path);
-
-					if (source.isMetaSession(entries)) {
-						scan.excluded_meta++;
-						return;
-					}
-
-					// Sidecars are read here and folded into the parent: advisor and
-					// subagent spend is real money that belongs to this session.
-					const sidecars = await Promise.all(
-						ref.sidecars.map(async (sidecar) => ({
-							kind: sidecar.kind,
-							usage: source.readSidecar(await source.readEntries(sidecar.path)),
-						})),
-					);
-
-					const meta = await source.buildMeta(ref, entries, sidecars);
-					await saveMeta(source.name, meta);
-					metas.push(meta);
-				} catch {
-					// Skip sessions that fail to load
-					scan.excluded_unparsed++;
-				}
-				loadedCount++;
-			}),
-		);
-		ctx.ui.setWidget("insights", [
-			"",
-			"  📊 omp Insights",
-			"  ─────────────────────────────────",
-			`  Phase 2/5: Loaded ${cachedMetaIds.size} cached, ${loadedCount}/${toLoad.length} new`,
-		]);
-	}
-
-	// Filter substantive sessions (≥2 user messages, ≥1 min)
-	const substantive = metas.filter((m) => {
-		if (m.user_message_count < 2 || m.duration_minutes < 1) {
-			scan.excluded_not_substantive++;
-			return false;
-		}
-		if (sinceDays) {
-			const age = Date.now() - new Date(m.start_time).getTime();
-			if (age >= sinceDays * 86400000) {
-				scan.excluded_by_since++;
-				return false;
-			}
-		}
-		return true;
-	});
-	scan.included = substantive.length;
-
-	ctx.ui.setWidget("insights", [
-		"",
-		"  📊 omp Insights",
-		"  ─────────────────────────────────",
-		`  Phase 2/5 done - ${substantive.length} substantive sessions`,
+		`  ${substantive.length} substantive sessions`,
 		useLlm
 			? "  Phase 3/5: LLM facet extraction..."
 			: "  Phase 3/5: skipped (deterministic run)",
@@ -578,6 +624,10 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	scan.facets_analyzed = agg.sessions_with_facets;
 	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
 	const temporal = computeTemporalData(analysisMetas, facetsMap, agg.friction, { sinceDays });
+	// Issue #18 "where did the time go": totals (like every other total in
+	// this report) include tooling sessions, so this uses `kept`, not
+	// `analysisMetas` - same population as agg.
+	const timeAgg = aggregateTime(kept);
 	// Follow-up: snapshot diff instead of config.yml.bak-* parsing - see
 	// src/harness.ts. windowEnd gates too_recent only; the diff itself needs
 	// no date range (a snapshot diff is always "since last run").
@@ -589,9 +639,9 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 		);
 		if (harnessChanges.length) temporal.harness_changes = harnessChanges;
 	}
-	const facts = buildFacts(agg, temporal);
-	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx, facts);
-	const sectionPrompts = buildSectionPrompts(dataBlock, temporal, userCtx, agg);
+	const facts = buildFacts(agg, temporal, timeAgg);
+	const dataBlock = buildSharedDataBlock(agg, temporal, userCtx, facts, timeAgg);
+	const sectionPrompts = buildSectionPrompts(dataBlock, temporal, userCtx, agg, timeAgg);
 
 	// Keyed on the prompt inputs, not the clock: the same corpus and the same
 	// model produce the same prose, so a re-run should cost nothing.
@@ -773,13 +823,13 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	await saveHarnessSnapshot(DATA_DIR, currentHarnessSnapshot);
 
 	const sessionPaths = Object.fromEntries(kept.map((m) => [m.session_id, m.session_path]));
-	const html = generateHTML(agg, renderSections, synthesis, temporal, { prevSections, sessionPaths, userCtx });
+	const html = generateHTML(agg, renderSections, synthesis, temporal, { prevSections, sessionPaths, userCtx, timeAgg });
 	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 	await writeFile(REPORT_PATH, html, { encoding: "utf-8" });
 	await writeFile(join(REPORTS_DIR, `report-${stamp}.html`), html, { encoding: "utf-8" });
 
 	if (formatMd) {
-		const md = generateMarkdown(agg, renderSections, synthesis, temporal, scan, userCtx);
+		const md = generateMarkdown(agg, renderSections, synthesis, temporal, scan, userCtx, timeAgg);
 		await writeFile(REPORT_MD_PATH, md, { encoding: "utf-8" });
 		await writeFile(join(REPORTS_DIR, `report-${stamp}.md`), md, { encoding: "utf-8" });
 		ctx.ui.setStatus("insights", "");
@@ -815,15 +865,138 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	}
 }
 
+/**
+ * Parses `/insights time ...` arguments. `fullArgs` is the raw args string
+ * handed to the registered command (e.g. "time --since 3d --session
+ * current"); `isTimeCommand` is false (and every other field is a default)
+ * when the first token is not "time", so the extension entry can route on
+ * this alone.
+ */
+function parseTimeArgs(fullArgs: string): {
+	isTimeCommand: boolean;
+	sinceDays: number;
+	sessionFilter: string | null;
+	explain: boolean;
+	noOpen: boolean;
+} {
+	const trimmed = fullArgs.trim();
+	const isTimeCommand = trimmed === "time" || trimmed.startsWith("time ");
+	const rest = isTimeCommand ? trimmed.slice("time".length).trim() : trimmed;
+	const sinceMatch = rest.match(/--since\s+(\d+)([dw])/);
+	const sinceDays = sinceMatch ? Number(sinceMatch[1]) * (sinceMatch[2] === "w" ? 7 : 1) : DEFAULT_TIME_WINDOW_DAYS;
+	const sessionMatch = rest.match(/--session\s+(\S+)/);
+	return {
+		isTimeCommand,
+		sinceDays,
+		sessionFilter: sessionMatch ? sessionMatch[1]! : null,
+		explain: rest.includes("--explain"),
+		noOpen: rest.includes("--no-open"),
+	};
+}
+
+/**
+ * `/insights time` - issue #18 "where did the time go": the six-bucket
+ * wall-clock split (model/tools/agents/ci/you/idle) as its own standalone
+ * report, reusing the same scan/meta-cache pipeline as the main report but
+ * skipping facets and the LLM section prompts entirely.
+ */
+async function runTime(args: string, ctx: ExtensionCommandContext): Promise<void> {
+	const { sinceDays, sessionFilter, explain, noOpen } = parseTimeArgs(args);
+
+	if (explain && !ctx.model) {
+		ctx.ui.notify("No active model - set a model first (/model)", "error");
+		return;
+	}
+
+	await ensureDirs();
+
+	const source: SessionSource = args.includes("--source claude")
+		? createClaudeSessionSource()
+		: ompSessionSource;
+	const currentSessionId = ctx.sessionManager?.getSessionId?.() ?? "";
+	if (sessionFilter === "current" && !currentSessionId) {
+		ctx.ui.notify(
+			"No current session id available - run this inside an active session, or pass an explicit --session <id>",
+			"error",
+		);
+		return;
+	}
+	const onlySessionId = sessionFilter === "current" ? currentSessionId : (sessionFilter ?? undefined);
+
+	const limits = {
+		maxSessions: resolveLimit(args, "max-sessions", "OMP_INSIGHTS_MAX_SESSIONS", DEFAULT_MAX_SESSIONS_TO_LOAD),
+		modelConcurrency: resolveLimit(args, "model-concurrency", "OMP_INSIGHTS_MODEL_CONCURRENCY", DEFAULT_MODEL_CONCURRENCY),
+	};
+
+	const { substantive } = await scanAndLoadSessions({
+		ctx,
+		source,
+		maxSessions: limits.maxSessions,
+		currentSessionId,
+		onlySessionId,
+		sinceDays,
+		widgetHeader: "⏱️  omp Insights - Time",
+		scanningLabel: "Scanning session files...",
+		loadingLabel: "Loading",
+	});
+
+	const timeAgg = aggregateTime(substantive);
+
+	let explainText: string | undefined;
+	if (explain && ctx.model) {
+		const activeModel = (ctx.model as { id?: string; provider?: string } | undefined)?.id;
+		const limitModel = createLimiter(limits.modelConcurrency);
+		try {
+			const raw = await limitModel(() => callModel(buildTimeExplainPrompt(timeAgg), { model: activeModel }));
+			const flags = checkFacts({ explain: raw }, buildTimeFacts(timeAgg));
+			if (flags.length) {
+				ctx.ui.notify(`Fact check: ${flags.length} figure(s) in the explanation match no computed fact`, "warning");
+			}
+			explainText = raw;
+		} catch (err) {
+			ctx.ui.notify(`Explain failed: ${(err as Error).message}`, "warning");
+		}
+	}
+
+	const html = generateTimeHTML(timeAgg, { explain: explainText });
+	await writeFile(TIME_REPORT_PATH, html, { encoding: "utf-8" });
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	await writeFile(join(REPORTS_DIR, `time-${stamp}.html`), html, { encoding: "utf-8" });
+
+	ctx.ui.setStatus("insights", "");
+	ctx.ui.setWidget("insights", timeWidgetLines(timeAgg));
+	ctx.ui.notify(`✅ Time report saved: ${TIME_REPORT_PATH}`, "success");
+
+	if (!noOpen) {
+		let opener: string;
+		let openerArgs: string[];
+		if (platform() === "darwin") {
+			opener = "open";
+			openerArgs = [TIME_REPORT_PATH];
+		} else if (platform() === "win32") {
+			opener = "cmd";
+			openerArgs = ["/c", "start", "", TIME_REPORT_PATH];
+		} else {
+			opener = "xdg-open";
+			openerArgs = [TIME_REPORT_PATH];
+		}
+		execFile(opener, openerArgs).catch(() => {
+			ctx.ui.notify(`Open manually: ${TIME_REPORT_PATH}`, "info");
+		});
+	}
+}
+
 // ─── Extension Entry ──────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("insights", {
 		description:
-			"Generate a personal usage insights report from your omp session history",
+			"Generate a personal usage insights report from your omp session history (`insights time` for the where-did-the-time-go breakdown)",
 		handler: async (args, ctx) => {
 			try {
-				await runInsights(args ?? "", ctx);
+				const a = args ?? "";
+				if (parseTimeArgs(a).isTimeCommand) await runTime(a, ctx);
+				else await runInsights(a, ctx);
 			} catch (err) {
 				ctx.ui.setStatus("insights", "");
 				ctx.ui.setWidget("insights", undefined);
@@ -842,6 +1015,22 @@ export {
 	createClaudeSessionSource,
 	createLimiter,
 	aggregateData,
+	aggregateTime,
+	buildTimeLevers,
+	buildTimeFacts,
+	buildTimeExplainPrompt,
+	classifyWait,
+	commandFamily,
+	extractTimeSplit,
+	IDLE_CAP_SEC,
+	generateTimeHTML,
+	renderTimeMarkdown,
+	renderTimeSection,
+	timeWidgetLines,
+	parseTimeArgs,
+	runTime,
+	scanAndLoadSessions,
+	TIME_REPORT_PATH,
 	buildFeaturesReference,
 	buildSectionPrompts,
 	buildSessionMeta,
@@ -909,7 +1098,7 @@ export type {
 	StopDoingItem,
 	SuggestionSections,
 	TemporalData,
-	UsagePattern,
+	TimeAggregate,
 	ActionItem,
 	ConfigDiffEntry,
 	ReportDiffEntry,

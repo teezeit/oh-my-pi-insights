@@ -16,6 +16,15 @@ package identity that does not exist, since this targets a different harness.
 - **Report history.** Each run still overwrites `report.html` (and
   `report.md` with `--md`), and now also writes a timestamped copy to
   `usage-data/reports/report-<timestamp>.html` / `.md`.
+- **`/insights time`: where did the time go (#18).** Splits session wall
+  clock into model, tools (by command), waiting on agents, waiting on CI/CD,
+  waiting on you, busy elsewhere (waiting while you worked in another
+  session) and idle; lists the slowest requests by active time and up to
+  three speed levers. Default window 14 days; `--session current|<id>`,
+  `--since`, `--explain` (one active-model call), `--no-open`. Writes
+  `usage-data/time.html` plus a timestamped copy. The main report gets the
+  same section, replacing the per-tool time share (which counted waiting
+  on you and on agents as tool time). Session-meta schema bumped to 13.
 
 ### Fixed
 

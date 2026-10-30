@@ -17,7 +17,7 @@
 // ("$16.48 per ticket") is only caught if it is a $ amount; wrong bare counts
 // go through unflagged.
 
-import type { AggregatedData, TemporalData } from "./types.ts";
+import type { AggregatedData, TemporalData, TimeAggregate, TimeBucket } from "./types.ts";
 
 export type Fact = {
 	id: string;
@@ -43,7 +43,7 @@ export type FactFlag = {
 const PCT_TOLERANCE_POINTS = 1;
 const USD_TOLERANCE_RATIO = 0.01;
 
-export function buildFacts(agg: AggregatedData, temporal: TemporalData): Fact[] {
+export function buildFacts(agg: AggregatedData, temporal: TemporalData, timeAgg?: TimeAggregate): Fact[] {
 	const facts: Fact[] = [];
 	const window = `${agg.date_range.start}..${agg.date_range.end}`;
 	const add = (id: string, value: number, unit: Fact["unit"], definition: string, n: number, population: string, w = window) => {
@@ -82,8 +82,6 @@ export function buildFacts(agg: AggregatedData, temporal: TemporalData): Fact[] 
 	add("tool_error_rate", share(agg.total_tool_errors, toolCalls), "pct", "failed tool calls / tool calls", toolCalls, "tool calls");
 	for (const r of agg.tool_error_rate_table)
 		add(`tool_error_rate.${r.tool}`, r.rate * 100, "pct", `failed / calls for ${r.tool} (browser includes eval calls driving the browser global)`, r.calls, `${r.tool} calls`);
-	for (const t of agg.tool_time_share.slice(0, 10))
-		add(`tool_time_share.${t.tool}`, t.share * 100, "pct", `${t.tool} share of measured tool wall clock`, sessions, "sessions");
 
 	add("total_cost", agg.total_cost, "usd", "sum of recorded cost (primary + advisor + subagent)", sessions, "sessions");
 	add("cost_per_session", sessions ? agg.total_cost / sessions : 0, "usd", "total cost / sessions", sessions, "sessions");
@@ -161,6 +159,43 @@ export function buildFacts(agg: AggregatedData, temporal: TemporalData): Fact[] 
 	for (const a of temporal.anomalies)
 		add(`anomaly.${a.date}`, Number(a.cost.slice(1)), "usd", "cost of an outlier session", 1, "session", a.date);
 
+	if (timeAgg) facts.push(...buildTimeFacts(timeAgg));
+
+	return facts;
+}
+
+const TIME_BUCKETS: TimeBucket[] = ["model", "tools", "agents", "ci", "you", "elsewhere", "idle"];
+
+/**
+ * Issue #18 ("where did the time go"): the only numbers the time-section
+ * and /insights time --explain prose may quote. Separate from buildFacts so
+ * `/insights time` can compute these without the full corpus aggregate.
+ */
+export function buildTimeFacts(agg: TimeAggregate): Fact[] {
+	const facts: Fact[] = [];
+	const window = `${agg.date_range.start}..${agg.date_range.end}`;
+	const add = (id: string, value: number, unit: Fact["unit"], definition: string, n: number, population: string) => {
+		if (!Number.isFinite(value)) return;
+		facts.push({ id, value: unit === "usd" ? Math.round(value * 100) / 100 : Math.round(value * 10) / 10, unit, definition, n, population, window });
+	};
+	for (const b of TIME_BUCKETS) {
+		const def = b === "idle" ? "idle / (active_sec + idle), the portion of a reply gap beyond the 15-minute cap" : `${b} bucket / active_sec`;
+		add(`time.share.${b}`, (agg.shares[b] ?? 0) * 100, "pct", def, agg.sessions, "sessions");
+	}
+	add("time.active_sec", agg.active_sec, "count", "sum of time buckets except idle, in seconds", agg.sessions, "sessions");
+	if (agg.buckets.tools > 0) {
+		let topFamily = "";
+		let topSec = 0;
+		for (const [family, sec] of Object.entries(agg.busy_by_command)) {
+			if (sec > topSec) {
+				topFamily = family;
+				topSec = sec;
+			}
+		}
+		if (topFamily) {
+			add(`time.top_command_family.${topFamily}`, (topSec / agg.buckets.tools) * 100, "pct", `${topFamily} share of the tools bucket`, agg.sessions, "sessions");
+		}
+	}
 	return facts;
 }
 

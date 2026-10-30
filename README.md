@@ -157,6 +157,30 @@ Added or changed, and why:
 | `--max-facets <N>` | Facet extraction cap (default 50, env `OMP_INSIGHTS_MAX_FACETS`) |
 | `--model-concurrency <N>` | Max concurrent `omp -p` model subprocesses across all LLM phases, ~450 MB each (default 4, env `OMP_INSIGHTS_MODEL_CONCURRENCY`) |
 
+### Where did the time go: `/insights time`
+
+```
+/insights time                     # last 14 days, opens usage-data/time.html
+/insights time --session current   # only this session
+/insights time --since 3d --explain --no-open
+```
+
+Splits each session's wall clock into model generating, tools running (by
+command, e.g. `pnpm test`), waiting on agents, waiting on CI/CD, waiting on
+you, waiting on you while you were busy in another session, and idle (gaps
+over 15 minutes, excluded from active time). Lists the slowest requests and
+up to three levers for making sessions faster. No model call unless
+`--explain`, which adds one call on the active model for a short narrative.
+The main `/insights` report includes the same "Where the time goes"
+section.
+
+Totals sum time across sessions, not unique calendar hours: parallel
+sessions overlap. The "busy elsewhere" split is inferred from messages in
+other selected sessions, not proof of what you did. CI/CD and agent polling
+are classified from command/code patterns. Claude Code timing is
+best-effort from message and tool timestamps; it lacks omp's detailed
+generation and tool-start records.
+
 ## What omp gives it that Pi did not
 
 - **Cost is recorded, not estimated.** Assistant messages carry
@@ -269,6 +293,8 @@ Read-only against `~/.omp/agent/sessions`. Results are cached in
 | `report.html` | Last generated HTML report |
 | `report.md` | Last Markdown export |
 | `reports/report-<timestamp>.html` / `.md` | Copy of every generated report, never overwritten or pruned |
+| `time.html` | Last `/insights time` page |
+| `reports/time-<timestamp>.html` | Copy of every `/insights time` page |
 | `session-set.json` | Audit manifest for the last run |
 
 ## Requirements

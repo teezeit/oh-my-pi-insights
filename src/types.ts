@@ -152,6 +152,78 @@ export type SessionMeta = {
 	// Capped to the top 20 paths by edit count; feeds files_modified's .size
 	// today, but keeping the paths surfaces same-file rework.
 	edits_by_file: Record<string, number>;
+	// ── where the time went (#18) ──
+	time_split: SessionTimeSplit;
+};
+
+/**
+ * The wall-clock buckets of #18. "idle" is excluded from active time.
+ * "elsewhere" = the session waited for a reply while you were active in
+ * another session (decided cross-session in aggregateTime; per-session
+ * extraction always reports 0 there and records you_gaps instead).
+ */
+export type TimeBucket = "model" | "tools" | "agents" | "ci" | "you" | "elsewhere" | "idle";
+
+/** What a tool call is waiting on, if anything: CI/CD, other agents, generic polling, or nothing (null = real tool work). */
+export type WaitKind = "ci" | "agents" | "polling" | null;
+
+/** One request (human message to the next) ranked by wall clock. */
+export type SlowRequest = {
+	session_id: string;
+	project: string;
+	prompt: string;
+	wall_sec: number;
+	/** wall_sec minus idle: what the request actually cost in attention/compute; ranking key. */
+	active_sec: number;
+	dominant_bucket: TimeBucket;
+};
+
+/**
+ * Per-session time split on the parent session's wall clock, in seconds.
+ * Buckets are a partition of elapsed time (overlapping work is counted once,
+ * by priority), so active_sec = sum of all buckets except idle.
+ */
+export type SessionTimeSplit = {
+	buckets: Record<TimeBucket, number>;
+	active_sec: number;
+	/** Summed per-tool durations; may exceed wall clock when calls overlap. */
+	busy_by_tool: Record<string, number>;
+	/** Summed durations by command family (bash "npm test", "glab ci", eval "polling: orca"...). */
+	busy_by_command: Record<string, number>;
+	/** Summed active time of subagent/advisor sidecars (parallel work, not part of buckets). */
+	subagent_busy_sec: number;
+	/** Top 5 requests of this session by wall clock. */
+	slowest_requests: SlowRequest[];
+	/** Epoch-ms [start, end) intervals counted in the "you" bucket (gap portions up to the idle cap, ask time); aggregateTime moves the ones overlapping another session's activity to "elsewhere". */
+	you_gaps: Array<[number, number]>;
+};
+
+export type TimeLeverId = "command_family" | "waiting_on_you" | "slow_model" | "serial_agent_waits" | "slowest_requests";
+
+export type TimeLever = {
+	id: TimeLeverId;
+	title: string;
+	detail: string;
+	/** Share of active time (0..1) the lever is about, when it has one. */
+	share?: number;
+	evidence_sessions: string[];
+};
+
+/** Corpus-level time view for /insights time and the main report section. */
+export type TimeAggregate = {
+	sessions: number;
+	date_range: { start: string; end: string };
+	buckets: Record<TimeBucket, number>;
+	active_sec: number;
+	/** buckets[k] / active_sec for every non-idle bucket; idle share is idle / (active + idle). */
+	shares: Record<TimeBucket, number>;
+	busy_by_tool: Record<string, number>;
+	busy_by_command: Record<string, number>;
+	subagent_busy_sec: number;
+	/** Top 5 across the corpus. */
+	slowest_requests: SlowRequest[];
+	/** Ranked, at most 3 shown. */
+	levers: TimeLever[];
 };
 
 export type SessionFacets = {
@@ -554,4 +626,6 @@ export type SidecarUsage = {
 	cost_by_provider: Record<string, number>;
 	tool_calls: number;
 	tool_errors: number;
+	/** The sidecar's own active time (non-idle buckets), computed the same way as a parent session's; folded into the parent's time_split.subagent_busy_sec. */
+	active_sec: number;
 };

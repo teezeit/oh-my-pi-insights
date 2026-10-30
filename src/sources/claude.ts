@@ -14,6 +14,8 @@ import { join } from "node:path";
 import { readJsonl } from "./omp.ts";
 import type { DirEntry } from "./omp.ts";
 import { activityIntervals, countNewlines, extractSidecarUsage, getLanguageFromPath, isMetaSession, resolveSafeSessionId, toolErrorCategory } from "../stats.ts";
+import { classifyWait, commandFamily, IDLE_CAP_SEC, partitionIntervals } from "../time.ts";
+import type { TaggedInterval } from "../time.ts";
 import type {
 	AnyEntry,
 	AnyMessage,
@@ -24,6 +26,8 @@ import type {
 	SessionScan,
 	SessionSource,
 	SidecarKind,
+	SlowRequest,
+	TimeBucket,
 	UsageRecord,
 } from "../types.ts";
 
@@ -272,11 +276,153 @@ export function extractClaudeStats(entries: AnyEntry[]) {
 	};
 }
 
+// Claude Code's logs carry no ttft/duration/tool_execution_start: timing is
+// reconstructed from entry timestamps alone, and the result is best-effort.
+// tool_use (assistant entry) -> matching tool_result (user entry) timestamps
+// bound each tool call (Bash text feeds classifyWait/commandFamily the same
+// way omp's bash/eval calls do; Task is always "agents", AskUserQuestion is
+// always "you"); the gap between a tool_use's anchor (the last human message
+// or tool_result seen) and the assistant entry that made the call is "model"
+// time; anything left uncovered - most commonly the wait before the next
+// human message - falls to the same you/idle cap as extractTimeSplit, via
+// the shared partitionIntervals sweep.
+function classifyClaudeToolBucket(toolName: string, text: string): TimeBucket {
+	if (toolName === "AskUserQuestion") return "you";
+	if (toolName === "Task") return "agents";
+	const wk = classifyWait(toolName === "Bash" ? "bash" : toolName, text);
+	if (wk === "ci") return "ci";
+	if (wk === "agents") return "agents";
+	return "tools";
+}
+
+function dominantOf(buckets: Record<TimeBucket, number>): TimeBucket {
+	let best: TimeBucket = "you";
+	let bestValue = -1;
+	for (const bucket of Object.keys(buckets) as TimeBucket[]) {
+		const v = buckets[bucket];
+		if (v > bestValue) {
+			bestValue = v;
+			best = bucket;
+		}
+	}
+	return best;
+}
+
+export function extractClaudeTimeSplit(
+	entries: AnyEntry[],
+	sessionId: string,
+	project: string,
+	idleCapSec = IDLE_CAP_SEC,
+): SessionMeta["time_split"] {
+	type PendingToolUse = { toolName: string; text: string; startMs: number };
+	const pending = new Map<string, PendingToolUse>();
+	const intervals: TaggedInterval[] = [];
+	const busyByTool: Record<string, number> = {};
+	const busyByCommand: Record<string, number> = {};
+	const humanMessages: Array<{ ts: number; text: string }> = [];
+	let lastEntryMs = 0;
+	// Anchor for the next model interval: the timestamp of the last human
+	// message or tool_result seen, i.e. the last point the model was known
+	// to be idle before it started generating again.
+	let lastAnchorMs: number | null = null;
+
+	for (const entry of entries) {
+		const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+		if (Number.isNaN(ts)) continue;
+		if (ts > lastEntryMs) lastEntryMs = ts;
+
+		if (entry.type === "assistant") {
+			if (lastAnchorMs !== null && ts > lastAnchorMs) {
+				intervals.push({ start: lastAnchorMs, end: ts, bucket: "model" });
+			}
+			const msg = entry.message as AnyMessage | undefined;
+			const blocks = Array.isArray(msg?.content) ? (msg!.content as ContentBlock[]) : [];
+			for (const block of blocks) {
+				if (block.type !== "tool_use") continue;
+				const toolId = typeof block.id === "string" ? block.id : "";
+				if (!toolId) continue;
+				const toolName = typeof block.name === "string" ? block.name : "";
+				const input = (block.input as Record<string, unknown>) ?? {};
+				const text = toolName === "Bash" && typeof input.command === "string" ? (input.command as string) : "";
+				pending.set(toolId, { toolName, text, startMs: ts });
+			}
+			continue;
+		}
+
+		if (entry.type !== "user") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		const blocks = Array.isArray(msg?.content) ? (msg!.content as ContentBlock[]) : [];
+		const results = blocks.filter((b) => b.type === "tool_result");
+		if (results.length) {
+			for (const result of results) {
+				const toolUseId = typeof result.tool_use_id === "string" ? (result.tool_use_id as string) : "";
+				const start = toolUseId ? pending.get(toolUseId) : undefined;
+				if (!start) continue;
+				const bucket = classifyClaudeToolBucket(start.toolName, start.text);
+				intervals.push({ start: start.startMs, end: ts, bucket });
+				const durationSec = Math.max(0, (ts - start.startMs) / 1000);
+				busyByTool[start.toolName] = (busyByTool[start.toolName] ?? 0) + durationSec;
+				const commandKey = commandFamily(start.toolName === "Bash" ? "bash" : start.toolName, start.text);
+				busyByCommand[commandKey] = (busyByCommand[commandKey] ?? 0) + durationSec;
+				pending.delete(toolUseId);
+			}
+			lastAnchorMs = lastAnchorMs === null ? ts : Math.max(lastAnchorMs, ts);
+			continue;
+		}
+
+		// Sidechain turns are subagent prompts and meta entries are injected
+		// notices; neither is the human typing, so neither resets the anchor.
+		if (entry.isSidechain === true) continue;
+		if (entry.isMeta === true) continue;
+		const text = claudeText(msg?.content).trim();
+		if (!text) continue;
+		humanMessages.push({ ts, text });
+		lastAnchorMs = lastAnchorMs === null ? ts : Math.max(lastAnchorMs, ts);
+	}
+
+	humanMessages.sort((a, b) => a.ts - b.ts);
+	const rangeStart = humanMessages.length ? humanMessages[0]!.ts : 0;
+	const rangeEnd = Math.max(lastEntryMs, rangeStart);
+
+	const { buckets, activeSec, youGaps } = partitionIntervals(intervals, rangeStart, rangeEnd, idleCapSec);
+
+	const slowestRequests: SlowRequest[] = [];
+	for (let i = 0; i < humanMessages.length; i++) {
+		const start = humanMessages[i]!.ts;
+		const end = i + 1 < humanMessages.length ? humanMessages[i + 1]!.ts : rangeEnd;
+		if (end <= start) continue;
+		const turn = partitionIntervals(intervals, start, end, idleCapSec);
+		slowestRequests.push({
+			session_id: sessionId,
+			project,
+			prompt: humanMessages[i]!.text.slice(0, 120),
+			wall_sec: Math.round(((end - start) / 1000) * 1000) / 1000,
+			active_sec: turn.activeSec,
+			dominant_bucket: dominantOf(turn.buckets),
+		});
+	}
+	slowestRequests.sort((a, b) => b.wall_sec - a.wall_sec);
+
+	return {
+		buckets,
+		active_sec: activeSec,
+		busy_by_tool: busyByTool,
+		busy_by_command: busyByCommand,
+		// Why 0: subagent/advisor sidecars aren't visible from one session's
+		// own entries; same convention as extractTimeSplit.
+		subagent_busy_sec: 0,
+		slowest_requests: slowestRequests.slice(0, 5),
+		you_gaps: youGaps,
+	};
+}
+
 export function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMeta {
 	const stats = extractClaudeStats(entries);
 	const startTime = new Date(stats.firstTs || ref.created.getTime()).toISOString();
 	const endMs = stats.lastTs || ref.modified.getTime();
 	const sessionId = resolveSafeSessionId(stats.sessionId || undefined, ref.id);
+	const projectPath = stats.projectPath || ref.project_path;
+	const timeSplit = extractClaudeTimeSplit(entries, sessionId, projectPath);
 
 	return {
 		session_id: sessionId,
@@ -356,6 +502,7 @@ export function buildClaudeMeta(ref: SessionRef, entries: AnyEntry[]): SessionMe
 		tool_calls_with_intent: 0,
 		cache_hit_ratio: 0,
 		edits_by_file: {},
+		time_split: timeSplit,
 	};
 }
 
