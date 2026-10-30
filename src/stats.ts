@@ -406,6 +406,30 @@ export function extractSessionStats(entries: AnyEntry[]) {
 	const toolCallsByTool: Record<string, number> = {};
 	const toolErrorsByTool: Record<string, number> = {};
 	const toolNotFoundByTool: Record<string, number> = {};
+	// A toolCallId may get more than one toolResult: a call that moves to a
+	// background job delivers a provisional "moved to background" result
+	// first and the real outcome later as a follow-up, and a branched/
+	// replayed log can repeat an entry outright. `tool_counts` already
+	// dedupes by id (below); this mirrors that guarantee for the error/rate
+	// side so both fields keep counting the same "one call, one id" unit -
+	// the latest delivery for an id replaces, not adds to, its prior count.
+	type ToolResultOutcome =
+		| { bucket: "notFound"; key: string }
+		| { bucket: "error"; key: string; category: string }
+		| { bucket: "ok"; key: string };
+	const toolResultOutcomes = new Map<string, ToolResultOutcome>();
+	function applyToolResultOutcome(outcome: ToolResultOutcome, sign: 1 | -1): void {
+		if (outcome.bucket === "notFound") {
+			toolNotFoundByTool[outcome.key] = (toolNotFoundByTool[outcome.key] ?? 0) + sign;
+			return;
+		}
+		toolCallsByTool[outcome.key] = (toolCallsByTool[outcome.key] ?? 0) + sign;
+		if (outcome.bucket === "error") {
+			toolErrorsByTool[outcome.key] = (toolErrorsByTool[outcome.key] ?? 0) + sign;
+			toolErrors += sign;
+			toolErrorCategories[outcome.category] = (toolErrorCategories[outcome.category] ?? 0) + sign;
+		}
+	}
 	// toolCallIds of eval calls whose code drives the `browser` global.
 	const browserEvalCalls = new Set<string>();
 	const activityTs: number[] = [];
@@ -801,23 +825,35 @@ export function extractSessionStats(entries: AnyEntry[]) {
 				toolKey === "eval" && browserEvalCalls.has(toolCallId)
 					? "browser"
 					: toolKey;
-			if (msg.isError === true) {
+			const outcome: ToolResultOutcome = (() => {
+				if (msg.isError !== true) return { bucket: "ok", key: rateKey };
 				const notFoundMatch = resultText.match(TOOL_NOT_FOUND_RE);
 				if (notFoundMatch) {
 					// The model invented a tool name; the harness's reply names it in
 					// the text, which is authoritative over `toolName` (some replies
 					// carry a different/placeholder toolName for an unknown call).
-					const invented = notFoundMatch[1]!;
-					toolNotFoundByTool[invented] = (toolNotFoundByTool[invented] ?? 0) + 1;
-				} else {
-					toolCallsByTool[rateKey] = (toolCallsByTool[rateKey] ?? 0) + 1;
-					toolErrorsByTool[rateKey] = (toolErrorsByTool[rateKey] ?? 0) + 1;
-					toolErrors++;
-					const cat = toolErrorCategory(rateKey === "browser" ? "browser" : toolNameRaw);
-					toolErrorCategories[cat] = (toolErrorCategories[cat] ?? 0) + 1;
+					return { bucket: "notFound", key: notFoundMatch[1]! };
 				}
-			} else {
-				toolCallsByTool[rateKey] = (toolCallsByTool[rateKey] ?? 0) + 1;
+				const cat = toolErrorCategory(rateKey === "browser" ? "browser" : toolNameRaw);
+				return { bucket: "error", key: rateKey, category: cat };
+			})();
+			// Fork boundary: `resolveForkExcludedIds` drops any entry whose id
+			// already appears in an ancestor session's log, since the ancestor
+			// already counted it - including the toolCall for an async call
+			// that started before the fork. If that call's result (a
+			// background job's delayed delivery) lands after the fork point,
+			// it is a new entry here and survives the filter: a toolResult for
+			// an id `tool_counts` never saw. Counting it anyway would make
+			// `tool_calls_by_tool` permanently exceed `tool_counts` for every
+			// forked session, so a present-but-unseen id is dropped, same as
+			// `tool_counts` already (implicitly) drops its toolCall.
+			if (!toolCallId || seenToolCallIds.has(toolCallId)) {
+				if (toolCallId) {
+					const prevOutcome = toolResultOutcomes.get(toolCallId);
+					if (prevOutcome) applyToolResultOutcome(prevOutcome, -1);
+					toolResultOutcomes.set(toolCallId, outcome);
+				}
+				applyToolResultOutcome(outcome, 1);
 			}
 		}
 		lastMessageIsAbortedAssistant = thisEntryAborted;

@@ -60,7 +60,7 @@ import {
 	saveSections,
 	SESSION_SET_PATH,
 } from "./src/cache.ts";
-import { computeTemporalData, MIN_WINDOW_SESSIONS } from "./src/temporal.ts";
+import { computeTemporalData, MIN_WINDOW_SESSIONS, trajectoryLine } from "./src/temporal.ts";
 import { aggregateData, detectConcurrentSessions, excludeToolingSessions, normalizeFrictionCounts } from "./src/aggregate.ts";
 import { readProviderAuth } from "./src/auth.ts";
 import {
@@ -87,7 +87,7 @@ import {
 	type UsagePattern,
 } from "./src/prompts.ts";
 import { callModel, createLimiter, parseJsonFromResponse } from "./src/model.ts";
-import { generateMarkdown } from "./src/render/md.ts";
+import { fmtCost, generateMarkdown } from "./src/render/md.ts";
 import { generateHTML, resolveTargetPath } from "./src/render/html.ts";
 import { buildFacts, checkFacts, type Fact } from "./src/facts.ts";
 import { DEFAULT_WORD_BUDGETS, dedupeIncidents, dedupeRecommendations, enforceBudget } from "./src/postprocess.ts";
@@ -577,7 +577,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	scan.included = kept.length;
 	scan.facets_analyzed = agg.sessions_with_facets;
 	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
-	const temporal = computeTemporalData(analysisMetas, facetsMap, agg.friction);
+	const temporal = computeTemporalData(analysisMetas, facetsMap, agg.friction, { sinceDays });
 	// Follow-up: snapshot diff instead of config.yml.bak-* parsing - see
 	// src/harness.ts. windowEnd gates too_recent only; the diff itself needs
 	// no date range (a snapshot diff is always "since last run").
@@ -848,6 +848,7 @@ export {
 	buildSharedDataBlock,
 	computeTemporalData,
 	MIN_WINDOW_SESSIONS,
+	trajectoryLine,
 	createOmpSessionSource,
 	dedupeIncidents,
 	dedupeRecommendations,
@@ -866,6 +867,7 @@ export {
 	generateHTML,
 	resolveTargetPath,
 	generateMarkdown,
+	fmtCost,
 	buildFacts,
 	checkFacts,
 	buildActionList,

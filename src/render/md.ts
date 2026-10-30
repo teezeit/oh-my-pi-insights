@@ -9,6 +9,7 @@
 
 import { top8 } from "../aggregate.ts";
 import { categorySlug, categoryStillInFriction } from "./html.ts";
+import { trajectoryLine } from "../temporal.ts";
 import { SESSION_SET_PATH } from "../cache.ts";
 import { buildActionList } from "./actions.ts";
 import { diffConfigAddition } from "./configDiff.ts";
@@ -27,7 +28,8 @@ export function fmtTokens(n: number): string {
 }
 
 export function fmtCost(n: number): string {
-	if (n < 0.01) return `<$0.01`;
+	// Why: an exact zero is $0.00 everywhere (facts and prompts use toFixed(2)); "<$0.01" only for real sub-cent amounts.
+	if (n > 0 && n < 0.01) return `<$0.01`;
 	return `$${n.toFixed(2)}`;
 }
 
@@ -63,13 +65,22 @@ export function generateMarkdown(
 		lines.push("");
 	}
 
-	if (temporal.diff_headlines.length || temporal.major_transition || temporal.harness_changes?.length) {
+	// Issue #13: the trajectory (recent vs older window) is fed to the
+	// section prompts but was never rendered or fact-checked; show it, and
+	// when there is no before/after delta but still something to explain
+	// (trajectory, major shift), say why instead of dropping the header.
+	const mdTrajectoryLine = temporal.trajectory ? trajectoryLine(temporal.trajectory) : null;
+	const whatChangedItems: string[] = [];
+	for (const h of temporal.diff_headlines) whatChangedItems.push(`- ${clean(h)}`);
+	if (temporal.major_transition) whatChangedItems.push(`- **Major shift (${temporal.major_transition.when}):** ${clean(temporal.major_transition.what)}. ${clean(temporal.major_transition.impact)}`);
+	if (mdTrajectoryLine) whatChangedItems.push(`- ${clean(mdTrajectoryLine)}`);
+	if (!temporal.delta && whatChangedItems.length && temporal.delta_unavailable_reason) whatChangedItems.push(`- ${clean(temporal.delta_unavailable_reason)}`);
+	for (const c of temporal.harness_changes ?? []) {
+		whatChangedItems.push(`- **Harness change (${c.when.slice(0, 10)}):** ${clean(c.detail)}${c.too_recent ? " _(too recent to assess impact)_" : ""}`);
+	}
+	if (whatChangedItems.length) {
 		lines.push(`## What Changed${temporal.delta ? ` (${temporal.delta.basis === "model_switch" ? "around the model switch" : "last week vs this week"})` : ""}`);
-		for (const h of temporal.diff_headlines) lines.push(`- ${clean(h)}`);
-		if (temporal.major_transition) lines.push(`- **Major shift (${temporal.major_transition.when}):** ${clean(temporal.major_transition.what)}. ${clean(temporal.major_transition.impact)}`);
-		for (const c of temporal.harness_changes ?? []) {
-			lines.push(`- **Harness change (${c.when.slice(0, 10)}):** ${clean(c.detail)}${c.too_recent ? " _(too recent to assess impact)_" : ""}`);
-		}
+		lines.push(...whatChangedItems);
 		lines.push("");
 	}
 

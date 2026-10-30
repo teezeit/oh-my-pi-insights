@@ -186,6 +186,60 @@ test("duplicate tool call ids are counted once", () => {
 	assert.equal(stats.gitCommits, 1);
 });
 
+test("an async tool call's follow-up result does not double-count against tool_counts", () => {
+	// omp's own docs: a non-pty call still running past the timeout "usually
+	// move[s] to background job bg_N... the result arrives automatically as
+	// a follow-up message" - a second toolResult for the same toolCallId.
+	// tool_counts (one toolCall block, deduped by id) and tool_calls_by_tool
+	// (built from toolResult messages) must still agree: one call happened.
+	const result = (toolCallId: string, isError: boolean) => ({
+		type: "message",
+		timestamp: "2026-09-07T10:00:05.000Z",
+		message: { role: "toolResult", toolName: "bash", toolCallId, isError, content: [] },
+	});
+
+	const stats = extractSessionStats([
+		SESSION,
+		assistant(0, [{ type: "toolCall", id: "bg1", name: "bash", arguments: { command: "sleep 90", async: true } }]),
+		result("bg1", false), // "moved to background job bg_1"
+		result("bg1", true), // the delayed follow-up: the job actually failed
+	]);
+
+	assert.equal(stats.toolCounts.bash, 1);
+	assert.equal(stats.tool_calls_by_tool.bash, 1);
+	// The follow-up supersedes the provisional "moved to background" result.
+	assert.equal(stats.tool_errors_by_tool.bash, 1);
+	assert.equal(stats.toolErrors, 1);
+});
+
+test("a toolResult whose toolCall was excluded as a fork's ancestor copy is not counted", () => {
+	// omp forks a session by copying the parent's history up to the fork
+	// point and `resolveForkExcludedIds` drops every record id that copy
+	// shares with an ancestor before `extractSessionStats` ever sees it -
+	// including the toolCall for an async call that started pre-fork. If
+	// that call's result (a background job's delayed delivery) lands after
+	// the fork, it survives the filter as a toolResult with no toolCall
+	// counterpart in this entries array. tool_counts never saw that call;
+	// tool_calls_by_tool must not count it either.
+	const result = (toolCallId: string, toolName: string, isError: boolean) => ({
+		type: "message",
+		timestamp: "2026-09-07T10:00:05.000Z",
+		message: { role: "toolResult", toolName, toolCallId, isError, content: [] },
+	});
+
+	const stats = extractSessionStats([
+		SESSION,
+		assistant(0, [{ type: "toolCall", id: "real1", name: "bash", arguments: { command: "echo hi" } }]),
+		result("real1", "bash", false),
+		// Orphan: the background job's follow-up result for a call that only
+		// ever had a toolCall record in the (excluded) ancestor's log.
+		result("ghost-from-parent", "wait", false),
+	]);
+
+	assert.deepEqual(stats.toolCounts, { bash: 1 });
+	assert.deepEqual(stats.tool_calls_by_tool, { bash: 1 });
+});
+
 test("human activity ignores non-user attribution and records steering", () => {
 	const at = Date.UTC(2026, 8, 7, 10, 0, 0);
 	const stats = extractSessionStats([

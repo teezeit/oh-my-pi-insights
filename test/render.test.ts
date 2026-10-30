@@ -6,8 +6,14 @@ import { test } from "node:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregateData, computeTemporalData, generateHTML, resolveTargetPath, type SessionFacets } from "../index.ts";
+import { aggregateData, computeTemporalData, fmtCost, generateHTML, resolveTargetPath, type SessionFacets } from "../index.ts";
 import { meta } from "./helpers.ts";
+
+test("an exact zero cost renders as $0.00, only sub-cent amounts as <$0.01", () => {
+	assert.equal(fmtCost(0), "$0.00");
+	assert.equal(fmtCost(0.004), "<$0.01");
+	assert.equal(fmtCost(1.5), "$1.50");
+});
 
 test("every stat card and chart in the HTML report states its sample size", () => {
 	const facetsMap = new Map<string, SessionFacets>();

@@ -105,6 +105,47 @@ test("a model change produces exactly one model-shift line in the rendered HTML 
 	assert.equal(shiftMentions, 1, `expected exactly one model-shift line, got: ${block![0]}`);
 });
 
+// ── Issue #13: trajectory rendered + delta-null reason shown ───────────────
+
+test("Since Last Report shows the trajectory line (n=20 vs n=59) and a no-previous-week reason when delta is null", async () => {
+	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
+	const start = Date.UTC(2026, 8, 1, 0);
+	const stepMs = (6 * 86400000) / 78; // 79 sessions spread across 6 days, well inside one week
+	const metas = [];
+	for (let i = 0; i < 79; i++) {
+		const older = i < 59; // first 59 = older window, last 20 = recent window
+		metas.push(meta({
+			session_id: `s${i}`,
+			start_time: new Date(start + i * stepMs).toISOString(),
+			total_cost: older ? 10 : 5,
+			cost_primary: older ? 10 : 5,
+			tool_errors: older ? 2 : 1,
+			model_usage: { "anthropic/claude-opus-5": { input_tokens: 1, output_tokens: 1, cost: older ? 10 : 5, message_count: 1 } },
+		}));
+	}
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	assert.equal(temporal.delta, null, "all 79 sessions fall inside one week, so no previous week exists for a delta");
+	assert.ok(temporal.trajectory.windows, "trajectory must be sufficient (20 recent vs 59 older)");
+
+	const html = generateHTML(agg, sections, {}, temporal);
+	const block = html.match(/<div class="at-a-glance-part since-last-report">[\s\S]*?<\/div>/);
+	assert.ok(block, "Since Last Report block must not vanish when the trajectory has content");
+	assert.match(block![0], /Last 20 vs previous 59 sessions/);
+	assert.match(block![0], /No previous week inside this report window/);
+});
+
+test("Since Last Report has no trajectory line when the trajectory is insufficient", async () => {
+	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
+	const metas = [meta({ session_id: "solo" })];
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	assert.equal(temporal.trajectory.windows, undefined);
+
+	const html = generateHTML(agg, sections, {}, temporal);
+	assert.ok(!html.includes("Last 20 vs previous"));
+});
+
 test("copyable prompts are shown directly, not behind a toggle", async () => {
 	const html = await buildFixtureHtml();
 	assert.match(html, /<div class="copy-box">Scout src\/render for every call site of generateHTML before editing\.<\/div>/);

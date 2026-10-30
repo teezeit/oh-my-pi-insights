@@ -404,12 +404,34 @@ export type TemporalData = {
 	diff_headlines: string[];
 	this_week: { sessions: number; avg_cost: number; errors_per_session: number; primary_model: string } | null;
 	last_week: { sessions: number; avg_cost: number; errors_per_session: number; primary_model: string } | null;
-	trajectory: { cost: string; errors: string; note: string };
+	/**
+	 * `windows` is present only when both windows clear MIN_WINDOW_SESSIONS
+	 * (src/temporal.ts); cost/errors are "insufficient" and windows is absent
+	 * otherwise. recent_n is always MIN_WINDOW_SESSIONS; older_n is whatever
+	 * remains before it. pct fields are rounded whole percent, (recent - older) / older.
+	 */
+	trajectory: {
+		cost: string;
+		errors: string;
+		note: string;
+		windows?: {
+			recent_n: number;
+			older_n: number;
+			recent_mean_cost: number;
+			older_mean_cost: number;
+			recent_mean_errors: number;
+			older_mean_errors: number;
+			cost_pct: number;
+			errors_pct: number;
+		};
+	};
 	anomalies: Array<{ date: string; cost: string; errors: number; reason: string; prompt: string }>;
 	major_transition: { when: string; what: string; impact: string } | null;
 	resolved_friction: string[];
 	ongoing_friction: Array<{ type: string; recent_count: number; total_count: number }>;
 	staleness_pct: number;
+	/** Days wide the "recent" friction window is: 14 unless --since narrows the analysed range below 28 days, then half the range. */
+	recent_window_days: number;
 	/**
 	 * The only before/after comparison in the report. Why: the banner, the
 	 * transition note and the trajectory line each computed their own delta
@@ -417,6 +439,14 @@ export type TemporalData = {
 	 * printed delta now quotes this object.
 	 */
 	delta: TemporalDelta | null;
+	/**
+	 * Why delta is null when it is: "no previous week in this window" vs
+	 * "not enough sessions yet". Renderers show this only when there is
+	 * other temporal content (a trajectory line, major transition or
+	 * harness change) that would otherwise explain itself via delta - see
+	 * issue #13, the Since Last Report block must not vanish silently.
+	 */
+	delta_unavailable_reason: string | null;
 	/** Optional: populated by index.ts from gatherHarnessSnapshot/loadHarnessSnapshot/detectHarnessChanges, outside computeTemporalData (src/temporal.ts owns only the facet-derived week-over-week diff). */
 	harness_changes?: HarnessChange[];
 };

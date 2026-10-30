@@ -413,7 +413,7 @@ Use second person ("you").
 
 TEMPORAL CONTEXT (category names here are display labels of the exact keys in DATA's "friction" object below, e.g. "Wrong Approach" is the key "wrong_approach"):
 - Resolved friction (no longer occurring): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none detected"}
-- Ongoing friction (still happening): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14 days)").join(", ") || "none detected"}
+- Ongoing friction (still happening): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last " + temporal.recent_window_days + " days)").join(", ") || "none detected"}
 
 FRICTION SIGNALS (from toolResult.isError and stopReason, not text heuristics):
 - Interruption rate: ${(agg.interruption_rate * 100).toFixed(1)}% of human messages were aborted mid-flight or steered. This is the single strongest "went wrong" signal in the corpus; lead with it if it is high.
@@ -431,7 +431,7 @@ exact keys in DATA's "friction" object (e.g. "wrong_approach", not "Wrong
 Approach" or a sentence). Never list a category under "resolved" if its key
 has a nonzero count in DATA's "friction" object - a nonzero count there means
 it is still happening in this run, whatever the TEMPORAL CONTEXT section
-above says about the last 14 days.
+above says about the last ${temporal.recent_window_days} days.
 EVIDENCE: every "ongoing" item must include evidence_sessions, an array of
 the session ids (the "[id]" from SESSION SUMMARIES, or session_id from
 worst_turns_corpus/worst_cache_sessions in the data below) that actually show

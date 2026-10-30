@@ -146,6 +146,18 @@ export function buildFacts(agg: AggregatedData, temporal: TemporalData): Fact[] 
 		add("delta.cost_per_session.before", d.cost_per_session.before, "usd", "mean cost per session, before window", d.before.sessions, "sessions", w);
 		add("delta.cost_per_session.after", d.cost_per_session.after, "usd", "mean cost per session, after window", d.after.sessions, "sessions", w);
 	}
+	// Why: trajectory.windows is present only once both windows clear
+	// MIN_WINDOW_SESSIONS (src/temporal.ts) - below that, cost/errors are
+	// "insufficient" and no fact backs the trend, matching the delta gate above.
+	const tw = temporal.trajectory.windows;
+	if (tw) {
+		const w = `last ${tw.recent_n} vs previous ${tw.older_n} sessions`;
+		const n = tw.recent_n + tw.older_n;
+		add("trajectory.cost_per_session", tw.cost_pct, "pct", "change in mean cost per session, recent vs older window", n, "sessions", w);
+		add("trajectory.errors_per_session", tw.errors_pct, "pct", "change in mean tool errors per session, recent vs older window", n, "sessions", w);
+		add("trajectory.cost_per_session.recent", tw.recent_mean_cost, "usd", "mean cost per session, recent window", tw.recent_n, "sessions", w);
+		add("trajectory.cost_per_session.older", tw.older_mean_cost, "usd", "mean cost per session, older window", tw.older_n, "sessions", w);
+	}
 	for (const a of temporal.anomalies)
 		add(`anomaly.${a.date}`, Number(a.cost.slice(1)), "usd", "cost of an outlier session", 1, "session", a.date);
 

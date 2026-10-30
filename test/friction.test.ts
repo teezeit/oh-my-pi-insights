@@ -62,7 +62,11 @@ function human(text: string, at: number, steering: boolean | null = null) {
 	};
 }
 
-function toolResult(toolName: string, isError: boolean, errorText?: string) {
+// toolCallId must match the id of the preceding assistant toolCall block:
+// a result with no corresponding toolCall in the same entries array is a
+// fork-boundary orphan (see stats.ts) and is correctly dropped, not a
+// realistic standalone toolResult.
+function toolResult(toolName: string, isError: boolean, toolCallId: string, errorText?: string) {
 	const content: Record<string, unknown>[] = [];
 	if (errorText) {
 		content.push({ type: "text", text: errorText });
@@ -75,7 +79,7 @@ function toolResult(toolName: string, isError: boolean, errorText?: string) {
 			role: "toolResult",
 			toolName,
 			isError,
-			toolCallId: `${toolName}-${Math.random()}`,
+			toolCallId,
 			content,
 		},
 	};
@@ -217,9 +221,9 @@ test("tool_not_found excluded from tool_errors_by_tool but counted in tool_not_f
 	const stats = extractSessionStats([
 		SESSION,
 		assistant(0, [{ type: "toolCall", id: "t1", name: "read", arguments: {} }], at),
-		toolResult("read", true, "Tool bash not found in registry"),
+		toolResult("read", true, "t1", "Tool bash not found in registry"),
 		assistant(0, [{ type: "toolCall", id: "t2", name: "write", arguments: {} }], at + 5_000),
-		toolResult("write", true, "Actual error"),
+		toolResult("write", true, "t2", "Actual error"),
 		human("next", at + 10_000),
 	]);
 
@@ -238,7 +242,7 @@ test("tool_calls_by_tool counts all toolResult entries", () => {
 	const stats = extractSessionStats([
 		SESSION,
 		assistant(0, [{ type: "toolCall", id: "t1", name: "read", arguments: {} }], at),
-		toolResult("read", false),
+		toolResult("read", false, "t1"),
 		assistant(
 			0,
 			[
@@ -247,8 +251,8 @@ test("tool_calls_by_tool counts all toolResult entries", () => {
 			],
 			at + 5_000,
 		),
-		toolResult("read", false),
-		toolResult("write", false),
+		toolResult("read", false, "t2"),
+		toolResult("write", false, "t3"),
 		human("next", at + 10_000),
 	]);
 
@@ -376,9 +380,9 @@ test("aggregateData merges tool_errors_by_tool and tool_not_found across session
 		[
 			SESSION,
 			assistant(0, [{ type: "toolCall", id: "t1", name: "bash", arguments: {} }], at),
-			toolResult("bash", true, "Tool bash not found"),
+			toolResult("bash", true, "t1", "Tool bash not found"),
 			assistant(0, [{ type: "toolCall", id: "t2", name: "read", arguments: {} }], at + 5_000),
-			toolResult("read", true, "Error"),
+			toolResult("read", true, "t2", "Error"),
 			human("next", at + 10_000),
 		],
 		[],
@@ -398,7 +402,7 @@ test("aggregateData merges tool_errors_by_tool and tool_not_found across session
 		[
 			SESSION,
 			assistant(0, [{ type: "toolCall", id: "t3", name: "read", arguments: {} }], at + 30_000),
-			toolResult("read", true, "Error"),
+			toolResult("read", true, "t3", "Error"),
 			human("next", at + 35_000),
 		],
 		[],

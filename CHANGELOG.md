@@ -61,6 +61,20 @@ package identity that does not exist, since this targets a different harness.
 - **`tools/verify-cost.sh` matches fork dedupe.** It now drops fork-copied
   primary and sidecar records the same way the scanner does, and no longer
   aborts with `unbound variable` on a session without sidecars (bash 3.2).
+- **Trajectory claims are visible and fact-checked (#13).** When 20+
+  sessions sit on each side, Since Last Report shows the last-N vs
+  previous-M sessions cost and error change, and the facts carry those
+  numbers. With no before/after comparison possible, the block says why
+  (e.g. no previous week inside the report window) instead of vanishing.
+- **Recent-friction window respects `--since` (#14).** The recent window is
+  14 days, or half the analysed range when `--since` is shorter; the
+  prompts name the actual window instead of a fixed "14 days".
+- **Tool call totals agree (#15).** Repeat `toolResult` deliveries for one
+  `toolCallId` (async bash/wait follow-ups) count once, and results whose
+  call was dropped as a fork's copied history are skipped, so Top Tools and
+  Tool Errors state the same total. Session-meta schema bumped to 10.
+- **Exact zero cost reads `$0.00` (#16).** `<$0.01` is shown only for real
+  sub-cent amounts, matching the facts and prompts.
 
 ## 0.1.0-rc.1 - 2026-10-08
 

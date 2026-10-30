@@ -83,7 +83,10 @@ export async function ensureDirs(): Promise<void> {
 // forks in this (now common) shape were never deduped against their parent
 // at all - full double count of every shared record. The bump forces cached
 // fork metas to recompute with path-shaped parentSession also deduped.
-export const META_SCHEMA_VERSION = 9;
+// v10: tool_calls_by_tool / tool_errors_by_tool dedupe repeat toolResult
+// deliveries per toolCallId (async bash/wait follow-ups), so cached metas
+// must recompute.
+export const META_SCHEMA_VERSION = 10;
 
 export async function loadCachedMeta(
 	sourceName: string,

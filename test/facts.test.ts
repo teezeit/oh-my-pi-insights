@@ -123,3 +123,36 @@ test("delta.* facts are omitted below MIN_WINDOW_SESSIONS and present once the w
 	const byId = new Map(largeFacts.map((f) => [f.id, f]));
 	assert.equal(byId.get("delta.cost_per_session")?.value, -50);
 });
+
+test("trajectory.* facts are present once both windows clear MIN_WINDOW_SESSIONS, and absent when insufficient", () => {
+	const start = Date.UTC(2026, 8, 1, 0);
+	const stepMs = (6 * 86400000) / 78; // 79 sessions spread across 6 days, well inside one week
+	const metas = [];
+	for (let i = 0; i < 79; i++) {
+		const older = i < 59;
+		metas.push(meta({
+			session_id: `s${i}`,
+			start_time: new Date(start + i * stepMs).toISOString(),
+			total_cost: older ? 10 : 5,
+			cost_primary: older ? 10 : 5,
+			tool_errors: older ? 2 : 1,
+			model_usage: { "anthropic/claude-opus-5": { input_tokens: 1, output_tokens: 1, cost: older ? 10 : 5, message_count: 1 } },
+		}));
+	}
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	const facts = buildFacts(agg, temporal);
+	const byId = new Map(facts.map((f) => [f.id, f]));
+
+	const costPct = byId.get("trajectory.cost_per_session")!;
+	assert.equal(costPct.unit, "pct");
+	assert.equal(costPct.value, -50);
+	assert.equal(costPct.n, 79);
+	assert.equal(byId.get("trajectory.cost_per_session.recent")!.value, 5);
+	assert.equal(byId.get("trajectory.cost_per_session.older")!.value, 10);
+
+	// Insufficient: a single session has no trajectory.* facts at all.
+	const soloTemporal = computeTemporalData([meta({ session_id: "solo" })], new Map());
+	const soloFacts = buildFacts(aggregateData([meta({ session_id: "solo" })], new Map()), soloTemporal);
+	assert.deepEqual(soloFacts.filter((f) => f.id.startsWith("trajectory.")), []);
+});

@@ -22,9 +22,15 @@ export function modeStr(arr: string[]): string {
 	return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
 }
 
-export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, SessionFacets>, currentFriction: Record<string, number> = {}): TemporalData {
+export type TemporalOptions = { sinceDays?: number };
+
+export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, SessionFacets>, currentFriction: Record<string, number> = {}, options: TemporalOptions = {}): TemporalData {
 	const sorted = [...metas].sort((a, b) => a.start_time.localeCompare(b.start_time));
-	if (!sorted.length) return { diff_headlines: [], this_week: null, last_week: null, trajectory: { cost: "stable", errors: "stable", note: "" }, anomalies: [], major_transition: null, resolved_friction: [], ongoing_friction: [], staleness_pct: 0, delta: null };
+	// Why: a recent window wider than the analysed range (or more than half
+	// of it) would leave no older friction to compare against, so the window
+	// never exceeds 14 days or half of --since's range, whichever is smaller.
+	const recentWindowDays = options.sinceDays && options.sinceDays > 0 ? Math.min(14, options.sinceDays / 2) : 14;
+	if (!sorted.length) return { diff_headlines: [], this_week: null, last_week: null, trajectory: { cost: "stable", errors: "stable", note: "" }, anomalies: [], major_transition: null, resolved_friction: [], ongoing_friction: [], staleness_pct: 0, delta: null, delta_unavailable_reason: null, recent_window_days: recentWindowDays };
 
 	const now = new Date(sorted[sorted.length - 1]!.start_time).getTime();
 	const oneWeek = 7 * 86400000;
@@ -71,10 +77,23 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 		const windowOlderErrors = olderWindow.reduce((s, m) => s + m.tool_errors, 0) / olderWindow.length;
 		const costTrend = windowRecentCost > windowOlderCost * 1.2 ? "increasing" : windowRecentCost < windowOlderCost * 0.8 ? "decreasing" : "stable";
 		const errorTrend = windowRecentErrors > windowOlderErrors * 1.2 ? "increasing" : windowRecentErrors < windowOlderErrors * 0.8 ? "decreasing" : "stable";
+		// Why: windows carries the raw numbers behind cost/errors/note so the
+		// renderers (html.ts, md.ts) and facts.ts can show and fact-check this
+		// trajectory instead of only the LLM prompt quoting the prose note.
 		trajectory = {
 			cost: costTrend,
 			errors: errorTrend,
 			note: `Recent ${MIN_WINDOW_SESSIONS} vs earlier ${olderWindow.length} sessions: cost ${costTrend}, errors ${errorTrend}`,
+			windows: {
+				recent_n: recentWindow.length,
+				older_n: olderWindow.length,
+				recent_mean_cost: windowRecentCost,
+				older_mean_cost: windowOlderCost,
+				recent_mean_errors: windowRecentErrors,
+				older_mean_errors: windowOlderErrors,
+				cost_pct: Math.round((windowRecentCost - windowOlderCost) / (windowOlderCost || 1) * 100),
+				errors_pct: Math.round((windowRecentErrors - windowOlderErrors) / (windowOlderErrors || 1) * 100),
+			},
 		};
 	}
 
@@ -123,6 +142,14 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 		}
 	}
 	if (!delta && tw && lw) delta = compareWindows("week_over_week", lastWeekSessions, thisWeekSessions);
+	// Why: without this, the Since Last Report block vanishes silently when
+	// there is trajectory or harness content to explain but no before/after
+	// comparison was possible (issue #13), instead of saying why.
+	const delta_unavailable_reason: string | null = delta
+		? null
+		: tw && !lw
+			? "No previous week inside this report window"
+			: "Not enough sessions for a before/after comparison";
 
 	const diff_headlines: string[] = [];
 	// Why: below MIN_WINDOW_SESSIONS the cost/error pct is noise, not a
@@ -143,7 +170,7 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 	// major_transition's sliding-window detection for the same corpus.
 
 	// Resolved vs ongoing friction
-	const recentCutoff = now - 14 * 86400000;
+	const recentCutoff = now - recentWindowDays * 86400000;
 	const recentMetas = sorted.filter(m => new Date(m.start_time).getTime() >= recentCutoff);
 	const olderMetas = sorted.filter(m => new Date(m.start_time).getTime() < recentCutoff);
 	let recentFriction: Record<string, number> = {};
@@ -158,7 +185,7 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 	olderFriction = normalizeFrictionCounts(olderFriction);
 	const resolved_friction: string[] = [];
 	const ongoing_friction: TemporalData["ongoing_friction"] = [];
-	// Why: a type absent from the last 14 days can still rank in agg.friction
+	// Why: a type absent from the recent window can still rank in agg.friction
 	// (the Friction Types chart, decay-weighted over the whole corpus); do
 	// not call it resolved while the chart the user is looking at still
 	// shows it happening.
@@ -170,7 +197,7 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 	const flatCost = sorted.reduce((s, m) => s + m.total_cost, 0) / sorted.length;
 	const staleness_pct = flatCost > 0 ? Math.abs((recentCost - flatCost) / flatCost * 100) : 0;
 
-	return { diff_headlines, this_week: tw, last_week: lw, trajectory, anomalies: anomalies.slice(0, 5), major_transition, resolved_friction: resolved_friction.slice(0, 5), ongoing_friction: ongoing_friction.slice(0, 8), staleness_pct, delta };
+	return { diff_headlines, this_week: tw, last_week: lw, trajectory, anomalies: anomalies.slice(0, 5), major_transition, resolved_friction: resolved_friction.slice(0, 5), ongoing_friction: ongoing_friction.slice(0, 8), staleness_pct, delta, delta_unavailable_reason, recent_window_days: recentWindowDays };
 }
 
 function trend(pct: number): string {
@@ -197,4 +224,16 @@ function compareWindows(basis: TemporalDelta["basis"], before: SessionMeta[], af
 		errors_per_session: compare((m) => m.tool_errors),
 		insufficient: before.length < MIN_WINDOW_SESSIONS || after.length < MIN_WINDOW_SESSIONS,
 	};
+}
+
+/**
+ * Renders the one trajectory sentence the Since Last Report block (html.ts,
+ * md.ts) shows next to the week-over-week/model-switch delta. Returns null
+ * when the trajectory is below MIN_WINDOW_SESSIONS (trajectory.windows is
+ * then absent) - render nothing rather than a stable/insufficient line.
+ */
+export function trajectoryLine(trajectory: TemporalData["trajectory"]): string | null {
+	const w = trajectory.windows;
+	if (!w) return null;
+	return `Last ${w.recent_n} vs previous ${w.older_n} sessions: cost $${w.older_mean_cost.toFixed(2)} \u2192 $${w.recent_mean_cost.toFixed(2)}/session (${trend(w.cost_pct)}), errors ${w.older_mean_errors.toFixed(1)} \u2192 ${w.recent_mean_errors.toFixed(1)}/session`;
 }

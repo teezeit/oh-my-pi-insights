@@ -107,6 +107,31 @@ test("resolved_friction excludes a type still present in the current run's frict
 	assert.ok(!withCurrent.resolved_friction.includes("wrong_approach"));
 });
 
+test("sinceDays=7 narrows the recent window to half that range and reports it", () => {
+	const metas = [
+		session("in-window", 40, "m", 5, 0),
+		session("just-outside", 36, "m", 5, 0),
+	];
+	const facetsMap = new Map([
+		["in-window", { session_id: "in-window", underlying_goal: "", goal_categories: {}, outcome: "fully_achieved", user_satisfaction_counts: {}, assistant_helpfulness: "", session_type: "single_task", friction_counts: { wrong_approach: 3 } as Record<string, number>, friction_detail: "", primary_success: "none", brief_summary: "x" }],
+		["just-outside", { session_id: "just-outside", underlying_goal: "", goal_categories: {}, outcome: "fully_achieved", user_satisfaction_counts: {}, assistant_helpfulness: "", session_type: "single_task", friction_counts: { wrong_approach: 7 } as Record<string, number>, friction_detail: "", primary_success: "none", brief_summary: "x" }],
+	]);
+
+	const t = computeTemporalData(metas, facetsMap, {}, { sinceDays: 7 });
+
+	assert.equal(t.recent_window_days, 3.5);
+	const wrongApproach = t.ongoing_friction.find((f) => f.type === "wrong_approach");
+	assert.ok(wrongApproach, "expected wrong_approach to still be ongoing");
+	assert.equal(wrongApproach!.recent_count, 3, "the 4-day-old session is outside the 3.5-day window");
+	assert.equal(wrongApproach!.total_count, 10);
+});
+
+test("sinceDays=0 (no --since) keeps the 14-day recent window", () => {
+	const metas = [session("a", 1, "m", 5, 0)];
+	const t = computeTemporalData(metas, new Map());
+	assert.equal(t.recent_window_days, 14);
+});
+
 test("below MIN_WINDOW_SESSIONS sessions total, trajectory reports insufficient data with no 'decreasing' claim", () => {
 	const metas = [];
 	for (let d = 1; d <= 15; d++) metas.push(session(`s${d}`, d, "anthropic/claude-opus-5", 20 - d, 5));

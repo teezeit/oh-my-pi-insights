@@ -9,6 +9,7 @@
 import { top8 } from "../aggregate.ts";
 import { displayLabel } from "../stats.ts";
 import { fmtCost, fmtHours, fmtTokens } from "./md.ts";
+import { trajectoryLine } from "../temporal.ts";
 import { buildActionList, type ActionItem } from "./actions.ts";
 import { buildEvidenceLinks } from "./evidence.ts";
 import { diffReports, type ReportDiffEntry } from "./reportDiff.ts";
@@ -425,6 +426,16 @@ export function generateHTML(
 	// Why: one change per bullet; joined with separators the deltas ran together into one dense line.
 	if (temporal.diff_headlines.length) sinceLastReportLines.push(...temporal.diff_headlines);
 	if (temporal.major_transition) sinceLastReportLines.push(`Major shift (${temporal.major_transition.when}): ${temporal.major_transition.what}. Impact: ${temporal.major_transition.impact}`);
+	// Issue #13: the trajectory (recent vs older window) is fed to the
+	// section prompts but was never rendered or fact-checked; show it here,
+	// right next to the delta it sits alongside.
+	const sinceReportTrajectoryLine = temporal.trajectory ? trajectoryLine(temporal.trajectory) : null;
+	if (sinceReportTrajectoryLine) sinceLastReportLines.push(sinceReportTrajectoryLine);
+	// Why: delta null means no before/after comparison ran; say so instead of
+	// letting the block vanish silently when there is other temporal content
+	// (a trajectory line, major shift) to explain - but stay silent when there
+	// is nothing to report at all (see "no change" case below).
+	if (!temporal.delta && sinceLastReportLines.length && temporal.delta_unavailable_reason) sinceLastReportLines.push(temporal.delta_unavailable_reason);
 	for (const c of temporal.harness_changes ?? []) sinceLastReportLines.push(`Setup: ${c.detail}`);
 	const sinceLastReportHtml = sinceLastReportLines.length
 		? `<div class="at-a-glance-part since-last-report">
@@ -700,7 +711,7 @@ ${actionListHtml}
     ${statCard("Lines Removed", fmtTokens(agg.total_lines_removed), "", nSessions, cardTitle("lines removed across all file edits", nSessions))}
     ${statCard("Git Commits", String(agg.git_commits), `${agg.git_pushes} pushes`, nSessions, cardTitle("git commit tool calls across sessions", nSessions))}
     ${statCard("Files Modified", fmtTokens(agg.total_files_modified), "", nSessions, cardTitle("distinct file-edit operations across sessions", nSessions))}
-    ${statCard("Tool Errors", String(agg.total_tool_errors), "", `n=${toolCalls} tool calls`, cardTitle("tool results with isError", `n=${toolCalls} tool calls`))}
+    ${statCard("Tool Errors", String(agg.total_tool_errors), "", `n=${toolCalls} calls to existing tools`, cardTitle("tool results with isError", `n=${toolCalls} calls to existing tools; invented tool names excluded`))}
     ${statCard("Interruptions", String(agg.total_interruptions), `aborted ${agg.interruptions_aborted} / steered ${agg.interruptions_steered}`, `n=${agg.total_messages} human messages`, cardTitle("mid-session aborts + steering messages", `n=${agg.total_messages} human messages`))}
     ${agg.sessions_using_subagent ? statCard("Subagent Sessions", String(agg.sessions_using_subagent), "", nSessions, cardTitle("sessions that spawned at least one subagent", nSessions)) : ""}
     ${agg.sessions_using_mcp ? statCard("MCP Sessions", String(agg.sessions_using_mcp), "", nSessions, cardTitle("sessions that used an MCP tool", nSessions)) : ""}
@@ -723,7 +734,7 @@ ${actionListHtml}
       ${barChart(agg.satisfaction, { order: SATISFACTION_ORDER })}
     </div>
     <div class="chart-box">
-      ${chartTitle("Top Tools", `n=${Object.values(agg.tool_counts).reduce((a, b) => a + b, 0)} calls`)}
+      ${chartTitle("Top Tools", `n=${Object.values(agg.tool_counts).reduce((a, b) => a + b, 0)} calls, incl. invented tool names`)}
       ${barChart(agg.tool_counts, { limit: 10 })}
     </div>
     <div class="chart-box">
