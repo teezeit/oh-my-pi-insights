@@ -47,6 +47,67 @@ test("classifyWait: a lone 'pipeline' word in code is not a CI wait", () => {
 	assert.equal(classifyWait("bash", "glab ci status --wait"), "ci");
 });
 
+test("classifyWait: a glab api pipelines call (CI API polling) is a CI wait", () => {
+	assert.equal(
+		classifyWait("bash", 'sleep 20; p=$(glab api "projects/x%2Fy/pipelines?sha=abc" | jq ...)'),
+		"ci",
+	);
+});
+
+test("classifyWait: a subprocess.run glab api pipelines call in a sleep loop is a CI wait", () => {
+	const code = "while True:\n\tsubprocess.run(['glab', 'api', 'projects/x/pipelines'])\n\ttime.sleep(5)";
+	assert.equal(classifyWait("eval", code), "ci");
+});
+
+test("classifyWait: a gh api actions/runs call is a CI wait", () => {
+	assert.equal(classifyWait("bash", 'gh api "repos/x/y/actions/runs"'), "ci");
+});
+
+test("classifyWait: gh run list is a CI wait", () => {
+	assert.equal(classifyWait("bash", "gh run list --limit 5"), "ci");
+});
+
+test("classifyWait: a poll helper labeled with reviewer/verdict text is a review wait", () => {
+	assert.equal(
+		classifyWait("eval", 'real,fin,st=poll3(action="Waiting for backend!395 reviewer verdict", max_s=1600)'),
+		"review",
+	);
+});
+
+test("classifyWait: a poll helper labeled with a worker/dispatch target is an agent wait", () => {
+	assert.equal(classifyWait("eval", 'poll3(action="Waiting for DEV-1 MR1 worker_done")'), "agents");
+});
+
+test("classifyWait: a poll helper labeled with a pipeline target is a CI wait", () => {
+	assert.equal(classifyWait("eval", 'poll3(action="Waiting for pipeline 74438")'), "ci");
+});
+
+test("classifyWait: orca orchestration check --wait is a blocking agent wait", () => {
+	assert.equal(classifyWait("bash", "orca orchestration check job-1 --wait"), "agents");
+});
+
+test("classifyWait: orca orchestration check --wait with review wording is a review wait", () => {
+	assert.equal(classifyWait("bash", "orca orchestration check review-188 --wait"), "review");
+});
+
+test("classifyWait: orca terminal wait is a blocking agent wait", () => {
+	assert.equal(classifyWait("bash", "orca terminal wait --for term-1"), "agents");
+});
+
+test("classifyWait: orca orchestration ask blocks for a reply and is an agent wait", () => {
+	assert.equal(classifyWait("bash", "orca orchestration ask coordinator-1 'any update?'"), "agents");
+});
+
+test("classifyWait: non-blocking orca calls (send, worker-read, worker-list, terminal send/read/list) are not waits", () => {
+	assert.equal(classifyWait("bash", "orca orchestration send worker-1 'go'"), null);
+	assert.equal(classifyWait("bash", "orca worker-read ctx_1"), null);
+	assert.equal(classifyWait("bash", "orca worker-list"), null);
+	assert.equal(classifyWait("bash", "orca terminal send term-1 'hi'"), null);
+	assert.equal(classifyWait("bash", "orca terminal read term-1"), null);
+	assert.equal(classifyWait("bash", "orca terminal list"), null);
+});
+
+
 // ── commandFamily ─────────────────────────────────────────────────────────
 
 test("commandFamily: cd prefix and args are stripped down to the verb", () => {
@@ -72,6 +133,13 @@ test("commandFamily: bash loop polling a CI target is classified as polling: ci"
 	);
 });
 
+test("commandFamily: eval code with a reviewer-labeled poll helper is classified as polling: review", () => {
+	assert.equal(
+		commandFamily("eval", 'real,fin,st=poll3(action="Waiting for backend!395 reviewer verdict", max_s=1600)', "py"),
+		"polling: review",
+	);
+});
+
 test("commandFamily: a 'set -euo pipefail;' setup prefix is stripped down to the real command", () => {
 	assert.equal(commandFamily("bash", "set -euo pipefail; pnpm test"), "pnpm test");
 });
@@ -93,6 +161,61 @@ test("commandFamily: generic eval code is tagged by language, not a bare 'eval'"
 	assert.equal(commandFamily("eval", "const sum = items.reduce((a, b) => a + b, 0);", "js"), "eval: js");
 	assert.equal(commandFamily("eval", "import json\nprint(json.dumps({'a': 1}))", "py"), "eval: python");
 });
+
+// A `polling: <target>` family and classifyWait's bucket kind are derived
+// from the same underlying classification, so they can never disagree: a
+// "generic" target always pairs with the generic "polling" kind (bucket
+// tools), and any other target always pairs with a real wait kind
+// (ci/review/agents, excluded from busy_by_command). Regression for #19:
+// a poll-helper call with an unrecognized label used to short-circuit
+// classifyWait to "polling" while commandFamily separately re-scanned the
+// full text for an agent term and reported "polling: worker" anyway.
+test("classifyWait and commandFamily agree on every 'polling: <target>' family", () => {
+	const samples: Array<{ toolName: "bash" | "eval"; text: string; language?: string }> = [
+		{ toolName: "bash", text: "glab ci status --wait" },
+		{ toolName: "bash", text: 'sleep 20; p=$(glab api "projects/x%2Fy/pipelines?sha=abc" | jq ...)' },
+		{ toolName: "bash", text: 'gh api "repos/x/y/actions/runs"' },
+		{
+			toolName: "eval",
+			text: 'real,fin,st=poll3(action="Waiting for backend!395 reviewer verdict", max_s=1600)',
+			language: "py",
+		},
+		{ toolName: "eval", text: 'poll3(action="Waiting for DEV-1 MR1 worker_done")', language: "py" },
+		{ toolName: "eval", text: 'poll3(action="Waiting for pipeline 74438")', language: "py" },
+		{ toolName: "eval", text: 'poll3(action="Waiting for build artifact")', language: "py" },
+		{
+			toolName: "eval",
+			text: "time.sleep(10)\nfor d in targets:\n\tsh('orca orchestration worker-read ' + d)",
+			language: "py",
+		},
+		{ toolName: "bash", text: "until curl -s localhost:3000; do sleep 1; done" },
+		{ toolName: "bash", text: "orca orchestration check job-1 --wait" },
+		{ toolName: "bash", text: "orca orchestration check review-188 --wait" },
+		{ toolName: "bash", text: "orca terminal wait --for term-1" },
+		{ toolName: "bash", text: "orca orchestration ask coordinator-1 'any update?'" },
+		{ toolName: "bash", text: "orca orchestration send worker-1 'go'" },
+		{ toolName: "bash", text: "orca worker-read ctx_1" },
+		{ toolName: "bash", text: "npm test" },
+		{
+			toolName: "eval",
+			text: "const pipeline = buildPipeline();\nconsole.log('running pipeline', pipeline.id);",
+			language: "js",
+		},
+	];
+
+	for (const { toolName, text, language } of samples) {
+		const kind = classifyWait(toolName, text);
+		const family = commandFamily(toolName, text, language);
+		if (family.startsWith("polling: ")) {
+			const target = family.slice("polling: ".length);
+			if (target === "generic") assert.equal(kind, "polling", `${family} should pair with kind "polling" (${text})`);
+			else assert.ok(kind === "ci" || kind === "review" || kind === "agents", `${family} should pair with a real wait kind, got ${kind} (${text})`);
+		} else {
+			assert.ok(kind !== "ci" && kind !== "review" && kind !== "agents" && kind !== "polling", `non-"polling: " family ${family} should not be a wait, got kind ${kind} (${text})`);
+		}
+	}
+});
+
 
 // ── extractTimeSplit ──────────────────────────────────────────────────────
 
@@ -419,4 +542,168 @@ test("extractTimeSplit: an assistant-only sidecar (no human message) picks range
 
 test("IDLE_CAP_SEC is 900 (15 minutes)", () => {
 	assert.equal(IDLE_CAP_SEC, 900);
+});
+
+// ── extractTimeSplit: review bucket ────────────────────────────────────────
+
+function buildWaitFixture(toolName: string, args: Record<string, unknown>, resultText: string): AnyEntry[] {
+	const session = {
+		type: "session",
+		version: 3,
+		id: "00000000-0000-7000-8000-000000000005",
+		timestamp: new Date(0).toISOString(),
+		cwd: "/Users/me/projects/webapp",
+	};
+	const human = (text: string, at: number) => ({
+		type: "message",
+		timestamp: new Date(at).toISOString(),
+		message: { role: "user", attribution: "user", content: [{ type: "text", text }], timestamp: at },
+	});
+	const assistant = (completedAt: number, blocks: unknown[]) => ({
+		type: "message",
+		timestamp: new Date(completedAt).toISOString(),
+		message: { role: "assistant", model: "claude-opus-5", ttft: 0, duration: 0, completedAt, content: blocks, timestamp: completedAt },
+	});
+	const toolCall = (id: string, name: string, a: Record<string, unknown> = {}) => ({ type: "toolCall", id, name, arguments: a });
+	const toolStart = (toolCallId: string, toolName_: string, startedAt: number) => ({
+		type: "custom",
+		customType: "tool_execution_start",
+		timestamp: new Date(startedAt).toISOString(),
+		data: { toolCallId, toolName: toolName_, startedAt },
+	});
+	const toolResult = (toolCallId: string, toolName_: string, at: number, text: string) => ({
+		type: "message",
+		timestamp: new Date(at).toISOString(),
+		message: { role: "toolResult", toolName: toolName_, toolCallId, isError: false, content: [{ type: "text", text }], timestamp: at },
+	});
+
+	return [
+		session,
+		human("check on it", 0),
+		assistant(0, [toolCall("call-1", toolName, args)]),
+		toolStart("call-1", toolName, 0),
+		toolResult("call-1", toolName, 60_000, resultText),
+	];
+}
+
+test("extractTimeSplit: a wait whose result names a reviewer task-result is the review bucket", () => {
+	const resultText = '<task-result id="ReviewMR188" agent="reviewer" status="completed">LGTM</task-result>';
+	const split = extractTimeSplit(buildWaitFixture("wait", {}, resultText), "sess-r1", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.review, 60);
+	assert.equal(split.buckets.agents, 0);
+});
+
+test("extractTimeSplit: a wait returning a scout and a reviewer together is the review bucket", () => {
+	const resultText =
+		'<task-result id="Scout1" agent="scout" status="completed">ok</task-result>\n' +
+		'<task-result id="ReviewMR188" agent="reviewer" status="completed">LGTM</task-result>';
+	const split = extractTimeSplit(buildWaitFixture("wait", {}, resultText), "sess-r2", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.review, 60);
+	assert.equal(split.buckets.agents, 0);
+});
+
+test("extractTimeSplit: a wait returning only a scout is the agents bucket", () => {
+	const resultText = '<task-result id="Scout1" agent="scout" status="completed">ok</task-result>';
+	const split = extractTimeSplit(buildWaitFixture("wait", {}, resultText), "sess-r3", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.agents, 60);
+	assert.equal(split.buckets.review, 0);
+});
+
+test("extractTimeSplit: a task call with arguments.tasks[].agent = reviewer is the review bucket", () => {
+	const args = { tasks: [{ agent: "scout" }, { agent: "reviewer" }] };
+	const split = extractTimeSplit(buildWaitFixture("task", args, ""), "sess-r4", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.review, 60);
+	assert.equal(split.buckets.agents, 0);
+});
+
+test("extractTimeSplit: a task call with arguments.agent = security-reviewer is the review bucket", () => {
+	const args = { agent: "security-reviewer" };
+	const split = extractTimeSplit(buildWaitFixture("task", args, ""), "sess-r5", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.review, 60);
+	assert.equal(split.buckets.agents, 0);
+});
+
+test("extractTimeSplit: a task call with no reviewer agent is the agents bucket", () => {
+	const args = { tasks: [{ agent: "scout" }] };
+	const split = extractTimeSplit(buildWaitFixture("task", args, ""), "sess-r6", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.agents, 60);
+	assert.equal(split.buckets.review, 0);
+});
+
+function buildOverlapFixture(firstCall: { toolName: string; args: Record<string, unknown>; startedAt: number; resultAt: number; resultText: string }, secondCall: { toolName: string; args: Record<string, unknown>; startedAt: number; resultAt: number; resultText: string }): AnyEntry[] {
+	const session = {
+		type: "session",
+		version: 3,
+		id: "00000000-0000-7000-8000-000000000006",
+		timestamp: new Date(0).toISOString(),
+		cwd: "/Users/me/projects/webapp",
+	};
+	const human = (text: string, at: number) => ({
+		type: "message",
+		timestamp: new Date(at).toISOString(),
+		message: { role: "user", attribution: "user", content: [{ type: "text", text }], timestamp: at },
+	});
+	const assistant = (completedAt: number, blocks: unknown[]) => ({
+		type: "message",
+		timestamp: new Date(completedAt).toISOString(),
+		message: { role: "assistant", model: "claude-opus-5", ttft: 0, duration: 0, completedAt, content: blocks, timestamp: completedAt },
+	});
+	const toolCall = (id: string, name: string, a: Record<string, unknown> = {}) => ({ type: "toolCall", id, name, arguments: a });
+	const toolStart = (toolCallId: string, toolName_: string, startedAt: number) => ({
+		type: "custom",
+		customType: "tool_execution_start",
+		timestamp: new Date(startedAt).toISOString(),
+		data: { toolCallId, toolName: toolName_, startedAt },
+	});
+	const toolResult = (toolCallId: string, toolName_: string, at: number, text: string) => ({
+		type: "message",
+		timestamp: new Date(at).toISOString(),
+		message: { role: "toolResult", toolName: toolName_, toolCallId, isError: false, content: [{ type: "text", text }], timestamp: at },
+	});
+
+	return [
+		session,
+		human("do it", 0),
+		assistant(0, [toolCall("call-a", firstCall.toolName, firstCall.args), toolCall("call-b", secondCall.toolName, secondCall.args)]),
+		toolStart("call-a", firstCall.toolName, firstCall.startedAt),
+		toolStart("call-b", secondCall.toolName, secondCall.startedAt),
+		toolResult("call-a", firstCall.toolName, firstCall.resultAt, firstCall.resultText),
+		toolResult("call-b", secondCall.toolName, secondCall.resultAt, secondCall.resultText),
+	];
+}
+
+test("extractTimeSplit: review overlapping an agents interval wins", () => {
+	// agents [0, 40000], review [10000, 30000] (fully inside): the 20s
+	// overlap counts as review, leaving 10s + 10s = 20s of agents.
+	const entries = buildOverlapFixture(
+		{ toolName: "task", args: { tasks: [{ agent: "scout" }] }, startedAt: 0, resultAt: 40_000, resultText: "" },
+		{
+			toolName: "wait",
+			args: {},
+			startedAt: 10_000,
+			resultAt: 30_000,
+			resultText: '<task-result id="ReviewMR188" agent="reviewer" status="completed">LGTM</task-result>',
+		},
+	);
+	const split = extractTimeSplit(entries, "sess-r7", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.review, 20);
+	assert.equal(split.buckets.agents, 20);
+});
+
+test("extractTimeSplit: ci overlapping review wins", () => {
+	// review [0, 40000], ci [10000, 30000] (fully inside): the 20s overlap
+	// counts as ci, leaving 10s + 10s = 20s of review.
+	const entries = buildOverlapFixture(
+		{
+			toolName: "wait",
+			args: {},
+			startedAt: 0,
+			resultAt: 40_000,
+			resultText: '<task-result id="ReviewMR188" agent="reviewer" status="completed">LGTM</task-result>',
+		},
+		{ toolName: "bash", args: { command: "glab ci status --wait" }, startedAt: 10_000, resultAt: 30_000, resultText: "" },
+	);
+	const split = extractTimeSplit(entries, "sess-r8", "/Users/me/projects/webapp");
+	assert.equal(split.buckets.ci, 20);
+	assert.equal(split.buckets.review, 20);
 });

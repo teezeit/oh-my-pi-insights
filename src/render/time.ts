@@ -17,6 +17,7 @@ const BUCKET_LABEL: Record<TimeBucket, string> = {
 	model: "Model",
 	tools: "Tools",
 	agents: "Agents",
+	review: "Review",
 	ci: "CI/CD",
 	you: "You",
 	elsewhere: "You (busy elsewhere)",
@@ -25,13 +26,14 @@ const BUCKET_LABEL: Record<TimeBucket, string> = {
 
 /** Short annotation shown beside a bucket's label and duration. */
 const BUCKET_NOTE: Partial<Record<TimeBucket, string>> = {
+	review: "waiting on code review: reviewer agents and MR review polling",
 	elsewhere: "waited on you while you worked in another session; not counted as a speed lever",
 	idle: "excluded from active time",
 };
 
 // Active buckets in the order they are shown; idle is always rendered last
 // and separately, since it is excluded from active_sec.
-const ACTIVE_BUCKETS: TimeBucket[] = ["model", "tools", "agents", "ci", "you", "elsewhere"];
+const ACTIVE_BUCKETS: TimeBucket[] = ["model", "tools", "agents", "review", "ci", "you", "elsewhere"];
 
 /** "2h 10m" / "45m" / "30s"; never a bare fraction, never NaN (callers must
  * not pass NaN/undefined - see the zero-session guard in every entry point). */
@@ -175,7 +177,7 @@ export function renderTimeSection(agg: TimeAggregate): string {
 <style>${TIME_SECTION_STYLE}</style>
 <h2>Where the Time Goes</h2>
 <p class="muted">${esc(sampleLine(agg))}</p>
-<p class="muted">Totals below are <strong>summed session time</strong>, not unique elapsed calendar time - parallel sessions overlap and are each counted in full. Bucket assignment (${esc(BUCKET_LABEL.ci)} &gt; Agents &gt; Tools &gt; Model &gt; You) is inferred from message activity, not proof of what you were doing; idle time is capped at 15 minutes per gap before it stops counting as "You".</p>
+<p class="muted">Totals below are <strong>summed session time</strong>, not unique elapsed calendar time - parallel sessions overlap and are each counted in full. Bucket assignment (${esc(BUCKET_LABEL.ci)} &gt; ${esc(BUCKET_LABEL.review)} &gt; Agents &gt; Tools &gt; Model &gt; You) is inferred from message activity, not proof of what you were doing; idle time is capped at 15 minutes per gap before it stops counting as "You".</p>
 
 <div class="chart-box">
 ${bucketChart}

@@ -25,6 +25,13 @@ package identity that does not exist, since this targets a different harness.
   `usage-data/time.html` plus a timestamped copy. The main report gets the
   same section, replacing the per-tool time share (which counted waiting
   on you and on agents as tool time). Session-meta schema bumped to 13.
+- **Review time is its own bucket (#19).** `/insights time` splits waiting
+  on code review (reviewer subagents, MR review/verdict polling, poll
+  helpers labelled with a review) out of Agents and tools. A `wait` that
+  returns several jobs counts as Review if any of them is a review. Poll
+  helper calls are classified by their label. Pipeline API polling
+  (`glab api .../pipelines`, `gh api .../check-runs`) counts as CI/CD
+  again. Session-meta schema bumped to 14.
 
 ### Fixed
 

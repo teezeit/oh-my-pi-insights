@@ -16,6 +16,7 @@ import { createClaudeSessionSource, type SessionRef } from "../index.ts";
 //   - subagent turns are inline, flagged isSidechain
 
 const SID = "00000000-0000-4000-8000-000000000003";
+const REVIEW_SID = "44444444-5555-6666-7777-888888888888";
 const TIME_SID = "33333333-4444-5555-6666-777777777777";
 let root: string;
 let source: ReturnType<typeof createClaudeSessionSource>;
@@ -126,6 +127,29 @@ before(async () => {
 			line({ type: "user", sessionId: TIME_SID, cwd: CWD, timestamp: "2026-09-22T08:21:30.000Z", isSidechain: false, message: { role: "user", content: "looks good, ship it" } }),
 		].join(""),
 	);
+	// subagent_type "code-reviewer" on a Task tool is review time, not agents.
+	await writeFile(
+		join(dir, `${REVIEW_SID}.jsonl`),
+		[
+			line({ type: "user", sessionId: REVIEW_SID, cwd: CWD, timestamp: "2026-09-23T08:00:00.000Z", isSidechain: false, message: { role: "user", content: "review my diff" } }),
+			line({
+				type: "assistant",
+				sessionId: REVIEW_SID,
+				cwd: CWD,
+				uuid: "review-a1",
+				requestId: "req-review-1",
+				timestamp: "2026-09-23T08:00:00.000Z",
+				message: {
+					role: "assistant",
+					model: "claude-opus-5",
+					usage,
+					content: [{ type: "tool_use", id: "tu-review-1", name: "Task", input: { subagent_type: "code-reviewer", description: "review the diff" } }],
+				},
+			}),
+			line({ type: "user", sessionId: REVIEW_SID, timestamp: "2026-09-23T08:01:00.000Z", isSidechain: false, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu-review-1", is_error: false }] } }),
+			line({ type: "user", sessionId: REVIEW_SID, cwd: CWD, timestamp: "2026-09-23T08:01:30.000Z", isSidechain: false, message: { role: "user", content: "thanks" } }),
+		].join(""),
+	);
 });
 
 after(async () => {
@@ -141,7 +165,7 @@ async function metaFor(id: string) {
 
 test("lists sessions from the flat per-project layout", async () => {
 	const { sessions, duplicate_logs } = await source.listSessions();
-	assert.equal(sessions.length, 3);
+	assert.equal(sessions.length, 4);
 	assert.equal(duplicate_logs, 0);
 	assert.ok(sessions.every((s: SessionRef) => s.sidecars.length === 0));
 });
@@ -242,4 +266,11 @@ test("#18: you_gaps sums to buckets.you and elsewhere is 0 for Claude Code logs"
 	for (const [s, e] of you_gaps) {
 		assert.ok(s >= rangeStart && e <= rangeEnd, `interval [${s}, ${e}] outside session range`);
 	}
+});
+
+test("#19: a Task tool with subagent_type naming a reviewer is review time, not agents", async () => {
+	const meta = await metaFor(REVIEW_SID);
+	const { buckets } = meta.time_split;
+	assert.equal(buckets.review, 60);
+	assert.equal(buckets.agents, 0);
 });

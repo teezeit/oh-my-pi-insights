@@ -25,35 +25,102 @@ export const IDLE_CAP_SEC = 900;
 // message) to mean CI; every term here is an actual CI command or polling
 // check target.
 const CI_TERMS_RE =
-	/\bglab\s+ci\b|\bgh\s+pr\s+checks\b|\bgh\s+run\s+(?:watch|view)\b|\bdeploy\s+status\b|\bvercel\s+inspect\b/i;
+	/\bglab\s+ci\b|\bgh\s+pr\s+checks\b|\bgh\s+run\s+(?:list|watch|view)\b|\bdeploy\s+status\b|\bvercel\s+inspect\b/i;
+// CI API polling: `glab api .../pipelines|jobs` and `gh api .../actions/runs|check-runs|statuses`.
+// A bounded gap (not a bare `\bpipelines\b`) between the CLI name, `api`,
+// and the target word so both a bash pipeline (`glab api "...pipelines..."`)
+// and a `subprocess.run(['glab', 'api', '...pipelines'])` call in eval code
+// are recognized, while a lone "pipeline" in prose or a variable name still
+// doesn't match (see the dedicated regression test for that).
+const GLAB_API_CI_RE = /\bglab\b[\s\S]{0,15}\bapi\b[\s\S]{0,60}\b(?:pipelines|jobs)\b/i;
+const GH_API_CI_RE = /\bgh\b[\s\S]{0,15}\bapi\b[\s\S]{0,80}\b(?:actions\/runs|check-runs|statuses)\b/i;
 const AGENT_TERM_RE = /\b(orca|worker|dispatch|agent|bg_\w+)\b/i;
 const SLEEP_CALL_RE = /\btime\.sleep\s*\(|\bsleep\s+\d/i;
 const LOOP_KEYWORD_RE = /\b(while|until|for)\b/i;
 
+// A blocking orca command: `orca orchestration check ... --wait` or `orca
+// orchestration ask ...` (blocks for a coordinator reply) or `orca terminal
+// wait ...`. Non-blocking orca calls (send, worker-read, worker-list,
+// terminal send/read/list) don't match and stay real tool work. Bounded
+// gaps between tokens (not bare whitespace) so a token-array eval call
+// (`subprocess.run(['orca', 'orchestration', 'check', id, '--wait'])`)
+// is recognized the same as a bash command line.
+const ORCA_BLOCKING_RE =
+	/\borca\b[\s\S]{0,15}\borchestration\b[\s\S]{0,15}\bcheck\b[\s\S]{0,80}--wait\b|\borca\b[\s\S]{0,15}\bterminal\b[\s\S]{0,15}\bwait\b|\borca\b[\s\S]{0,15}\borchestration\b[\s\S]{0,15}\bask\b/i;
+
+// A `poll*(...)` helper call (or any `action=`/`label=` string literal,
+// which is how such helpers are usually invoked) is classified by its
+// label text: review/reviewer/verdict/approval wording -> review,
+// pipeline/CI/deploy wording -> ci, worker/dispatch/agent wording ->
+// agents, anything else -> generic polling. The label (not the helper
+// name) decides because the same `poll3(...)` helper is reused for every
+// kind of wait in practice.
+const POLL_HELPER_CALL_RE = /\bpoll\w*\s*\(/i;
+const POLL_LABEL_RE = /\b(?:action|label)\s*=\s*['"]([^'"]*)['"]/i;
+const REVIEW_LABEL_RE = /review|reviewer|verdict|approv/i;
+const CI_LABEL_RE = /pipeline|\bci\b|deploy/i;
+const AGENTS_LABEL_RE = /worker|dispatch|agent/i;
+
+function classifyPollHelper(text: string): WaitKind {
+	const labelMatch = POLL_LABEL_RE.exec(text);
+	if (!POLL_HELPER_CALL_RE.test(text) && !labelMatch) return null;
+	const label = labelMatch ? labelMatch[1]! : text;
+	if (REVIEW_LABEL_RE.test(label)) return "review";
+	if (CI_LABEL_RE.test(label)) return "ci";
+	if (AGENTS_LABEL_RE.test(label)) return "agents";
+	return "polling";
+}
+
+// The single source of truth behind both `classifyWait` and
+// `commandFamily`'s `polling: <target>` label, so the two can never
+// disagree (see the "classifyWait and commandFamily agree" regression
+// test): CI terms/CI API calls win outright; a poll-helper call with a
+// recognized label (review/ci/agents wording) resolves directly from that
+// label; a blocking orca command resolves to agents (or review, if the
+// command names a review); anything else that looks like a wait (an
+// unlabeled poll-helper call, or a `time.sleep`/bash `while|until ...
+// sleep` loop) falls back to scanning the full text for an agent term
+// (orca/worker/dispatch/agent/bg_*), and only lands as generic "polling"
+// (bucket tools) if that also finds nothing.
+function classifyBashEvalWait(text: string): { kind: Exclude<WaitKind, null>; target: string } | null {
+	if (CI_TERMS_RE.test(text) || GLAB_API_CI_RE.test(text) || GH_API_CI_RE.test(text)) return { kind: "ci", target: "ci" };
+
+	const pollLabel = classifyPollHelper(text);
+	if (pollLabel === "review") return { kind: "review", target: "review" };
+	if (pollLabel === "ci") return { kind: "ci", target: "ci" };
+	if (pollLabel === "agents") {
+		const m = AGENT_TERM_RE.exec(text);
+		return { kind: "agents", target: m ? m[1]!.toLowerCase() : "agents" };
+	}
+
+	if (ORCA_BLOCKING_RE.test(text)) {
+		if (REVIEW_LABEL_RE.test(text)) return { kind: "review", target: "review" };
+		return { kind: "agents", target: "orca" };
+	}
+
+	const isSleepLoop = SLEEP_CALL_RE.test(text) && LOOP_KEYWORD_RE.test(text);
+	if (pollLabel === "polling" || isSleepLoop) {
+		const m = AGENT_TERM_RE.exec(text);
+		if (m) return { kind: "agents", target: m[1]!.toLowerCase() };
+		return { kind: "polling", target: "generic" };
+	}
+	return null;
+}
+
 /**
  * What a bash/eval call (or the wait/task/`*_wait` tools, e.g. `vibe_wait`)
  * is waiting on. `wait`, `task`, and any tool whose name ends in `_wait`
- * are always "agents" regardless of their input; bash/eval text is
- * read for CI-watcher commands and polling loops (python `time.sleep`
- * loops, bash `while|until ... sleep`), which are then classified by their
- * target: CI terms win over everything else, then agent-ish targets, else
- * generic polling. A plain command (no CI terms, no poll loop) is real tool
- * work, not a wait.
+ * are always "agents" regardless of their input (callers that need a finer
+ * review/agents split for `wait`/`task` read the call's own arguments and
+ * toolResult instead, in extractTimeSplit); bash/eval text is classified
+ * by `classifyBashEvalWait` (CI terms/CI API calls, poll-helper labels,
+ * blocking orca commands, then generic polling loops). A plain command
+ * (none of the above) is real tool work, not a wait.
  */
 export function classifyWait(toolName: string, text: string): WaitKind {
 	if (toolName === "wait" || toolName === "task" || toolName.endsWith("_wait")) return "agents";
 	if (toolName !== "bash" && toolName !== "eval") return null;
-	if (CI_TERMS_RE.test(text)) return "ci";
-	const isPollingLoop = SLEEP_CALL_RE.test(text) && LOOP_KEYWORD_RE.test(text);
-	if (isPollingLoop) return AGENT_TERM_RE.test(text) ? "agents" : "polling";
-	return null;
-}
-
-function pollingTarget(text: string): string {
-	if (CI_TERMS_RE.test(text)) return "ci";
-	const m = AGENT_TERM_RE.exec(text);
-	if (m) return m[1]!.toLowerCase();
-	return "generic";
+	return classifyBashEvalWait(text)?.kind ?? null;
 }
 
 // Extracts the loop body of a `for ...; do X; done` / `while ...; do X;
@@ -124,6 +191,39 @@ function evalLanguageFamily(language: string | undefined, text: string): string 
 // later toolResult for the same toolCallId once the job finishes.
 const BACKGROUND_PROVISIONAL_RE = /\bBackgrounded as job bg_\d+/i;
 
+// `wait` tool result: review if any job this wait returned is a review,
+// scoped to each job's own `<task-result ...>` tag or a "label: ..." line
+// naming it, so an unrelated mention of "review" inside a job's own output
+// text doesn't flip the whole wait to Review.
+const TASK_RESULT_TAG_RE = /<task-result\b[^>]*>/gi;
+const JOB_LABEL_LINE_RE = /^.*\blabel\s*:.*$/gim;
+
+function waitResultHasReviewJob(resultText: string): boolean {
+	for (const tag of resultText.match(TASK_RESULT_TAG_RE) ?? []) {
+		if (REVIEW_LABEL_RE.test(tag)) return true;
+	}
+	for (const line of resultText.match(JOB_LABEL_LINE_RE) ?? []) {
+		if (REVIEW_LABEL_RE.test(line)) return true;
+	}
+	return false;
+}
+
+// `task` tool call: review if any dispatched subagent is a reviewer, read
+// from the call's own arguments (its result may never mention the agent
+// type by name).
+const REVIEW_AGENT_NAMES: Record<string, true> = { reviewer: true, "security-reviewer": true };
+
+function taskArgsHaveReviewAgent(args: Record<string, unknown> | undefined): boolean {
+	if (!args) return false;
+	if (typeof args.agent === "string" && REVIEW_AGENT_NAMES[args.agent]) return true;
+	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+	for (const t of tasks) {
+		const agent = (t as Record<string, unknown> | undefined)?.agent;
+		if (typeof agent === "string" && REVIEW_AGENT_NAMES[agent]) return true;
+	}
+	return false;
+}
+
 /**
  * The command family a tool call belongs to, for `busy_by_command`: bash
  * and eval calls classified as a wait (CI watcher, polling loop) reduce to
@@ -138,13 +238,13 @@ const BACKGROUND_PROVISIONAL_RE = /\bBackgrounded as job bg_\d+/i;
  */
 export function commandFamily(toolName: string, text: string, language?: string): string {
 	if (toolName === "bash") {
-		const wk = classifyWait("bash", text);
-		if (wk) return `polling: ${pollingTarget(text)}`;
+		const w = classifyBashEvalWait(text);
+		if (w) return `polling: ${w.target}`;
 		return bashFamily(text);
 	}
 	if (toolName === "eval") {
-		const wk = classifyWait("eval", text);
-		if (wk) return `polling: ${pollingTarget(text)}`;
+		const w = classifyBashEvalWait(text);
+		if (w) return `polling: ${w.target}`;
 		if (BROWSER_IN_CODE_RE.test(text)) return "eval: browser";
 		const subprocessMatch = SUBPROCESS_CMD_RE.exec(text);
 		const subprocessCmd = (subprocessMatch?.[1] ?? subprocessMatch?.[2] ?? subprocessMatch?.[3] ?? "").trim();
@@ -157,7 +257,7 @@ export function commandFamily(toolName: string, text: string, language?: string)
 export type TaggedInterval = { start: number; end: number; bucket: TimeBucket };
 
 // Why: "elsewhere" is never produced per session (aggregateTime decides it cross-session), so its priority is irrelevant here.
-const BUCKET_PRIORITY: Record<TimeBucket, number> = { ci: 4, agents: 3, tools: 2, model: 1, you: 0, elsewhere: 0, idle: -1 };
+const BUCKET_PRIORITY: Record<TimeBucket, number> = { ci: 5, review: 4, agents: 3, tools: 2, model: 1, you: 0, elsewhere: 0, idle: -1 };
 
 /**
  * Resolves overlapping intervals to a partition of [rangeStart, rangeEnd):
@@ -243,6 +343,7 @@ export function partitionIntervals(
 		model: (covered.model ?? 0) / 1000,
 		tools: (covered.tools ?? 0) / 1000,
 		agents: (covered.agents ?? 0) / 1000,
+		review: (covered.review ?? 0) / 1000,
 		ci: (covered.ci ?? 0) / 1000,
 		you: (covered.you ?? 0) / 1000,
 		elsewhere: 0,
@@ -258,7 +359,7 @@ export function partitionIntervals(
 		if (cappedSpan > 0) youGapSegments.push([gapStart, gapStart + cappedSpan]);
 	}
 	for (const k of Object.keys(buckets) as TimeBucket[]) buckets[k] = round(buckets[k]);
-	const activeSec = round(buckets.model + buckets.tools + buckets.agents + buckets.ci + buckets.you + buckets.elsewhere);
+	const activeSec = round(buckets.model + buckets.tools + buckets.agents + buckets.review + buckets.ci + buckets.you + buckets.elsewhere);
 	return { buckets, activeSec, youGaps: mergeAdjacent(youGapSegments) };
 }
 
@@ -338,7 +439,7 @@ export function extractTimeSplit(
 	project: string,
 	idleCapSec = IDLE_CAP_SEC,
 ): SessionTimeSplit {
-	const toolCallMeta = new Map<string, { toolName: string; text: string; language?: string }>();
+	const toolCallMeta = new Map<string, { toolName: string; text: string; language?: string; args: Record<string, unknown> }>();
 	const toolCallStarts = new Map<string, { toolName: string; startedAtMs: number }>();
 	// Tracks what's already been counted for a toolCallId so a background
 	// job's later follow-up result replaces (not adds to) its provisional
@@ -355,11 +456,13 @@ export function extractTimeSplit(
 	// drown its real model busy time, so the earliest real timestamp wins.
 	let firstEntryMs: number | null = null;
 
-	function classifyToolBucket(toolName: string, text: string): TimeBucket {
+	function classifyToolBucket(toolName: string, text: string, args: Record<string, unknown> | undefined, resultText: string): TimeBucket {
 		if (toolName === "ask") return "you";
-		if (toolName === "wait" || toolName === "task") return "agents";
+		if (toolName === "wait") return waitResultHasReviewJob(resultText) ? "review" : "agents";
+		if (toolName === "task") return taskArgsHaveReviewAgent(args) ? "review" : "agents";
 		const wk = classifyWait(toolName, text);
 		if (wk === "ci") return "ci";
+		if (wk === "review") return "review";
 		if (wk === "agents") return "agents";
 		return "tools";
 	}
@@ -424,7 +527,7 @@ export function extractTimeSplit(
 									: ""
 								: "";
 					const language = toolName === "eval" && typeof args.language === "string" ? args.language : undefined;
-					toolCallMeta.set(toolId, { toolName, text, language });
+					toolCallMeta.set(toolId, { toolName, text, language, args });
 				}
 			}
 			continue;
@@ -444,7 +547,8 @@ export function extractTimeSplit(
 				const meta = toolCallId ? toolCallMeta.get(toolCallId) : undefined;
 				const text = meta?.text ?? "";
 				const durationSec = Math.max(0, (msgTs - start.startedAtMs) / 1000);
-				const bucket = classifyToolBucket(toolName, text);
+				const resultText = extractTextFromContent(msg.content).trim();
+				const bucket = classifyToolBucket(toolName, text, meta?.args, resultText);
 				// Why gate on "tools": busy_by_command tracks real tool work;
 				// ask/wait/task and ci/agents-classified calls already have
 				// their own buckets and would otherwise show up twice, as
@@ -472,7 +576,6 @@ export function extractTimeSplit(
 					toolCallDelivered.set(toolCallId, { intervalIndex: intervals.length - 1, commandKey, durationSec });
 				}
 
-				const resultText = extractTextFromContent(msg.content).trim();
 				if (BACKGROUND_PROVISIONAL_RE.test(resultText)) {
 					// Still running in the background: keep the start so the
 					// eventual follow-up (same toolCallId) can extend this

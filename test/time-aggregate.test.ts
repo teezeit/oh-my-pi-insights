@@ -7,17 +7,30 @@ import { aggregateTime, buildTimeLevers, type SessionMeta } from "../index.ts";
 import { meta } from "./helpers.ts";
 
 type TimeSplit = SessionMeta["time_split"];
+type TimeBucket = keyof TimeSplit["buckets"];
 
-function zeroSplit(overrides: Partial<TimeSplit> = {}): TimeSplit {
+function zeroSplit(overrides: Partial<Omit<TimeSplit, "buckets">> & { buckets?: Partial<Record<TimeBucket, number>> } = {}): TimeSplit {
+	const { buckets: bucketOverrides, ...rest } = overrides;
+	const buckets: Record<TimeBucket, number> = {
+		model: 0,
+		tools: 0,
+		agents: 0,
+		review: 0,
+		ci: 0,
+		you: 0,
+		elsewhere: 0,
+		idle: 0,
+		...bucketOverrides,
+	};
 	return {
-		buckets: { model: 0, tools: 0, agents: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 },
 		active_sec: 0,
 		busy_by_tool: {},
 		busy_by_command: {},
 		subagent_busy_sec: 0,
 		slowest_requests: [],
 		you_gaps: [],
-		...overrides,
+		...rest,
+		buckets,
 	};
 }
 
@@ -42,11 +55,11 @@ test("two sessions sum correctly; non-idle shares sum to 1; idle share formula",
 	const agg = aggregateTime([a, b]);
 
 	assert.equal(agg.sessions, 2);
-	assert.deepEqual(agg.buckets, { model: 150, tools: 300, agents: 50, ci: 0, you: 100, elsewhere: 0, idle: 100 });
+	assert.deepEqual(agg.buckets, { model: 150, tools: 300, agents: 50, review: 0, ci: 0, you: 100, elsewhere: 0, idle: 100 });
 	assert.equal(agg.active_sec, 600);
 
 	const nonIdleSum =
-		agg.shares.model + agg.shares.tools + agg.shares.agents + agg.shares.ci + agg.shares.you + agg.shares.elsewhere;
+		agg.shares.model + agg.shares.tools + agg.shares.agents + agg.shares.review + agg.shares.ci + agg.shares.you + agg.shares.elsewhere;
 	assert.ok(Math.abs(nonIdleSum - 1) < 1e-9, `non-idle shares should sum to 1, got ${nonIdleSum}`);
 	assert.ok(Math.abs(agg.shares.idle - 100 / 700) < 1e-9);
 });
@@ -303,7 +316,7 @@ test("empty metas produce zeros, no levers, and no NaN", () => {
 
 	assert.equal(agg.sessions, 0);
 	assert.deepEqual(agg.date_range, { start: "", end: "" });
-	assert.deepEqual(agg.buckets, { model: 0, tools: 0, agents: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 });
+	assert.deepEqual(agg.buckets, { model: 0, tools: 0, agents: 0, review: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 });
 	assert.equal(agg.active_sec, 0);
 	assert.deepEqual(agg.slowest_requests, []);
 	assert.deepEqual(agg.levers, []);
@@ -408,4 +421,36 @@ test("waiting_on_you lever disappears when most you-time becomes elsewhere", () 
 		user_message_timestamps: [new Date(t + 20 * 1000).toISOString()],
 	});
 	assert.ok(!aggregateTime([a, b]).levers.some((l) => l.id === "waiting_on_you"));
+});
+
+test("review share of 20% of active time triggers review_waits with evidence", () => {
+	const m = meta({
+		session_id: "reviewed",
+		time_split: zeroSplit({
+			buckets: { model: 60, tools: 0, agents: 0, review: 20, ci: 0, you: 20, elsewhere: 0, idle: 0 },
+			active_sec: 100,
+		}),
+	});
+
+	const agg = aggregateTime([m]);
+	assert.equal(agg.buckets.review, 20);
+	assert.ok(Math.abs(agg.shares.review - 0.2) < 1e-9);
+
+	const lever = agg.levers.find((l) => l.id === "review_waits");
+	assert.ok(lever, "expected review_waits lever");
+	assert.deepEqual(lever!.evidence_sessions, ["reviewed"]);
+	assert.match(lever!.detail, /20%/);
+});
+
+test("review share of 10% of active time does not trigger review_waits", () => {
+	const m = meta({
+		session_id: "light-review",
+		time_split: zeroSplit({
+			buckets: { model: 70, tools: 0, agents: 0, review: 10, ci: 0, you: 20, elsewhere: 0, idle: 0 },
+			active_sec: 100,
+		}),
+	});
+
+	const agg = aggregateTime([m]);
+	assert.ok(!agg.levers.some((l) => l.id === "review_waits"), "review_waits must not fire at 10% review share");
 });

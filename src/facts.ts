@@ -164,7 +164,7 @@ export function buildFacts(agg: AggregatedData, temporal: TemporalData, timeAgg?
 	return facts;
 }
 
-const TIME_BUCKETS: TimeBucket[] = ["model", "tools", "agents", "ci", "you", "elsewhere", "idle"];
+const TIME_BUCKETS: TimeBucket[] = ["model", "tools", "agents", "review", "ci", "you", "elsewhere", "idle"];
 
 /**
  * Issue #18 ("where did the time go"): the only numbers the time-section

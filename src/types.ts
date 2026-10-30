@@ -162,10 +162,10 @@ export type SessionMeta = {
  * another session (decided cross-session in aggregateTime; per-session
  * extraction always reports 0 there and records you_gaps instead).
  */
-export type TimeBucket = "model" | "tools" | "agents" | "ci" | "you" | "elsewhere" | "idle";
+export type TimeBucket = "model" | "tools" | "agents" | "review" | "ci" | "you" | "elsewhere" | "idle";
 
-/** What a tool call is waiting on, if anything: CI/CD, other agents, generic polling, or nothing (null = real tool work). */
-export type WaitKind = "ci" | "agents" | "polling" | null;
+/** What a tool call is waiting on, if anything: CI/CD, code review (reviewer agents, MR review/verdict polling), other agents, generic polling, or nothing (null = real tool work). */
+export type WaitKind = "ci" | "review" | "agents" | "polling" | null;
 
 /** One request (human message to the next) ranked by wall clock. */
 export type SlowRequest = {
@@ -198,7 +198,7 @@ export type SessionTimeSplit = {
 	you_gaps: Array<[number, number]>;
 };
 
-export type TimeLeverId = "command_family" | "waiting_on_you" | "slow_model" | "serial_agent_waits" | "slowest_requests";
+export type TimeLeverId = "command_family" | "waiting_on_you" | "slow_model" | "serial_agent_waits" | "review_waits" | "slowest_requests";
 
 export type TimeLever = {
 	id: TimeLeverId;

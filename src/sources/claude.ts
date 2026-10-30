@@ -286,11 +286,20 @@ export function extractClaudeStats(entries: AnyEntry[]) {
 // time; anything left uncovered - most commonly the wait before the next
 // human message - falls to the same you/idle cap as extractTimeSplit, via
 // the shared partitionIntervals sweep.
-function classifyClaudeToolBucket(toolName: string, text: string): TimeBucket {
+const REVIEW_TASK_RE = /\b(review|reviewer)\b/i;
+
+function isReviewTask(input: Record<string, unknown>): boolean {
+	const subagentType = typeof input.subagent_type === "string" ? (input.subagent_type as string) : "";
+	const description = typeof input.description === "string" ? (input.description as string) : "";
+	return REVIEW_TASK_RE.test(subagentType) || REVIEW_TASK_RE.test(description);
+}
+
+function classifyClaudeToolBucket(toolName: string, text: string, input: Record<string, unknown>): TimeBucket {
 	if (toolName === "AskUserQuestion") return "you";
-	if (toolName === "Task") return "agents";
+	if (toolName === "Task") return isReviewTask(input) ? "review" : "agents";
 	const wk = classifyWait(toolName === "Bash" ? "bash" : toolName, text);
 	if (wk === "ci") return "ci";
+	if (wk === "review") return "review";
 	if (wk === "agents") return "agents";
 	return "tools";
 }
@@ -314,7 +323,7 @@ export function extractClaudeTimeSplit(
 	project: string,
 	idleCapSec = IDLE_CAP_SEC,
 ): SessionMeta["time_split"] {
-	type PendingToolUse = { toolName: string; text: string; startMs: number };
+	type PendingToolUse = { toolName: string; text: string; input: Record<string, unknown>; startMs: number };
 	const pending = new Map<string, PendingToolUse>();
 	const intervals: TaggedInterval[] = [];
 	const busyByTool: Record<string, number> = {};
@@ -344,7 +353,7 @@ export function extractClaudeTimeSplit(
 				const toolName = typeof block.name === "string" ? block.name : "";
 				const input = (block.input as Record<string, unknown>) ?? {};
 				const text = toolName === "Bash" && typeof input.command === "string" ? (input.command as string) : "";
-				pending.set(toolId, { toolName, text, startMs: ts });
+				pending.set(toolId, { toolName, text, input, startMs: ts });
 			}
 			continue;
 		}
@@ -358,7 +367,7 @@ export function extractClaudeTimeSplit(
 				const toolUseId = typeof result.tool_use_id === "string" ? (result.tool_use_id as string) : "";
 				const start = toolUseId ? pending.get(toolUseId) : undefined;
 				if (!start) continue;
-				const bucket = classifyClaudeToolBucket(start.toolName, start.text);
+				const bucket = classifyClaudeToolBucket(start.toolName, start.text, start.input);
 				intervals.push({ start: start.startMs, end: ts, bucket });
 				const durationSec = Math.max(0, (ts - start.startMs) / 1000);
 				busyByTool[start.toolName] = (busyByTool[start.toolName] ?? 0) + durationSec;

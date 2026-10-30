@@ -166,9 +166,11 @@ Added or changed, and why:
 ```
 
 Splits each session's wall clock into model generating, tools running (by
-command, e.g. `pnpm test`), waiting on agents, waiting on CI/CD, waiting on
-you, waiting on you while you were busy in another session, and idle (gaps
-over 15 minutes, excluded from active time). Lists the slowest requests and
+command, e.g. `pnpm test`), waiting on agents, waiting on code review
+(reviewer agents, MR review/verdict polling), waiting on CI/CD (pipeline
+watchers and pipeline API polling), waiting on you, waiting on you while you
+were busy in another session, and idle (gaps over 15 minutes, excluded from
+active time). Lists the slowest requests and
 up to three levers for making sessions faster. No model call unless
 `--explain`, which adds one call on the active model for a short narrative.
 The main `/insights` report includes the same "Where the time goes"

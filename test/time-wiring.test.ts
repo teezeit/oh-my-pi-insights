@@ -289,7 +289,7 @@ test("facts include time.share.* and no tool_time_share.* once a TimeAggregate i
 	assert.equal(byId.get("time.share.ci")!.value, Math.round((30 / 945) * 100 * 10) / 10);
 });
 
-test("buildTimeFacts emits a time.share.* fact for all seven time buckets, including elsewhere", () => {
+test("buildTimeFacts emits a time.share.* fact for all eight time buckets, including review and elsewhere", () => {
 	const meta = mod.buildSessionMeta(REF, mainSessionEntries(), []);
 	const timeAgg = mod.aggregateTime([meta]);
 	const facts = mod.buildTimeFacts(timeAgg);
@@ -300,12 +300,14 @@ test("buildTimeFacts emits a time.share.* fact for all seven time buckets, inclu
 			"time.share.model",
 			"time.share.tools",
 			"time.share.agents",
+			"time.share.review",
 			"time.share.ci",
 			"time.share.you",
 			"time.share.elsewhere",
 			"time.share.idle",
 		]),
 	);
+	assert.ok(shareIds.has("time.share.review"), "expected time.share.review fact");
 });
 
 test("/insights time --session <id> bypasses the default 14-day cutoff for an old, explicitly named session", async () => {

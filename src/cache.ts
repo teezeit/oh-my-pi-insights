@@ -94,7 +94,8 @@ export async function ensureDirs(): Promise<void> {
 // cached meta must recompute once so time_split stops reading as all-zero.
 // v12: time_split gained you_gaps and the "elsewhere" bucket.
 // v13: classify eval/setup commands and account for final background results.
-export const META_SCHEMA_VERSION = 13;
+// v14: "review" bucket (reviewer-agent waits, review/verdict polling) and CI API polling (glab/gh api pipelines) counted as CI again.
+export const META_SCHEMA_VERSION = 14;
 
 export async function loadCachedMeta(
 	sourceName: string,

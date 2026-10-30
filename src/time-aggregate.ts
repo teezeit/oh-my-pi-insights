@@ -10,11 +10,11 @@
 
 import type { SessionMeta, SlowRequest, TimeAggregate, TimeBucket, TimeLever } from "./types.ts";
 
-const BUCKETS: TimeBucket[] = ["model", "tools", "agents", "ci", "you", "elsewhere", "idle"];
-const ACTIVE_BUCKETS: TimeBucket[] = ["model", "tools", "agents", "ci", "you", "elsewhere"];
+const BUCKETS: TimeBucket[] = ["model", "tools", "agents", "review", "ci", "you", "elsewhere", "idle"];
+const ACTIVE_BUCKETS: TimeBucket[] = ["model", "tools", "agents", "review", "ci", "you", "elsewhere"];
 
 function zeroBuckets(): Record<TimeBucket, number> {
-	return { model: 0, tools: 0, agents: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 };
+	return { model: 0, tools: 0, agents: 0, review: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 };
 }
 
 /**
@@ -244,6 +244,19 @@ export function buildTimeLevers(agg: Omit<TimeAggregate, "levers">, metas: Sessi
 			title: "Run subagents in parallel",
 			detail: `Agent waits took ${formatHM(agg.buckets.agents)} (${pct(agg.shares.agents)} of active time) while subagents were only busy ${formatHM(agg.subagent_busy_sec)}, suggesting serial waits.`,
 			share: agg.shares.agents,
+			evidence_sessions,
+		});
+	}
+
+	// review_waits: code review (reviewer agents, MR review/verdict polling)
+	// exceeds 15% of active time.
+	if (agg.shares.review > 0.15) {
+		const evidence_sessions = topSessions(metas.map((m) => ({ session_id: m.session_id, value: m.time_split?.buckets?.review ?? 0 })));
+		levers.push({
+			id: "review_waits",
+			title: "Shorten review round trips",
+			detail: `Code review took ${formatHM(agg.buckets.review)} (${pct(agg.shares.review)} of active time); try smaller MRs or running reviews in parallel with other work.`,
+			share: agg.shares.review,
 			evidence_sessions,
 		});
 	}

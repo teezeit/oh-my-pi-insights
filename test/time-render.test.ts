@@ -7,8 +7,8 @@ import { generateTimeHTML, renderTimeMarkdown, renderTimeSection, timeWidgetLine
 import type { TimeAggregate } from "../src/types.ts";
 
 function agg(overrides: Partial<TimeAggregate> = {}): TimeAggregate {
-	const buckets = { model: 7800, tools: 3600, agents: 1800, ci: 600, you: 1200, elsewhere: 300, idle: 900 };
-	const active = buckets.model + buckets.tools + buckets.agents + buckets.ci + buckets.you + buckets.elsewhere;
+	const buckets = { model: 7800, tools: 3600, agents: 1800, review: 400, ci: 600, you: 1200, elsewhere: 300, idle: 900 };
+	const active = buckets.model + buckets.tools + buckets.agents + buckets.review + buckets.ci + buckets.you + buckets.elsewhere;
 	return {
 		sessions: 12,
 		date_range: { start: "2026-10-01", end: "2026-10-30" },
@@ -18,6 +18,7 @@ function agg(overrides: Partial<TimeAggregate> = {}): TimeAggregate {
 			model: buckets.model / active,
 			tools: buckets.tools / active,
 			agents: buckets.agents / active,
+			review: buckets.review / active,
 			ci: buckets.ci / active,
 			you: buckets.you / active,
 			elsewhere: buckets.elsewhere / active,
@@ -41,9 +42,9 @@ function zeroAgg(): TimeAggregate {
 	return {
 		sessions: 0,
 		date_range: { start: "", end: "" },
-		buckets: { model: 0, tools: 0, agents: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 },
+		buckets: { model: 0, tools: 0, agents: 0, review: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 },
 		active_sec: 0,
-		shares: { model: 0, tools: 0, agents: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 },
+		shares: { model: 0, tools: 0, agents: 0, review: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 },
 		busy_by_tool: {},
 		busy_by_command: {},
 		subagent_busy_sec: 0,
@@ -52,14 +53,33 @@ function zeroAgg(): TimeAggregate {
 	};
 }
 
-test("the time section shows all seven bucket labels with shares and durations, idle marked excluded", () => {
+test("the time section shows all eight bucket labels with shares and durations, idle marked excluded", () => {
 	const html = renderTimeSection(agg());
-	for (const label of ["Model", "Tools", "Agents", "CI", "You", "You (busy elsewhere)", "Idle"]) {
+	for (const label of ["Model", "Tools", "Agents", "Review", "CI", "You", "You (busy elsewhere)", "Idle"]) {
 		assert.ok(html.includes(label), `missing bucket label ${label}`);
 	}
 	assert.match(html, /\d+%/);
 	assert.match(html, /\dh \d+m|\d+m|\d+s/);
 	assert.ok(html.includes("excluded from active time"), "idle must be labelled as excluded from active time");
+});
+
+test("the time section shows the Review row with its share and duration, between Agents and CI/CD", () => {
+	const html = renderTimeSection(agg());
+	const chartStart = html.indexOf('<div class="chart-box">');
+	const chartEnd = html.indexOf("Subagent/advisor work ran");
+	const chartText = html
+		.slice(chartStart, chartEnd)
+		.replace(/<[^>]+>/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const agentsIdx = chartText.indexOf("Agents");
+	const reviewIdx = chartText.indexOf("Review");
+	const ciIdx = chartText.indexOf("CI/CD");
+	assert.ok(agentsIdx !== -1 && reviewIdx !== -1 && ciIdx !== -1, "all three rows must be present");
+	assert.ok(agentsIdx < reviewIdx && reviewIdx < ciIdx, "order must be Agents, Review, CI/CD");
+	assert.ok(chartText.includes("waiting on code review: reviewer agents and MR review polling"), "review row must carry its note");
+	// 400s review of 15700s active = 3%
+	assert.match(chartText, /Review[\s\S]{0,200}?3%[\s\S]{0,100}?7m/);
 });
 
 test("the time section shows the busy-elsewhere row with its share, duration and note, after You and before Idle", () => {
@@ -109,24 +129,38 @@ test("generateTimeHTML sets the title and reuses the report stylesheet", () => {
 	assert.ok(html.includes("2026-10-01"));
 });
 
-test("markdown section has the heading and a row per bucket, including busy-elsewhere with its note", () => {
+test("markdown section has the heading and a row per bucket, including Review and busy-elsewhere with their notes", () => {
 	const md = renderTimeMarkdown(agg());
 	assert.ok(md.startsWith("## Where the Time Goes"));
-	for (const label of ["Model", "Tools", "Agents", "CI", "You", "You (busy elsewhere)", "Idle"]) {
+	for (const label of ["Model", "Tools", "Agents", "Review", "CI", "You", "You (busy elsewhere)", "Idle"]) {
 		assert.ok(md.includes(label), `missing markdown row for ${label}`);
 	}
 	assert.ok(md.includes("waited on you while you worked in another session; not counted as a speed lever"));
+	assert.ok(md.includes("waiting on code review: reviewer agents and MR review polling"));
+	const agentsLine = md.split("\n").findIndex((l) => l.startsWith("| Agents"));
+	const reviewLine = md.split("\n").findIndex((l) => l.startsWith("| Review"));
+	const ciLine = md.split("\n").findIndex((l) => l.startsWith("| CI"));
 	const youLine = md.split("\n").findIndex((l) => l.startsWith("| You |"));
 	const elsewhereLine = md.split("\n").findIndex((l) => l.startsWith("| You (busy elsewhere)"));
 	const idleLine = md.split("\n").findIndex((l) => l.startsWith("| Idle"));
-	assert.ok(youLine !== -1 && elsewhereLine !== -1 && idleLine !== -1);
+	assert.ok(agentsLine !== -1 && reviewLine !== -1 && ciLine !== -1 && youLine !== -1 && elsewhereLine !== -1 && idleLine !== -1);
+	assert.ok(agentsLine < reviewLine && reviewLine < ciLine, "order must be Agents, Review, CI/CD");
 	assert.ok(youLine < elsewhereLine && elsewhereLine < idleLine, "order must be You, You (busy elsewhere), Idle");
 });
 
-test("the widget is at most 10 lines and includes a busy-elsewhere line with share and duration", () => {
+test("the methodology note shows the CI/CD > Review > Agents > Tools > Model > You precedence", () => {
+	const html = renderTimeSection(agg());
+	assert.ok(html.includes("CI/CD &gt; Review &gt; Agents &gt; Tools &gt; Model &gt; You"), "precedence order must be stated in the methodology note");
+});
+
+test("the widget is at most 10 lines and includes Review and busy-elsewhere lines with share and duration", () => {
 	const lines = timeWidgetLines(agg());
 	assert.ok(lines.length <= 10, `expected <=10 lines, got ${lines.length}`);
 	assert.ok(lines[0].length > 0);
+	const reviewLine = lines.find((l) => l.startsWith("Review"));
+	assert.ok(reviewLine, "widget must include a Review line");
+	assert.match(reviewLine!, /\d+%/);
+	assert.match(reviewLine!, /\dh \d+m|\d+m|\d+s/);
 	const elsewhereLine = lines.find((l) => l.startsWith("You (busy elsewhere)"));
 	assert.ok(elsewhereLine, "widget must include a busy-elsewhere line");
 	assert.match(elsewhereLine!, /\d+%/);
