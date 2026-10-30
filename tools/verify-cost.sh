@@ -4,7 +4,7 @@
 #!/usr/bin/env bash
 # Reconcile the report's total cost against the session logs with jq.
 #
-# Reads ~/.omp/agent/usage-data/session-set.json (written by /insights), sums
+# Reads ~/.omp/agent/omp-insights/session-set.json (written by /insights), sums
 # usage.cost.total independently over every included primary log AND its
 # __advisor.jsonl / subagent sidecars, and compares the result with the totals
 # the report claimed. Also verifies each log's size:mtime still matches the
@@ -12,7 +12,7 @@
 # this check cannot be mistaken for a counting bug.
 set -euo pipefail
 
-MANIFEST="${1:-$HOME/.omp/agent/usage-data/session-set.json}"
+MANIFEST="${1:-$HOME/.omp/agent/omp-insights/session-set.json}"
 
 TMPDIR_VC="$(mktemp -d "${TMPDIR:-/tmp}/verify-cost.XXXXXX")"
 trap 'rm -rf "$TMPDIR_VC"' EXIT

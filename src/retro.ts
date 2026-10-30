@@ -10,7 +10,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { DATA_DIR } from "./cache.ts";
+import { DATA_DIR, migrateLegacyDataDir } from "./cache.ts";
 import { readJsonl } from "./sources/omp.ts";
 import { isHumanMessage } from "./stats.ts";
 import { extractTimeSplit } from "./time.ts";
@@ -124,6 +124,12 @@ function pad2(n: number): string {
 	return n < 10 ? `0${n}` : `${n}`;
 }
 
+function formatHeaderDate(now: Date): string {
+	const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+	const time = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
+	return `${date} ${time}`;
+}
+
 function formatDuration(seconds: number): string {
 	const total = Math.max(0, Math.round(seconds));
 	const h = Math.floor(total / 3600);
@@ -131,12 +137,43 @@ function formatDuration(seconds: number): string {
 	return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-/** `<dataDir>/retros/<YYYY-MM-DD>T<HH-MM>_<first 8 chars of session id>.md`, local time. */
-export function buildRetroPath(dataDir: string, now: Date, sessionId: string): string {
+/**
+ * Project slug for the retro filename and header: derived from the session
+ * header record's `cwd`. A worktree path (`.worktrees/<name>` or
+ * `.orca/worktrees/<name>`) collapses to `<repo>-<worktree name>`; any other
+ * path uses its last segment. Lowercased, non [a-z0-9] runs become `-`,
+ * trimmed and capped at 40 chars; empty/missing input is "unknown".
+ */
+export function slugifyProject(cwd: string | undefined): string {
+	if (!cwd) return "unknown";
+	const segments = cwd.split("/").filter((s) => s.length > 0);
+	let raw: string | undefined;
+	for (let i = 0; i < segments.length; i++) {
+		if (segments[i] === ".worktrees" && i > 0 && i + 1 < segments.length) {
+			raw = `${segments[i - 1]}-${segments[i + 1]}`;
+			break;
+		}
+		if (segments[i] === ".orca" && segments[i + 1] === "worktrees" && i > 0 && i + 2 < segments.length) {
+			raw = `${segments[i - 1]}-${segments[i + 2]}`;
+			break;
+		}
+	}
+	if (raw === undefined) raw = segments.length > 0 ? segments[segments.length - 1] : "";
+	const slug = raw
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 40);
+	return slug.length > 0 ? slug : "unknown";
+}
+
+/** `<dataDir>/retros/<YYYY-MM-DD>T<HH-MM>_<project>_<last 8 chars of session id>.md`, local time. */
+export function buildRetroPath(dataDir: string, now: Date, sessionId: string, project: string): string {
 	const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
 	const time = `${pad2(now.getHours())}-${pad2(now.getMinutes())}`;
-	const shortId = (sessionId || "unknown").slice(0, 8);
-	return join(dataDir, "retros", `${date}T${time}_${shortId}.md`);
+	const id = sessionId || "unknown";
+	const shortId = id === "unknown" ? "unknown" : id.slice(-8);
+	return join(dataDir, "retros", `${date}T${time}_${project}_${shortId}.md`);
 }
 
 const BUCKET_ORDER: TimeBucket[] = ["model", "tools", "agents", "review", "ci", "you", "elsewhere", "idle"];
@@ -164,6 +201,10 @@ export type RetroRequestData = {
 	toolCalls: number;
 	toolErrors: number;
 	split: SessionTimeSplit;
+	now: Date;
+	project: string;
+	sessionId: string;
+	cwd: string;
 };
 
 /**
@@ -184,7 +225,14 @@ export function buildRetroContext(data: RetroRequestData, retroPath: string): st
 		topCommandFamilies(data.split),
 		"",
 		"## Instructions",
-		`Write a short retro to ${retroPath} (the directory already exists). The retro file must have these sections:`,
+		`Write a short retro to ${retroPath} (the directory already exists). The retro file must start with these lines verbatim (values already filled in):`,
+		`# Retro ${formatHeaderDate(data.now)} - ${data.project}`,
+		"",
+		`Session: ${data.sessionId}`,
+		`Reopen: omp -r ${data.sessionId}`,
+		`Project: ${data.cwd}`,
+		"",
+		"Then these sections:",
 		"- What went well",
 		"- What went badly",
 		"- Biggest time sink (quote the numbers above)",
@@ -208,7 +256,7 @@ export function buildRetroContext(data: RetroRequestData, retroPath: string): st
 export async function buildRetroResult(
 	event: SessionStopEvent,
 	ctx: SessionStopContext,
-	options: { dataDir: string; now: () => number; env: Record<string, string | undefined> },
+	options: { dataDir: string; now: () => number; env: Record<string, string | undefined>; migrate?: boolean },
 ): Promise<SessionStopResult | undefined> {
 	if (event.stop_hook_active) return undefined;
 	if (ctx.hasUI === false) return undefined;
@@ -237,11 +285,19 @@ export async function buildRetroResult(
 
 	const sessionId = typeof event.session_id === "string" && event.session_id ? event.session_id : "unknown";
 	const split = extractTimeSplit(requestEntries, sessionId, "");
-	const retroPath = buildRetroPath(options.dataDir, new Date(nowMs), sessionId);
+	const header = entries.find((e) => e.type === "session") as { cwd?: unknown } | undefined;
+	const cwd = typeof header?.cwd === "string" ? header.cwd : "";
+	const project = slugifyProject(cwd || undefined);
+	const now = new Date(nowMs);
+	const retroPath = buildRetroPath(options.dataDir, now, sessionId, project);
 
+	if (options.migrate) await migrateLegacyDataDir();
 	await mkdir(join(options.dataDir, "retros"), { recursive: true });
 
-	const additionalContext = buildRetroContext({ wallClockMinutes, toolCalls, toolErrors, split }, retroPath);
+	const additionalContext = buildRetroContext(
+		{ wallClockMinutes, toolCalls, toolErrors, split, now, project, sessionId, cwd },
+		retroPath,
+	);
 	return { continue: true, additionalContext };
 }
 
@@ -251,9 +307,10 @@ export default function (pi: RetroExtensionAPI, options: RetroOptions = {}): voi
 	const dataDir = options.dataDir ?? DATA_DIR;
 	const now = options.now ?? Date.now;
 	const env = options.env ?? process.env;
+	const migrate = options.dataDir === undefined;
 	pi.on("session_stop", async (event, ctx) => {
 		try {
-			return await buildRetroResult(event, ctx, { dataDir, now, env });
+			return await buildRetroResult(event, ctx, { dataDir, now, env, migrate });
 		} catch {
 			return undefined;
 		}

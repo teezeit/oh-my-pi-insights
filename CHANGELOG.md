@@ -13,6 +13,17 @@ package identity that does not exist, since this targets a different harness.
 
 ### Changed
 
+- **Data folder named after the plugin.** Everything moved from
+  `~/.omp/agent/usage-data/` to `~/.omp/agent/omp-insights/` (still per
+  profile). The first run renames the old folder in place, so caches,
+  reports and retros carry over and nothing is recomputed. When both
+  folders exist, neither is touched. `tools/verify-cost.sh` reads the
+  manifest from the new path.
+- **Retro file names say which project and session.** Retros are named
+  `<date>T<time>_<project>_<last 8 chars of the session id>.md` (worktrees
+  read as `<repo>-<worktree>`), and each file starts with the full session
+  id and `omp -r <id>` to reopen it. The old short id (first 8 characters)
+  was shared by sessions started around the same minute.
 - **Retro prompt names no issue number.** The hidden retro instruction no
   longer says "(issue #21)", so retros don't cite this repo's issue tracker.
 

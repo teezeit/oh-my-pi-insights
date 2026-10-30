@@ -21,7 +21,7 @@
  *   /insights --no-open   - don't open the report in the browser
  *   /insights --since 7d  - restrict the corpus to the last 7 days
  *
- * Data dir: ~/.omp/agent/usage-data/
+ * Data dir: ~/.omp/agent/omp-insights/
  *   session-meta/<id>.json   deterministic stats, cached permanently
  *   facets/<id>.json         LLM-extracted facets, cached permanently
  *   report.html              last generated report
@@ -45,11 +45,13 @@ import {
 	ensureDirs,
 	FACETS_DIR,
 	isSafeSessionId,
+	LEGACY_DATA_DIR_NAME,
 	loadCachedFacets,
 	loadCachedSections,
 	loadCachedMeta,
 	loadLatestSections,
 	META_DIR,
+	migrateLegacyDataDir,
 	pruneSections,
 	resolveAgentDir,
 	REPORT_MD_PATH,
@@ -113,6 +115,7 @@ import retroExtension, {
 	buildRetroContext,
 	buildRetroPath,
 	buildRetroResult,
+	slugifyProject,
 	countToolCalls,
 	countToolErrors,
 	findLastHumanMessage,
@@ -1091,6 +1094,8 @@ export {
 	isSafeSessionId,
 	FACETS_DIR,
 	META_DIR,
+	LEGACY_DATA_DIR_NAME,
+	migrateLegacyDataDir,
 	resolveLimit,
 	resolveProjectList,
 	saveHarnessSnapshot,
@@ -1098,6 +1103,7 @@ export {
 	retroExtension,
 	buildRetroContext,
 	buildRetroPath,
+	slugifyProject,
 	buildRetroResult,
 	countToolCalls,
 	countToolErrors,

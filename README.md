@@ -24,8 +24,8 @@ omp plugin doctor          # verifies the install
 
 Always install from the tag, not `#main`: `main` moves. To update, re-run the
 install with the newer tag. To remove: `omp plugin uninstall @teezeit/omp-insights`
-(the caches under `~/.omp/agent/usage-data/` stay; delete that folder too for a
-clean slate).
+(the data under `~/.omp/agent/omp-insights/` stays; delete that folder too for
+a clean slate).
 
 From a checkout instead: `omp -e ./index.ts` (one session, no install) or
 `omp plugin link .` (links the checkout).
@@ -35,9 +35,9 @@ From a checkout instead: `omp -e ./index.ts` (one session, no install) or
 1. Start omp in any project and run `/insights`. The first run reads every
    session and classifies up to 50 of them, so it takes minutes, not seconds.
 2. The report opens in your browser; it is also at
-   `~/.omp/agent/usage-data/report.html`. Add `--md` for a Markdown copy.
+   `~/.omp/agent/omp-insights/report.html`. Add `--md` for a Markdown copy.
    Each run overwrites that file and also keeps a timestamped copy in
-   `~/.omp/agent/usage-data/reports/`.
+   `~/.omp/agent/omp-insights/reports/`.
 3. Re-render without any model calls: `/insights --no-llm`.
 4. Feedback: open an issue on this repository with the report section, what
    you expected, and (if relevant) a screenshot. Do not attach `report.html`
@@ -131,7 +131,7 @@ Added or changed, and why:
   first split into chunks and each chunk is summarized by the `smol` role
   model before the session is classified.
 - **What stays local:** the report, all caches and the audit manifest under
-  `~/.omp/agent/usage-data/`. Session logs are only read, never written.
+  `~/.omp/agent/omp-insights/`. Session logs are only read, never written.
 - **What it costs:** one smol call per not-yet-classified session (capped by
   `--max-facets`, default 50) plus 9 calls on your active model. Re-runs reuse
   cached classifications; `--no-llm` costs nothing. The dollar cost depends on
@@ -160,7 +160,7 @@ Added or changed, and why:
 ### Where did the time go: `/insights time`
 
 ```
-/insights time                     # last 14 days, opens usage-data/time.html
+/insights time                     # last 14 days, opens omp-insights/time.html
 /insights time --session current   # only this session
 /insights time --since 3d --explain --no-open
 ```
@@ -198,7 +198,7 @@ Off by default. When enabled, a request that ran 30+ minutes or made 100+
 tool calls ends with a short retro instead of stopping right away: what went
 well, what went badly, where that request's time went (same breakdown as
 `/insights time`), and improvement proposals (rules, hooks, skills, config,
-workflow). The full retro is written to `usage-data/retros/`; the chat shows
+workflow). The full retro is written to `omp-insights/retros/`; the chat shows
 three lines: the biggest time sink, the top proposal and the file path. It
 only proposes and never edits anything. It costs one extra model turn per big
 request, and skips subagents, headless runs and requests you aborted.
@@ -287,7 +287,7 @@ Two caveats:
 Every run writes an audit manifest next to the report:
 
 ```
-~/.omp/agent/usage-data/session-set.json
+~/.omp/agent/omp-insights/session-set.json
 ```
 
 It lists the exact session set, per-session cost split by class, each sidecar
@@ -311,8 +311,10 @@ $ ./tools/verify-cost.sh
 ## Data layout
 
 Read-only against `~/.omp/agent/sessions`. Results are cached in
-`~/.omp/agent/usage-data/` (under the active profile's agent directory when
-`OMP_PROFILE` or `PI_CODING_AGENT_DIR` is set):
+`~/.omp/agent/omp-insights/` (under the active profile's agent directory when
+`OMP_PROFILE` or `PI_CODING_AGENT_DIR` is set). Versions up to 0.1.0-rc.2
+used `~/.omp/agent/usage-data/`; the first run renames that folder, so caches,
+reports and retros carry over without recomputing anything:
 
 | Path | Contents |
 |------|----------|
@@ -325,7 +327,7 @@ Read-only against `~/.omp/agent/sessions`. Results are cached in
 | `reports/report-<timestamp>.html` / `.md` | Copy of every generated report, never overwritten or pruned |
 | `time.html` | Last `/insights time` page |
 | `reports/time-<timestamp>.html` | Copy of every `/insights time` page |
-| `retros/<date>T<time>_<session>.md` | End-of-work retros (only with the optional `retro` feature) |
+| `retros/<date>T<time>_<project>_<id>.md` | End-of-work retros (only with the optional `retro` feature); `<id>` is the last 8 characters of the session id, and the file starts with the full id and `omp -r <id>` to reopen it |
 | `session-set.json` | Audit manifest for the last run |
 
 ## Requirements

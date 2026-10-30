@@ -154,14 +154,14 @@ test("the run writes a report over the fixture corpus", async () => {
 	await host.run("--md --no-open --no-llm");
 
 	const report = await readFile(
-		join(home, ".omp", "agent", "usage-data", "report.md"),
+		join(home, ".omp", "agent", "omp-insights", "report.md"),
 		"utf-8",
 	);
 	assert.match(report, /# omp Insights/);
 	assert.match(report, /\| Total Cost \| \$2\.00 \|/);
 
 	const manifest = JSON.parse(
-		await readFile(join(home, ".omp", "agent", "usage-data", "session-set.json"), "utf-8"),
+		await readFile(join(home, ".omp", "agent", "omp-insights", "session-set.json"), "utf-8"),
 	) as { totals: { cost: number; sessions: number }; sessions: Array<{ session_id: string }> };
 	assert.equal(manifest.totals.sessions, 1);
 	assert.equal(manifest.totals.cost, 2);

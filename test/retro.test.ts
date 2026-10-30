@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import {
+	buildRetroPath,
 	retroExtension,
+	slugifyProject,
 	type RetroExtensionAPI,
 	type SessionStopContext,
 	type SessionStopEvent,
@@ -21,7 +23,7 @@ let dataDir: string;
 
 before(async () => {
 	root = await mkdtemp(join(tmpdir(), "omp-insights-retro-"));
-	dataDir = join(root, "usage-data");
+	dataDir = join(root, "omp-insights");
 	await mkdir(dataDir, { recursive: true });
 });
 
@@ -39,6 +41,10 @@ function humanEntry(at: Date, text = "do the thing"): Record<string, unknown> {
 		timestamp: ts(at),
 		message: { role: "user", attribution: "user", content: text },
 	};
+}
+
+function sessionHeaderEntry(at: Date, cwd: string, id = SID): Record<string, unknown> {
+	return { type: "session", id, timestamp: ts(at), cwd };
 }
 
 function assistantEntry(at: Date, toolCallCount: number): Record<string, unknown> {
@@ -218,4 +224,49 @@ test("only entries after the last human message count toward the trigger", async
 
 	const result = await host.run({ session_id: SID, session_file: file });
 	assert.equal(result, undefined, "the earlier long request must not trigger the retro for the current short one");
+});
+
+test("slugifyProject: worktree and plain paths, special chars, missing cwd", () => {
+	assert.equal(slugifyProject("/x/peach/.worktrees/develop-content"), "peach-develop-content");
+	assert.equal(slugifyProject("/x/oh-my-pi-insights/.orca/worktrees/port-stage-1"), "oh-my-pi-insights-port-stage-1");
+	assert.equal(slugifyProject("/x/tobias/oh-my-pi-insights"), "oh-my-pi-insights");
+	assert.equal(slugifyProject("/x/My Repo!/"), "my-repo");
+	assert.equal(slugifyProject(undefined), "unknown");
+	assert.equal(slugifyProject(""), "unknown");
+});
+
+test("buildRetroPath: date, project and last-8-chars session id suffix", () => {
+	const now = new Date(2026, 9, 30, 18, 1, 0);
+	const id = "01a18dc2-061e-73d8-a2bc-0b1f5d4f9ebf";
+	const path = buildRetroPath("/data", now, id, "peach-develop-content");
+	assert.equal(path, join("/data", "retros", "2026-10-30T18-01_peach-develop-content_5d4f9ebf.md"));
+});
+
+test("buildRetroPath: missing session id falls back to unknown", () => {
+	const now = new Date(2026, 9, 30, 18, 1, 0);
+	const path = buildRetroPath("/data", now, "", "unknown");
+	assert.equal(path, join("/data", "retros", "2026-10-30T18-01_unknown_unknown.md"));
+});
+
+test("retro path and header pick up the project slug and full session id from the session's cwd", async () => {
+	const humanAt = new Date("2026-10-30T18:00:00.000Z");
+	const nowMs = humanAt.getTime() + 40 * 60_000;
+	const fullId = "01a18dc2-061e-73d8-a2bc-0b1f5d4f9ebf";
+	const entries = [
+		sessionHeaderEntry(humanAt, "/x/peach/.worktrees/develop-content", fullId),
+		humanEntry(humanAt),
+		assistantEntry(new Date(humanAt.getTime() + 60_000), 5),
+	];
+	const file = await writeSession("req-project-header", entries);
+
+	const host = fakeHost();
+	retroExtension(host.pi, { dataDir, now: () => nowMs, env: {} });
+
+	const result = await host.run({ session_id: fullId, session_file: file });
+	assert.ok(result, "expected a retro result");
+	assert.match(result!.additionalContext, /retros[\\/].*peach-develop-content_5d4f9ebf\.md/);
+	assert.match(result!.additionalContext, new RegExp(`Session: ${fullId}`));
+	assert.match(result!.additionalContext, new RegExp(`Reopen: omp -r ${fullId}`));
+	assert.match(result!.additionalContext, /Project: \/x\/peach\/\.worktrees\/develop-content/);
+	assert.match(result!.additionalContext, /# Retro \d{4}-\d{2}-\d{2} \d{2}:\d{2} - peach-develop-content/);
 });

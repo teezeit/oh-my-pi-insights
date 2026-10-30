@@ -46,7 +46,7 @@ Patterns to preserve:
 - `SessionSource` interface abstracts omp vs Claude layouts; add new sources as factories, not branches in the orchestrator.
 - Sidecars (`__advisor.jsonl`, subagent logs under `TIMESTAMP_SESSION-ID/`) are folded into the parent as `cost_primary/cost_advisor/cost_subagent`; never surface them as top-level sessions. Spill files (`*.bash.log`, `*.read.log`, `*.eval.log`) are ignored.
 - Cost is read from explicit `usage.cost.total`; tool errors from boolean `toolResult.isError`. Do not reintroduce price tables or regex error bucketing (deleted Pi workarounds).
-- Three cache tiers under `~/.omp/agent/usage-data/`: `session-meta/<source>-<id>.json` (size:mtime signature), `facets/<id>.json` (cleared by `--refresh`), `sections/<hash>.json` (newest 5 kept).
+- Three cache tiers under `~/.omp/agent/omp-insights/` (renamed from `usage-data/` on first run by `migrateLegacyDataDir`): `session-meta/<source>-<id>.json` (size:mtime signature), `facets/<id>.json` (cleared by `--refresh`), `sections/<hash>.json` (newest 5 kept).
 - Re-run without `--refresh` must make zero facet LLM calls; `--no-llm` renders from cache with zero spend.
 - `gatherUserContext` must return the user's real skills (both `skills/` and `managed-skills/`, >= 50 on a typical install), extensions, and default model. A report recommending an already-installed skill is a bug.
 

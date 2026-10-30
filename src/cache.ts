@@ -6,7 +6,7 @@
 // On-disk cache: session-meta, facets and generated sections, plus the
 // data-directory layout every other module reads from.
 
-import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { normalizeFrictionCounts } from "./aggregate.ts";
@@ -41,7 +41,8 @@ export function resolveAgentDir(
 
 export const AGENT_DIR = resolveAgentDir(process.env, homedir());
 export const SESSIONS_DIR = join(AGENT_DIR, "sessions");
-export const DATA_DIR = join(AGENT_DIR, "usage-data");
+export const LEGACY_DATA_DIR_NAME = "usage-data";
+export const DATA_DIR = join(AGENT_DIR, "omp-insights");
 export const FACETS_DIR = join(DATA_DIR, "facets");
 export const META_DIR = join(DATA_DIR, "session-meta");
 export const SECTIONS_DIR = join(DATA_DIR, "sections");
@@ -55,7 +56,38 @@ export const REPORTS_DIR = join(DATA_DIR, "reports");
 // overwritten-plus-timestamped-copy pattern as REPORT_PATH/REPORTS_DIR.
 export const TIME_REPORT_PATH = join(DATA_DIR, "time.html");
 
+/**
+ * The plugin's whole data folder was renamed from `usage-data` to
+ * `omp-insights`. On first run after the upgrade, move the old folder in
+ * place so every cache, report and retro survives without recompute or
+ * extra model cost. Never throws: races with a concurrent migration
+ * (ENOENT/EEXIST/ENOTEMPTY) and any other rename failure (e.g. the agent
+ * dir path being a file) resolve to "none" rather than surfacing an error.
+ */
+export async function migrateLegacyDataDir(agentDir: string = AGENT_DIR): Promise<"migrated" | "none"> {
+	const legacyDir = join(agentDir, LEGACY_DATA_DIR_NAME);
+	const newDir = join(agentDir, "omp-insights");
+	try {
+		await stat(newDir);
+		return "none";
+	} catch {
+		// newDir does not exist (or is unreachable); fall through to migrate.
+	}
+	try {
+		await stat(legacyDir);
+	} catch {
+		return "none";
+	}
+	try {
+		await rename(legacyDir, newDir);
+		return "migrated";
+	} catch {
+		return "none";
+	}
+}
+
 export async function ensureDirs(): Promise<void> {
+	await migrateLegacyDataDir();
 	await mkdir(META_DIR, { recursive: true });
 	await mkdir(FACETS_DIR, { recursive: true });
 	await mkdir(SECTIONS_DIR, { recursive: true });
