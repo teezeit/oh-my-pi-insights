@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { aggregateData, buildSessionMeta, computeTemporalData, generateHTML } from "../index.ts";
+import { meta } from "./helpers.ts";
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "d-sections.json");
 
@@ -79,6 +80,31 @@ test("changes render as a non-collapsible 'Since Last Report' block inside Summa
 	assert.doesNotMatch(html, /id="what-changed"/);
 });
 
+test("a model change produces exactly one model-shift line in the rendered HTML summary", async () => {
+	const sections = JSON.parse(await readFile(FIXTURE, "utf-8"));
+	const day = (d: number) => new Date(Date.UTC(2026, 8, d, 9)).toISOString();
+	const withModel = (id: string, d: number, model: string) =>
+		meta({
+			session_id: id,
+			start_time: day(d),
+			total_cost: 10,
+			cost_primary: 10,
+			model_usage: { [model]: { input_tokens: 1, output_tokens: 1, cost: 10, message_count: 1 } },
+		});
+	const metas = [];
+	for (let d = 1; d <= 10; d++) metas.push(withModel(`old${d}`, d, "openai/gpt-5.5"));
+	for (let d = 11; d <= 20; d++) metas.push(withModel(`new${d}`, d, "anthropic/claude-opus-5"));
+
+	const agg = aggregateData(metas, new Map());
+	const temporal = computeTemporalData(metas, new Map());
+	const html = generateHTML(agg, sections, {}, temporal);
+
+	const block = html.match(/<div class="at-a-glance-part since-last-report">[\s\S]*?<\/div>/);
+	assert.ok(block, "Since Last Report block not found");
+	const shiftMentions = (block![0].match(/shifted/gi) ?? []).length;
+	assert.equal(shiftMentions, 1, `expected exactly one model-shift line, got: ${block![0]}`);
+});
+
 test("copyable prompts are shown directly, not behind a toggle", async () => {
 	const html = await buildFixtureHtml();
 	assert.match(html, /<div class="copy-box">Scout src\/render for every call site of generateHTML before editing\.<\/div>/);
@@ -145,4 +171,39 @@ test("a friction card's type is a pill that links to its row in the Friction Typ
 	// A type the chart does not show stays a pill but is not a dead link.
 	assert.match(html, /<span class="category-pill friction">Novel Thing<\/span>/);
 	assert.doesNotMatch(html, /href="#friction-type-novel-thing"/);
+});
+
+test("a friction type still present in agg.friction is not rendered under Resolved, even though the chart still shows it", async () => {
+	const prevSections = { friction_analysis: { ongoing: [{ category: "Wrong Approach", description: "d", examples: [] }] } };
+	const sections = { friction_analysis: { ongoing: [{ category: "Other Thing", description: "d", examples: [] }] } };
+	const agg = { ...aggregateData([], new Map()), friction: { wrong_approach: 14 } };
+	const html = generateHTML(agg, sections, {}, computeTemporalData([], new Map()), { prevSections });
+
+	// The chart still shows it (same deterministic data Resolved must agree with).
+	assert.match(html, /id="friction-type-wrong-approach"/);
+	// But it must not be claimed resolved: the reportDiff-derived "not in this
+	// run's friction list anymore" phrasing never fires, and no Resolved
+	// block names it.
+	assert.ok(!html.includes("not in this run's friction list anymore"));
+	assert.equal(html.indexOf(">Resolved<"), -1, "no Resolved section should render when nothing clears the agg.friction gate");
+});
+
+test("a resolved category whose slug contains a current friction slug as a token run is still treated as present (free-form LLM labels)", async () => {
+	const sections = {
+		friction_analysis: {
+			resolved: [
+				{ category: "User Rejected Action / destructive overreach", note: "no longer happens" },
+				{ category: "Flaky Test Retries", note: "fixed the CI timeout" },
+			],
+		},
+	};
+	const agg = { ...aggregateData([], new Map()), friction: { user_rejected_action: 3 } };
+	const html = generateHTML(agg, sections, {}, computeTemporalData([], new Map()));
+
+	// Still present, loosely matched against the chart's slug "user-rejected-
+	// action" as a token run (not exact slug equality): must not render under
+	// Resolved.
+	assert.ok(!html.includes("no longer happens"), "still-present type must not render under Resolved");
+	// Genuinely absent from agg.friction: still renders as resolved.
+	assert.ok(html.includes("fixed the CI timeout"), "genuinely absent type must still render under Resolved");
 });

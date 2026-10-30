@@ -47,11 +47,15 @@ export const SECTIONS_DIR = join(DATA_DIR, "sections");
 export const REPORT_PATH = join(DATA_DIR, "report.html");
 export const REPORT_MD_PATH = join(DATA_DIR, "report.md");
 export const SESSION_SET_PATH = join(DATA_DIR, "session-set.json");
+// Why: report.html is overwritten every run; each run also keeps a
+// timestamped copy here so earlier reports stay readable.
+export const REPORTS_DIR = join(DATA_DIR, "reports");
 
 export async function ensureDirs(): Promise<void> {
 	await mkdir(META_DIR, { recursive: true });
 	await mkdir(FACETS_DIR, { recursive: true });
 	await mkdir(SECTIONS_DIR, { recursive: true });
+	await mkdir(REPORTS_DIR, { recursive: true });
 }
 
 // Cache entries predating the friction-signal / per-turn / per-tool-wall-clock
@@ -67,7 +71,13 @@ export async function ensureDirs(): Promise<void> {
 // (same record ids, same cost); every cached fork meta built before this
 // version double-counted that shared prefix. The bump forces every cached
 // meta to recompute once so forks pick up the dedupe, not just new sessions.
-export const META_SCHEMA_VERSION = 7;
+//
+// v8: omp also copies the parent's subagent/advisor sidecar logs byte for
+// byte into a fork's sidecar directory. v7 deduped the primary log by
+// record id but left sidecars folded in full, double-counting
+// cost_subagent (and sidecar tokens/tool calls/errors). The bump forces
+// cached fork metas to recompute with sidecar dedupe applied.
+export const META_SCHEMA_VERSION = 8;
 
 export async function loadCachedMeta(
 	sourceName: string,

@@ -19,8 +19,9 @@
 
 import { createHash } from "node:crypto";
 import { readdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { listDirNames, parseSimpleYaml, yamlMap } from "./context.ts";
+import { discoverSkillNames, listDirNames, parseSimpleYaml, userSkillRoots, yamlMap } from "./context.ts";
 import type { HarnessChange } from "./types.ts";
 
 export type HarnessSnapshot = {
@@ -136,8 +137,12 @@ async function readMemoryBackend(cfg: ReturnType<typeof parseSimpleYaml>): Promi
 	return typeof backend === "string" && backend ? backend : "off";
 }
 
-/** Reads the live harness state from an omp agent dir (defaults to the real one; tests pass a temp dir). */
-export async function gatherHarnessSnapshot(agentDir: string): Promise<HarnessSnapshot> {
+/** Reads the live harness state from an omp agent dir (defaults to the real one and the real home/cwd; tests pass temp dirs). */
+export async function gatherHarnessSnapshot(
+	agentDir: string,
+	home: string = homedir(),
+	cwd: string = process.cwd(),
+): Promise<HarnessSnapshot> {
 	let configText = "";
 	try {
 		configText = await readFile(join(agentDir, "config.yml"), "utf-8");
@@ -154,10 +159,11 @@ export async function gatherHarnessSnapshot(agentDir: string): Promise<HarnessSn
 		}
 	}
 
-	const skills = [
-		...(await listDirNames(join(agentDir, "skills"), "dirs")),
-		...(await listDirNames(join(agentDir, "managed-skills"), "dirs")),
-	].sort();
+	// omp loads skills from more roots than just the agent dir (see
+	// omp://skills.md); the snapshot tracks every root the user's report
+	// surfaces, so a skill added only under ~/.agents/skills still shows up
+	// as a harness change.
+	const skills = await discoverSkillNames([...userSkillRoots(agentDir, home, cwd), join(agentDir, "managed-skills")]);
 
 	const hooks: string[] = [];
 	try {

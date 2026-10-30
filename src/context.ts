@@ -7,7 +7,8 @@
 // mcp.json, global instructions) so the report never suggests what already
 // exists.
 
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENT_DIR } from "./cache.ts";
@@ -115,7 +116,51 @@ export async function listDirNames(
 	}
 }
 
-export async function gatherUserContext(): Promise<UserContext> {
+/**
+ * omp loads skills from more than one root: the native agent-dir `skills/`
+ * and `managed-skills/`, plus `~/.agents/skills`, `~/.claude/skills`, and
+ * the equivalent project-level `.agents/skills`, `.omp/skills`,
+ * `.claude/skills` under the session's cwd (see omp://skills.md). A skill
+ * is a directory - or a symlink to one, e.g. `~/.claude/skills/<name>` is
+ * commonly a symlink into `~/.agents/skills` - containing `SKILL.md`
+ * directly inside it. `stat` on the joined `SKILL.md` path follows that
+ * symlink chain for free, so entry type never needs to be checked
+ * separately. Names are deduped (a skill reachable from two roots counts
+ * once) and sorted.
+ */
+export async function discoverSkillNames(roots: string[]): Promise<string[]> {
+	const names = new Set<string>();
+	for (const root of roots) {
+		let entries: Dirent[];
+		try {
+			entries = await readdir(root, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (entry.name.startsWith(".")) continue;
+			try {
+				const info = await stat(join(root, entry.name, "SKILL.md"));
+				if (info.isFile()) names.add(entry.name);
+			} catch {}
+		}
+	}
+	return [...names].sort();
+}
+
+/** The roots omp discovers skills from (see `discoverSkillNames`), split by whether a skill there belongs to the user's authored set or the agent-dir-only managed (autolearn) set. */
+export function userSkillRoots(agentDir: string, home: string, cwd: string): string[] {
+	return [
+		join(agentDir, "skills"),
+		join(home, ".agents", "skills"),
+		join(home, ".claude", "skills"),
+		join(cwd, ".agents", "skills"),
+		join(cwd, ".omp", "skills"),
+		join(cwd, ".claude", "skills"),
+	];
+}
+
+export async function gatherUserContext(home: string = homedir(), cwd: string = process.cwd()): Promise<UserContext> {
 	const ctx: UserContext = {
 		existing_agents_md_rules: [],
 		installed_skills: [],
@@ -134,7 +179,7 @@ export async function gatherUserContext(): Promise<UserContext> {
 	// Global instructions. omp has no ~/.omp/agent/AGENTS.md; the user-level
 	// identity file is ~/.claude/CLAUDE.md, and AGENTS.md files are per project.
 	for (const file of [
-		join(homedir(), ".claude", "CLAUDE.md"),
+		join(home, ".claude", "CLAUDE.md"),
 		join(AGENT_DIR, "AGENTS.md"),
 	]) {
 		try {
@@ -188,9 +233,12 @@ export async function gatherUserContext(): Promise<UserContext> {
 	} catch {}
 
 	// Both skill dirs matter: a suggestion recommending an already-installed
-	// skill is a bug, and most skills live under managed-skills/.
-	ctx.installed_skills = await listDirNames(join(AGENT_DIR, "skills"), "dirs");
-	ctx.installed_managed_skills = await listDirNames(join(AGENT_DIR, "managed-skills"), "dirs");
+	// skill is a bug, and most skills live under managed-skills/. The native
+	// skills/ root is joined with the user's ~/.agents/skills, ~/.claude/skills
+	// and the equivalent project-level roots under cwd (see omp://skills.md),
+	// since omp loads skills from all of them, not just the agent dir.
+	ctx.installed_skills = await discoverSkillNames(userSkillRoots(AGENT_DIR, home, cwd));
+	ctx.installed_managed_skills = await discoverSkillNames([join(AGENT_DIR, "managed-skills")]);
 	ctx.installed_extensions = await listDirNames(join(AGENT_DIR, "extensions"), "files", [".ts", ".js"]);
 
 	try {

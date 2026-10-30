@@ -379,6 +379,8 @@ export type TemporalDelta = {
 	/** pct is rounded to a whole percent; before/after are per-session means. */
 	cost_per_session: { before: number; after: number; pct: number };
 	errors_per_session: { before: number; after: number; pct: number };
+	/** True when either window has fewer than MIN_WINDOW_SESSIONS (src/temporal.ts): a 10-vs-10 swing is noise, not a trend, so the cost/error pct must not be surfaced as a headline. */
+	insufficient: boolean;
 };
 
 /** A detected change to the harness itself between two run snapshots (config, model roles, skills, hooks, AGENTS.md). */

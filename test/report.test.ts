@@ -69,7 +69,7 @@ test("aggregate totals equal the sum of the per-session buckets", () => {
 	assert.deepEqual(agg.outcomes, {});
 });
 
-test("weekly diff reports a model shift and gates small cost moves", () => {
+test("a model shift is reported exactly once (major_transition only) and gates small cost moves", () => {
 	const day = (d: number) => new Date(Date.UTC(2026, 8, d, 9)).toISOString();
 	const withModel = (id: string, start: string, model: string, cost: number) =>
 		meta({
@@ -80,20 +80,25 @@ test("weekly diff reports a model shift and gates small cost moves", () => {
 			model_usage: { [model]: { input_tokens: 1, output_tokens: 1, cost, message_count: 1 } },
 		});
 
-	const temporal = computeTemporalData(
-		[
-			withModel("old1", day(1), "openai/gpt-5.5", 10),
-			withModel("old2", day(2), "openai/gpt-5.5", 10),
-			withModel("new1", day(10), "anthropic/claude-opus-5", 10),
-		],
-		new Map(),
-	);
+	const metas = [];
+	for (let d = 1; d <= 10; d++) metas.push(withModel(`old${d}`, day(d), "openai/gpt-5.5", 10));
+	for (let d = 11; d <= 20; d++) metas.push(withModel(`new${d}`, day(d), "anthropic/claude-opus-5", 10));
+
+	const temporal = computeTemporalData(metas, new Map());
 
 	assert.ok(
-		temporal.diff_headlines.some((h) => h.includes("gpt-5.5") && h.includes("claude-opus-5")),
-		`expected a model-shift headline, got ${JSON.stringify(temporal.diff_headlines)}`,
+		temporal.major_transition?.what.includes("gpt-5.5") && temporal.major_transition?.what.includes("claude-opus-5"),
+		`expected a model-shift transition, got ${JSON.stringify(temporal.major_transition)}`,
 	);
-	// Cost is flat, so the >15% noise gate must suppress a cost headline.
+	// At most one model-shift statement: the calendar-week "Model shifted: X -> Y"
+	// headline (computed a different way than major_transition, and able to name a
+	// different pair of models for the same corpus) must not also appear.
+	assert.equal(
+		temporal.diff_headlines.filter((h) => h.toLowerCase().includes("model shifted")).length,
+		0,
+	);
+	// Cost is flat, so there is nothing to call a trend even once the sample
+	// size clears MIN_WINDOW_SESSIONS.
 	assert.equal(
 		temporal.diff_headlines.some((h) => h.startsWith("Cost")),
 		false,

@@ -136,7 +136,9 @@ export function buildFacts(agg: AggregatedData, temporal: TemporalData): Fact[] 
 	}
 
 	const d = temporal.delta;
-	if (d) {
+	// Why: below MIN_WINDOW_SESSIONS (src/temporal.ts) the delta is noise, not
+	// a finding - do not hand the model a fact it can quote as a trend.
+	if (d && !d.insufficient) {
 		const w = `${d.before.start}..${d.before.end} vs ${d.after.start}..${d.after.end}`;
 		const n = d.before.sessions + d.after.sessions;
 		add("delta.cost_per_session", d.cost_per_session.pct, "pct", `change in mean cost per session (${d.basis})`, n, "sessions", w);

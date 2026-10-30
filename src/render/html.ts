@@ -98,6 +98,26 @@ export function categorySlug(key: string): string {
 	return displayLabel(key).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
+/** True if `category` (an LLM-written, free-form friction label) still
+ * names one of the current run's friction types - either exactly, or as a
+ * more specific sub-type whose slug contains a current slug as a whole,
+ * contiguous run of hyphen-delimited tokens (e.g. the LLM's
+ * "User Rejected Action / destructive overreach" still counts as the
+ * chart's "user_rejected_action": its slug "user-rejected-action-
+ * destructive-overreach" contains "user-rejected-action" as a token run).
+ * A "resolved" claim must match this loosely, not by exact slug equality -
+ * the LLM rarely repeats a category label verbatim between runs. */
+export function categoryStillInFriction(category: string, currentFrictionSlugs: Set<string>): boolean {
+	const categoryTokens = categorySlug(category).split("-");
+	for (const currentSlug of currentFrictionSlugs) {
+		const currentTokens = currentSlug.split("-");
+		for (let i = 0; i <= categoryTokens.length - currentTokens.length; i++) {
+			if (currentTokens.every((t, j) => categoryTokens[i + j] === t)) return true;
+		}
+	}
+	return false;
+}
+
 export function timeOfDayChart(hours: number[]): string {
 	const buckets: Record<string, number> = {};
 	for (let h = 0; h < 24; h++) buckets[String(h).padStart(2, "0") + ":00"] = 0;
@@ -326,6 +346,16 @@ export function generateHTML(
 				ongoing?: Array<{ title?: string; category: string; description: string; examples: string[]; severity?: string; evidence_sessions?: string[] }>;
 		  }
 		| undefined;
+	// Why: an LLM-claimed "resolved" friction type (frictionSec.resolved, or
+	// reportDiff's run-over-run category-label comparison) must also be
+	// absent from this run's deterministic Friction Types chart (agg.friction)
+	// before the Resolved list calls it resolved - otherwise the same report
+	// can both call a type resolved and rank it top in the chart. Matched via
+	// categoryStillInFriction, not exact slug equality: the LLM's free-form
+	// label rarely repeats the chart's key verbatim.
+	const currentFrictionSlugs = new Set(Object.entries(agg.friction).filter(([, v]) => v > 0).map(([k]) => categorySlug(k)));
+	const llmResolved = (frictionSec?.resolved ?? []).filter((r) => !categoryStillInFriction(r.category, currentFrictionSlugs));
+	const diffResolved = resolvedSinceLastRun.filter((d) => !categoryStillInFriction(d.category, currentFrictionSlugs));
 	const suggSec = sections.suggestions as
 		| {
 				config_additions?: Array<{ title?: string; addition: string; why: string; where: string; evidence_sessions?: string[] }>;
@@ -785,10 +815,10 @@ ${actionListHtml}
 <details class="rpt-section" id="friction">
 <summary><h2>Where Things Broke</h2></summary>
   ${frictionSec?.intro ? `<p style="color:var(--muted);margin-bottom:16px">${esc(frictionSec.intro)}</p>` : ""}
-  ${(frictionSec?.resolved?.length || resolvedSinceLastRun.length) ? `<div style="margin-bottom:20px">
+  ${(llmResolved.length || diffResolved.length) ? `<div style="margin-bottom:20px">
     <h3 style="color:var(--green);font-size:13px;margin-bottom:10px">Resolved</h3>
-    ${(frictionSec?.resolved ?? []).map(r => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px">${frictionPill(r.category)} ${esc(r.note)}</div>`).join("\n")}
-    ${resolvedSinceLastRun.filter(d => !(frictionSec?.resolved ?? []).some(r => r.category === d.category)).map(d => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px">${frictionPill(d.category)} not in this run's friction list anymore</div>`).join("\n")}
+    ${llmResolved.map(r => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px">${frictionPill(r.category)} ${esc(r.note)}</div>`).join("\n")}
+    ${diffResolved.filter(d => !llmResolved.some(r => r.category === d.category)).map(d => `<div style="padding:6px 14px;color:var(--muted);font-size:13px;border-left:2px solid var(--green);margin-bottom:6px">${frictionPill(d.category)} not in this run's friction list anymore</div>`).join("\n")}
   </div>` : ""}
   <div class="card-grid ${((frictionSec?.ongoing ?? frictionSec?.categories)?.length ?? 0) > 1 ? "cols2" : ""}">
     ${((frictionSec?.ongoing ?? frictionSec?.categories) ?? [])

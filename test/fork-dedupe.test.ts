@@ -18,11 +18,23 @@ import { createOmpSessionSource } from "../index.ts";
 //   <root>/-proj/2026-09-07T10-00-00-000Z_<PARENT_ID>.jsonl
 //   <root>/-proj/2026-09-07T12-00-00-000Z_<FORK_ID>.jsonl        <- parentSession: PARENT_ID
 //   <root>/-proj/2026-09-07T13-00-00-000Z_<ORPHAN_ID>.jsonl      <- parentSession: id of a log that doesn't exist
+//
+// A second parent/fork pair covers sidecars: omp also copies the parent's
+// subagent/advisor sidecar logs byte for byte into the fork's sidecar
+// directory, so dedupe must apply there too, not just to the primary log.
+//
+//   <root>/-proj/2026-09-07T14-00-00-000Z_<SIDECAR_PARENT_ID>.jsonl
+//   <root>/-proj/2026-09-07T14-00-00-000Z_<SIDECAR_PARENT_ID>/shared-sub.jsonl
+//   <root>/-proj/2026-09-07T15-00-00-000Z_<SIDECAR_FORK_ID>.jsonl        <- parentSession: SIDECAR_PARENT_ID
+//   <root>/-proj/2026-09-07T15-00-00-000Z_<SIDECAR_FORK_ID>/shared-sub.jsonl    <- byte-identical copy
+//   <root>/-proj/2026-09-07T15-00-00-000Z_<SIDECAR_FORK_ID>/fork-only-sub.jsonl <- genuinely new sidecar
 
 const PARENT_ID = "00000000-0000-7000-8000-00000000a001";
 const FORK_ID = "00000000-0000-7000-8000-00000000a002";
 const ORPHAN_ID = "00000000-0000-7000-8000-00000000a003";
 const MISSING_PARENT_ID = "00000000-0000-7000-8000-00000000a999";
+const SIDECAR_PARENT_ID = "00000000-0000-7000-8000-00000000a004";
+const SIDECAR_FORK_ID = "00000000-0000-7000-8000-00000000a005";
 
 let root: string;
 
@@ -123,6 +135,42 @@ before(async () => {
 		join(projDir, `2026-09-07T13-00-00-000Z_${ORPHAN_ID}.jsonl`),
 		orphanLines.map((l) => JSON.stringify(l)).join("\n") + "\n",
 	);
+
+	// Sidecar fixture: a parent session with a subagent sidecar, and a fork
+	// of it whose sidecar directory holds a byte-identical copy of that
+	// sidecar plus one genuinely new sidecar of its own.
+	const sharedSubagentHeader = sessionHeader("00000000-0000-7000-8000-00000000a006");
+	const sharedSubagentAssistant = assistantWithBashCommit("shared-sub-asst-1", 3.0, 300, "tc-sub-shared", 1_788_000_300_000);
+	const sharedSubagentLines = [sharedSubagentHeader, sharedSubagentAssistant];
+	const sharedSubagentContent = sharedSubagentLines.map((l) => JSON.stringify(l)).join("\n") + "\n";
+
+	const forkOnlySubagentHeader = sessionHeader("00000000-0000-7000-8000-00000000a007");
+	const forkOnlySubagentAssistant = assistantWithBashCommit("fork-only-sub-asst-1", 4.0, 400, "tc-sub-forkonly", 1_788_000_310_000);
+	const forkOnlySubagentLines = [forkOnlySubagentHeader, forkOnlySubagentAssistant];
+	const forkOnlySubagentContent = forkOnlySubagentLines.map((l) => JSON.stringify(l)).join("\n") + "\n";
+
+	const scParentAssistant = assistantWithBashCommit("sc-parent-asst-1", 0.5, 50, "tc-sc-parent", 1_788_000_290_000);
+	const scParentLines = [sessionHeader(SIDECAR_PARENT_ID), human("sc-parent-human-1", "spin up a subagent", 1_788_000_280_000), scParentAssistant];
+	const scParentDirName = `2026-09-07T14-00-00-000Z_${SIDECAR_PARENT_ID}`;
+	await writeFile(join(projDir, `${scParentDirName}.jsonl`), scParentLines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+	await mkdir(join(projDir, scParentDirName), { recursive: true });
+	await writeFile(join(projDir, scParentDirName, "shared-sub.jsonl"), sharedSubagentContent);
+
+	const scForkAssistant = assistantWithBashCommit("sc-fork-asst-1", 0.25, 25, "tc-sc-fork", 1_788_000_320_000);
+	const scForkLines = [
+		sessionHeader(SIDECAR_FORK_ID, SIDECAR_PARENT_ID),
+		human("sc-parent-human-1", "spin up a subagent", 1_788_000_280_000),
+		scParentAssistant,
+		human("sc-fork-human-1", "spin up another one", 1_788_000_315_000),
+		scForkAssistant,
+	];
+	const scForkDirName = `2026-09-07T15-00-00-000Z_${SIDECAR_FORK_ID}`;
+	await writeFile(join(projDir, `${scForkDirName}.jsonl`), scForkLines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+	await mkdir(join(projDir, scForkDirName), { recursive: true });
+	// Byte-identical copy of the parent's sidecar: same ids, same content.
+	await writeFile(join(projDir, scForkDirName, "shared-sub.jsonl"), sharedSubagentContent);
+	// Genuinely new sidecar: only this fork has it.
+	await writeFile(join(projDir, scForkDirName, "fork-only-sub.jsonl"), forkOnlySubagentContent);
 });
 
 after(async () => {
@@ -135,7 +183,13 @@ async function buildMetaFor(sessionId: string) {
 	const ref = sessions.find((s) => s.id === sessionId);
 	assert.ok(ref, `fixture must contain a log for ${sessionId}`);
 	const entries = await source.readEntries(ref.path);
-	return source.buildMeta(ref, entries, []);
+	const sidecars = await Promise.all(
+		ref.sidecars.map(async (sidecar) => ({
+			kind: sidecar.kind,
+			usage: source.readSidecar(await source.readEntries(sidecar.path)),
+		})),
+	);
+	return source.buildMeta(ref, entries, sidecars);
 }
 
 test("a fork's meta counts only the records not already counted in its parent", async () => {
@@ -171,4 +225,20 @@ test("a fork whose parent log is missing counts everything and does not throw", 
 	assert.equal(orphanMeta.input_tokens, 500);
 	assert.equal(orphanMeta.git_commits, 1);
 	assert.equal(orphanMeta.tool_errors, 0);
+});
+
+test("a fork's cost_subagent counts only its own sidecar, not the parent's copied one", async () => {
+	const forkMeta = await buildMetaFor(SIDECAR_FORK_ID);
+
+	assert.equal(
+		forkMeta.cost_subagent,
+		4.0,
+		"only the fork-only sidecar's cost, not 3.0 (copied) + 4.0 (new)",
+	);
+});
+
+test("the parent's own cost_subagent is unaffected by the fork's copied sidecar", async () => {
+	const parentMeta = await buildMetaFor(SIDECAR_PARENT_ID);
+
+	assert.equal(parentMeta.cost_subagent, 3.0);
 });

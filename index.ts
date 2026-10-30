@@ -54,12 +54,13 @@ import {
 	resolveAgentDir,
 	REPORT_MD_PATH,
 	REPORT_PATH,
+	REPORTS_DIR,
 	saveFacets,
 	saveMeta,
 	saveSections,
 	SESSION_SET_PATH,
 } from "./src/cache.ts";
-import { computeTemporalData } from "./src/temporal.ts";
+import { computeTemporalData, MIN_WINDOW_SESSIONS } from "./src/temporal.ts";
 import { aggregateData, detectConcurrentSessions, excludeToolingSessions } from "./src/aggregate.ts";
 import { readProviderAuth } from "./src/auth.ts";
 import {
@@ -573,7 +574,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 	scan.included = kept.length;
 	scan.facets_analyzed = agg.sessions_with_facets;
 	scan.cost_unavailable = kept.filter((m) => m.cost_recorded === false).length;
-	const temporal = computeTemporalData(analysisMetas, facetsMap);
+	const temporal = computeTemporalData(analysisMetas, facetsMap, agg.friction);
 	// Follow-up: snapshot diff instead of config.yml.bak-* parsing - see
 	// src/harness.ts. windowEnd gates too_recent only; the diff itself needs
 	// no date range (a snapshot diff is always "since last run").
@@ -770,11 +771,14 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
 
 	const sessionPaths = Object.fromEntries(kept.map((m) => [m.session_id, m.session_path]));
 	const html = generateHTML(agg, renderSections, synthesis, temporal, { prevSections, sessionPaths, userCtx });
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 	await writeFile(REPORT_PATH, html, { encoding: "utf-8" });
+	await writeFile(join(REPORTS_DIR, `report-${stamp}.html`), html, { encoding: "utf-8" });
 
 	if (formatMd) {
 		const md = generateMarkdown(agg, renderSections, synthesis, temporal, scan, userCtx);
 		await writeFile(REPORT_MD_PATH, md, { encoding: "utf-8" });
+		await writeFile(join(REPORTS_DIR, `report-${stamp}.md`), md, { encoding: "utf-8" });
 		ctx.ui.setStatus("insights", "");
 		ctx.ui.setWidget("insights", undefined);
 		ctx.ui.notify(`✅ Markdown report saved: ${REPORT_MD_PATH}`, "success");
@@ -840,6 +844,7 @@ export {
 	buildSessionMeta,
 	buildSharedDataBlock,
 	computeTemporalData,
+	MIN_WINDOW_SESSIONS,
 	createOmpSessionSource,
 	dedupeIncidents,
 	dedupeRecommendations,

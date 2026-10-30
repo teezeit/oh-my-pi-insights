@@ -91,3 +91,35 @@ test("facts expose billed/subscription split and per-provider cost", () => {
 	assert.equal(byId.get("cost_by_provider.openai")!.value, 3);
 	assert.match(byId.get("cost_by_provider.openai")!.definition, /actually billed/);
 });
+
+test("delta.* facts are omitted below MIN_WINDOW_SESSIONS and present once the window clears it", () => {
+	const day = (d: number) => new Date(Date.UTC(2026, 8, d, 9)).toISOString();
+	const withModel = (id: string, d: number, model: string, cost: number) =>
+		meta({
+			session_id: id,
+			start_time: day(d),
+			total_cost: cost,
+			cost_primary: cost,
+			model_usage: { [model]: { input_tokens: 1, output_tokens: 1, cost, message_count: 1 } },
+		});
+
+	// 10 vs 10: insufficient, no delta.* facts to quote.
+	const small = [];
+	for (let d = 1; d <= 10; d++) small.push(withModel(`old${d}`, d, "openai/gpt-5.5", 10));
+	for (let d = 11; d <= 20; d++) small.push(withModel(`new${d}`, d, "anthropic/claude-opus-5", 5));
+	const smallTemporal = computeTemporalData(small, new Map());
+	assert.equal(smallTemporal.delta?.insufficient, true);
+	const smallFacts = buildFacts(aggregateData(small, new Map()), smallTemporal);
+	const smallDeltaFacts = smallFacts.filter((f) => f.id.startsWith("delta."));
+	assert.deepEqual(smallDeltaFacts, [], `expected no delta.* facts, got ${JSON.stringify(smallDeltaFacts.map((f) => f.id))}`);
+
+	// 20 vs 20: sufficient, delta.* facts present with the real numbers.
+	const large = [];
+	for (let d = 1; d <= 20; d++) large.push(withModel(`old${d}`, d, "openai/gpt-5.5", 10));
+	for (let d = 21; d <= 40; d++) large.push(withModel(`new${d}`, d, "anthropic/claude-opus-5", 5));
+	const largeTemporal = computeTemporalData(large, new Map());
+	assert.equal(largeTemporal.delta?.insufficient, false);
+	const largeFacts = buildFacts(aggregateData(large, new Map()), largeTemporal);
+	const byId = new Map(largeFacts.map((f) => [f.id, f]));
+	assert.equal(byId.get("delta.cost_per_session")?.value, -50);
+});

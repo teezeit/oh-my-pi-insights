@@ -11,6 +11,12 @@ package identity that does not exist, since this targets a different harness.
 
 ## Unreleased
 
+### Added
+
+- **Report history.** Each run still overwrites `report.html` (and
+  `report.md` with `--md`), and now also writes a timestamped copy to
+  `usage-data/reports/report-<timestamp>.html` / `.md`.
+
 ### Fixed
 
 - **Forked sessions no longer recount their parent's history.** omp writes a
@@ -25,6 +31,27 @@ package identity that does not exist, since this targets a different harness.
   prompts, which were then recalled in unrelated sessions. The child now runs
   with a `--config` overlay setting `memory.backend: off`, plus
   `--no-context-files --no-rules`.
+- **Forks no longer recount copied subagent logs (#7).** omp copies the
+  parent's sidecar logs into a fork's directory; sidecar records whose ids
+  appear in the parent chain's sidecar at the same relative path are now
+  dropped, so `cost_subagent`, tokens, tool calls and errors count once.
+  Session-meta schema bumped to 8.
+- **No trend claims from thin windows (#8).** Cost/error deltas need at
+  least 20 sessions per window; below that the report says there is not
+  enough data, the model-switch impact quotes no numbers, and no delta facts
+  reach the section prompts. The calendar-week "Model shifted" line is gone,
+  so at most one model-shift statement appears.
+- **"Resolved" friction matches the chart (#9).** A friction type still
+  present in this run's friction counts is never listed as resolved, in the
+  HTML, the Markdown or the prompts.
+- **Skills from every omp root (#10).** The harness snapshot and user context
+  now discover skills (a directory or symlink with `SKILL.md`) under
+  `~/.agents/skills`, `~/.claude/skills` and the project `.agents/skills`,
+  `.omp/skills`, `.claude/skills`, besides the agent dir's `skills/` and
+  `managed-skills/`.
+- **`tools/verify-cost.sh` matches fork dedupe.** It now drops fork-copied
+  primary and sidecar records the same way the scanner does, and no longer
+  aborts with `unbound variable` on a session without sidecars (bash 3.2).
 
 ## 0.1.0-rc.1 - 2026-10-08
 

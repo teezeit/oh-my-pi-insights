@@ -8,13 +8,20 @@
 
 import type { DeltaWindow, SessionFacets, SessionMeta, TemporalData, TemporalDelta } from "./types.ts";
 
+// Why: a 10-vs-10 session cost/error swing is well within normal noise; both
+// windows of a quoted delta must clear this before the report calls it a
+// trend instead of a coincidence. Chosen to be comfortably above the 10-
+// session windows the model-switch and week-over-week comparisons default
+// to, not derived from any statistical test.
+export const MIN_WINDOW_SESSIONS = 20;
+
 export function modeStr(arr: string[]): string {
 	const counts: Record<string, number> = {};
 	for (const v of arr) if (v) counts[v] = (counts[v] || 0) + 1;
 	return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
 }
 
-export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, SessionFacets>): TemporalData {
+export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string, SessionFacets>, currentFriction: Record<string, number> = {}): TemporalData {
 	const sorted = [...metas].sort((a, b) => a.start_time.localeCompare(b.start_time));
 	if (!sorted.length) return { diff_headlines: [], this_week: null, last_week: null, trajectory: { cost: "stable", errors: "stable", note: "" }, anomalies: [], major_transition: null, resolved_friction: [], ongoing_friction: [], staleness_pct: 0, delta: null };
 
@@ -81,11 +88,17 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 		if (beforeModel && afterModel && beforeModel !== afterModel) {
 			let j = i;
 			while (j > 1 && primaryModel(sorted[j - 1]!) === afterModel) j--;
-			delta = compareWindows("model_switch", sorted.slice(Math.max(0, j - 10), j), sorted.slice(j, j + 10));
+			// Why: the switch point j is found from 10-session mode windows above,
+			// but the quoted delta itself needs MIN_WINDOW_SESSIONS-sized windows
+			// to ever clear the noise gate; j still anchors both windows so
+			// neither mixes both models.
+			delta = compareWindows("model_switch", sorted.slice(Math.max(0, j - MIN_WINDOW_SESSIONS), j), sorted.slice(j, j + MIN_WINDOW_SESSIONS));
 			major_transition = {
 				when: sorted[j]!.start_time.slice(0, 10),
 				what: `Shifted from ${beforeModel.replace(/.*\//, "")} to ${afterModel.replace(/.*\//, "")}`,
-				impact: `Cost ${trend(delta.cost_per_session.pct)}, errors ${trend(delta.errors_per_session.pct)} per session (${windowText(delta)})`,
+				impact: delta.insufficient
+					? `Not enough sessions on each side to measure impact (need ${MIN_WINDOW_SESSIONS}+ per window; ${windowText(delta)})`
+					: `Cost ${trend(delta.cost_per_session.pct)}, errors ${trend(delta.errors_per_session.pct)} per session (${windowText(delta)})`,
 			};
 			break;
 		}
@@ -93,13 +106,22 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 	if (!delta && tw && lw) delta = compareWindows("week_over_week", lastWeekSessions, thisWeekSessions);
 
 	const diff_headlines: string[] = [];
-	if (delta) {
+	// Why: below MIN_WINDOW_SESSIONS the cost/error pct is noise, not a
+	// finding; say so once here instead of letting Top Actions/Friction each
+	// derive their own confident-sounding number from the same thin windows
+	// (prompts.ts quotes diff_headlines verbatim as "the only delta").
+	if (delta?.insufficient) {
+		diff_headlines.push(`Not enough data yet for a cost/error trend (need ${MIN_WINDOW_SESSIONS}+ sessions per window; have ${windowText(delta)})`);
+	} else if (delta) {
 		const c = delta.cost_per_session;
 		const e = delta.errors_per_session;
 		if (Math.abs(c.pct) > 15) diff_headlines.push(`Cost ${trend(c.pct)} ($${c.before.toFixed(1)} \u2192 $${c.after.toFixed(1)}/session; ${windowText(delta)})`);
 		if (Math.abs(e.pct) > 20) diff_headlines.push(`Errors ${trend(e.pct)} (${e.before.toFixed(1)} \u2192 ${e.after.toFixed(1)}/session; ${windowText(delta)})`);
 	}
-	if (tw && lw && tw.primary_model !== lw.primary_model) diff_headlines.push(`Model shifted: ${lw.primary_model} \u2192 ${tw.primary_model}`);
+	// Why: major_transition (below) is the one model-shift statement; this
+	// used to also push "Model shifted: lw -> tw" from the calendar-week
+	// primary model, which could name a different pair of models than
+	// major_transition's sliding-window detection for the same corpus.
 
 	// Resolved vs ongoing friction
 	const recentCutoff = now - 14 * 86400000;
@@ -111,7 +133,11 @@ export function computeTemporalData(metas: SessionMeta[], facetsMap: Map<string,
 	for (const m of olderMetas) { const f = facetsMap.get(m.session_id); if (f) for (const [k, v] of Object.entries(f.friction_counts)) if (v > 0) olderFriction[k] = (olderFriction[k] || 0) + v; }
 	const resolved_friction: string[] = [];
 	const ongoing_friction: TemporalData["ongoing_friction"] = [];
-	for (const [type] of Object.entries(olderFriction)) { if (!recentFriction[type]) resolved_friction.push(type); }
+	// Why: a type absent from the last 14 days can still rank in agg.friction
+	// (the Friction Types chart, decay-weighted over the whole corpus); do
+	// not call it resolved while the chart the user is looking at still
+	// shows it happening.
+	for (const [type] of Object.entries(olderFriction)) { if (!recentFriction[type] && !(currentFriction[type] > 0)) resolved_friction.push(type); }
 	for (const [type, count] of Object.entries(recentFriction)) { if (count > 0) ongoing_friction.push({ type, recent_count: count, total_count: count + (olderFriction[type] || 0) }); }
 	ongoing_friction.sort((a, b) => b.recent_count - a.recent_count);
 
@@ -144,5 +170,6 @@ function compareWindows(basis: TemporalDelta["basis"], before: SessionMeta[], af
 		after: window(after),
 		cost_per_session: compare((m) => m.total_cost),
 		errors_per_session: compare((m) => m.tool_errors),
+		insufficient: before.length < MIN_WINDOW_SESSIONS || after.length < MIN_WINDOW_SESSIONS,
 	};
 }

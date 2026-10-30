@@ -8,6 +8,7 @@
 // provenance and the user's own setup, plus the LLM-generated narrative.
 
 import { top8 } from "../aggregate.ts";
+import { categorySlug, categoryStillInFriction } from "./html.ts";
 import { SESSION_SET_PATH } from "../cache.ts";
 import { buildActionList } from "./actions.ts";
 import { diffConfigAddition } from "./configDiff.ts";
@@ -338,9 +339,14 @@ export function generateMarkdown(
 	if (frictionSec) {
 		lines.push("## Where Things Broke");
 		if (frictionSec.intro) lines.push(clean(frictionSec.intro));
-		if (frictionSec.resolved?.length) {
+		// Why: a type still present in agg.friction (the Friction Types table
+		// below) is not resolved just because the LLM's narrative dropped it.
+		// Matched via categoryStillInFriction, not exact slug equality.
+		const currentFrictionSlugs = new Set(Object.entries(agg.friction).filter(([, v]) => v > 0).map(([k]) => categorySlug(k)));
+		const resolved = (frictionSec.resolved ?? []).filter((r) => !categoryStillInFriction(r.category, currentFrictionSlugs));
+		if (resolved.length) {
 			lines.push("\n**Resolved:**");
-			for (const r of frictionSec.resolved) lines.push(`- ${clean(r.category)}: ${clean(r.note)}`);
+			for (const r of resolved) lines.push(`- ${clean(r.category)}: ${clean(r.note)}`);
 		}
 		const ongoing = frictionSec.ongoing ?? frictionSec.categories ?? [];
 		if (ongoing.length) {

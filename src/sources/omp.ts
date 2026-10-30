@@ -121,6 +121,60 @@ export async function resolveForkExcludedIds(
 }
 
 /**
+ * Sidecar counterpart to `resolveForkExcludedIds`: omp copies the parent's
+ * subagent/advisor sidecar logs byte for byte into the fork's sidecar
+ * directory (same relative path, same record ids), so a fork's sidecar
+ * folding double-counts every sidecar the parent already paid for. Walks
+ * the same ancestor chain, but collects each ancestor's own sidecars and
+ * returns, per relative sidecar name, the set of record ids already
+ * counted there. Dedupe is by record id (not by byte-identical file)
+ * because a fork can keep appending to a copied sidecar after the fork
+ * point, same as the primary log.
+ */
+export async function resolveForkSidecarExcludedIds(
+	sessionsDir: string,
+	entries: AnyEntry[],
+): Promise<Map<string, Set<string>> | null> {
+	const excluded = new Map<string, Set<string>>();
+	const visited = new Set<string>();
+	let header = entries.find((e) => e.type === "session");
+	let parentId = typeof header?.parentSession === "string" ? header.parentSession : undefined;
+
+	while (parentId && !parentId.includes("/") && !visited.has(parentId)) {
+		visited.add(parentId);
+		const parentPath = await findSessionPath(sessionsDir, parentId);
+		if (!parentPath) break;
+
+		const parentSidecarDir = parentPath.slice(0, -".jsonl".length);
+		const parentSidecars: SidecarRef[] = [];
+		await collectSidecars(parentSidecarDir, "", parentSidecars);
+		for (const sidecar of parentSidecars) {
+			let sidecarEntries: AnyEntry[];
+			try {
+				sidecarEntries = await readJsonl(sidecar.path);
+			} catch {
+				continue;
+			}
+			let ids = excluded.get(sidecar.name);
+			if (!ids) excluded.set(sidecar.name, (ids = new Set()));
+			for (const e of sidecarEntries) if (typeof e.id === "string") ids.add(e.id);
+		}
+
+		let parentEntries: AnyEntry[];
+		try {
+			parentEntries = await readJsonl(parentPath);
+		} catch {
+			break;
+		}
+
+		header = parentEntries.find((e) => e.type === "session");
+		parentId = typeof header?.parentSession === "string" ? header.parentSession : undefined;
+	}
+
+	return excluded.size > 0 ? excluded : null;
+}
+
+/**
  * Locate a top-level session log by id. The id is encoded in the filename
  * (`<ISO-ts>_<session-id>.jsonl`), so this never has to read file content;
  * only direct children of each project dir are candidates, matching
@@ -175,7 +229,23 @@ export function createOmpSessionSource(sessionsDir: string = SESSIONS_DIR): Sess
 			const filtered = excludeIds
 				? entries.filter((e) => !(typeof e.id === "string" && excludeIds.has(e.id)))
 				: entries;
-			return buildSessionMeta(ref, filtered, sidecars);
+
+			const sidecarExcludedIds = await resolveForkSidecarExcludedIds(sessionsDir, entries);
+			const foldedSidecars = sidecarExcludedIds
+				? await Promise.all(
+						sidecars.map(async (sidecar, i) => {
+							const excludedIds = sidecarExcludedIds.get(ref.sidecars[i]?.name ?? "");
+							if (!excludedIds || ref.sidecars[i] === undefined) return sidecar;
+							const sidecarEntries = await readJsonl(ref.sidecars[i].path);
+							const keptEntries = sidecarEntries.filter(
+								(e) => !(typeof e.id === "string" && excludedIds.has(e.id)),
+							);
+							return { kind: sidecar.kind, usage: extractSidecarUsage(keptEntries) };
+						}),
+					)
+				: sidecars;
+
+			return buildSessionMeta(ref, filtered, foldedSidecars);
 		},
 		readSidecar: extractSidecarUsage,
 		formatTranscript,

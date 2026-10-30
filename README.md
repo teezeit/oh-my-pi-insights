@@ -36,6 +36,8 @@ From a checkout instead: `omp -e ./index.ts` (one session, no install) or
    session and classifies up to 50 of them, so it takes minutes, not seconds.
 2. The report opens in your browser; it is also at
    `~/.omp/agent/usage-data/report.html`. Add `--md` for a Markdown copy.
+   Each run overwrites that file and also keeps a timestamped copy in
+   `~/.omp/agent/usage-data/reports/`.
 3. Re-render without any model calls: `/insights --no-llm`.
 4. Feedback: open an issue on this repository with the report section, what
    you expected, and (if relevant) a screenshot. Do not attach `report.html`
@@ -266,6 +268,7 @@ Read-only against `~/.omp/agent/sessions`. Results are cached in
 | `harness-snapshot.json` | Your setup at the last run (config hash, model roles, skills, hooks), diffed for "Since Last Report" |
 | `report.html` | Last generated HTML report |
 | `report.md` | Last Markdown export |
+| `reports/report-<timestamp>.html` / `.md` | Copy of every generated report, never overwritten or pruned |
 | `session-set.json` | Audit manifest for the last run |
 
 ## Requirements

@@ -145,7 +145,7 @@ ${agg.user_instructions.map((i) => `- ${i}`).join("\n")}` +
 		`\n\nPER-TOOL WALL CLOCK (startedAt paired with the matching toolResult by toolCallId${agg.tool_calls_with_intent > 0 ? `; ${agg.tool_calls_with_intent} of these calls also carry an "intent" field: use it to explain why a slow tool call happened, not just which tool` : ""}):\n${agg.tool_time_share.slice(0, 8).map(t => `${t.tool}: ${t.total_sec.toFixed(0)}s (${(t.share * 100).toFixed(0)}% of tool time)`).join(", ") || "none"}` +
 		`\n\nCACHE EFFICIENCY:\nOverall cache hit ratio: ${(agg.cache_hit_ratio * 100).toFixed(1)}% (cacheRead / (input + cacheRead)). A low ratio on a large prompt is the resumed-stale-session tax: money and latency burned re-reading context.\nWorst sessions by ratio (>=50k input+cacheRead tokens): ${agg.worst_cache_sessions.map(s => `${s.project} (${s.tokens} tok, $${s.cost.toFixed(2)}): ${(s.ratio * 100).toFixed(1)}%`).join("; ") || "none"}` +
 		`\n\nEDIT CHURN (same file edited repeatedly across the corpus = the model did not understand it the first time):\n${agg.most_churned_files.map(f => `${f.path}: ${f.edits} edits across ${f.sessions} session(s)`).join("; ") || "none"}` +
-		`\n\nTEMPORAL CONTEXT:\n${temporal.diff_headlines.length ? "Before/after delta (the only one in the report; quote it with its windows, never compute another): " + temporal.diff_headlines.join("; ") : "No significant before/after change."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
+		`\n\nTEMPORAL CONTEXT:\n${temporal.delta?.insufficient ? temporal.diff_headlines.join("; ") : temporal.diff_headlines.length ? "Before/after delta (the only one in the report; quote it with its windows, never compute another): " + temporal.diff_headlines.join("; ") : "No significant before/after change."}\nTrajectory: ${temporal.trajectory.note}\n${temporal.major_transition ? "Major transition on " + temporal.major_transition.when + ": " + temporal.major_transition.what + " (" + temporal.major_transition.impact + ")" : ""}\n${temporal.anomalies.length ? "Notable outlier sessions: " + temporal.anomalies.map(a => a.date + " " + a.cost + " - " + a.reason).join("; ") : ""}\nResolved friction (DO NOT suggest fixes): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none"}\nOngoing friction (FOCUS here): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14d)").join(", ") || "none"}\n\nUSER EXISTING SETUP (DO NOT suggest what's already present):\nDefault model: ${userCtx.default_model || "not set"}\nModel roles: ${Object.entries(userCtx.model_roles).map(([r, m]) => r + "=" + m).join(", ") || "none"}\nFallback chains: ${Object.entries(userCtx.fallback_chains).map(([r, c]) => r + "=" + c.join(">")).join(", ") || "none"}\nSkills: ${userCtx.installed_skills.join(", ") || "none"}\nManaged skills: ${userCtx.installed_managed_skills.join(", ") || "none"}\nExtensions: ${userCtx.installed_extensions.join(", ") || "none"}\nHooks: ${userCtx.installed_hooks.join(", ") || "none"}\nMCP servers: ${userCtx.mcp_servers.join(", ") || "none"}\nExisting AGENTS.md rules: ${userCtx.existing_agents_md_rules.slice(0, 10).join(" | ") || "none"}`
 	);
 }
 
@@ -415,7 +415,7 @@ ${data}`,
 		friction_analysis: `Analyze this usage data and identify friction points for you.
 Use second person ("you").
 
-TEMPORAL CONTEXT:
+TEMPORAL CONTEXT (category names here are display labels of the exact keys in DATA's "friction" object below, e.g. "Wrong Approach" is the key "wrong_approach"):
 - Resolved friction (no longer occurring): ${temporal.resolved_friction.map(f => displayLabel(f)).join(", ") || "none detected"}
 - Ongoing friction (still happening): ${temporal.ongoing_friction.map(f => displayLabel(f.type) + " (" + f.recent_count + " in last 14 days)").join(", ") || "none detected"}
 
@@ -430,6 +430,12 @@ FRICTION SIGNALS (from toolResult.isError and stopReason, not text heuristics):
 - Edit churn: files edited repeatedly across the corpus are a model that did not understand them the first time: ${agg.most_churned_files.slice(0, 5).map(f => `${f.path} (${f.edits}x across ${f.sessions} session(s))`).join(", ") || "none"}.
 
 Focus on ONGOING friction. Mention resolved items briefly as wins.
+CATEGORY KEYS: "category" in both "resolved" and "ongoing" must be one of the
+exact keys in DATA's "friction" object (e.g. "wrong_approach", not "Wrong
+Approach" or a sentence). Never list a category under "resolved" if its key
+has a nonzero count in DATA's "friction" object - a nonzero count there means
+it is still happening in this run, whatever the TEMPORAL CONTEXT section
+above says about the last 14 days.
 EVIDENCE: every "ongoing" item must include evidence_sessions, an array of
 the session ids (the "[id]" from SESSION SUMMARIES, or session_id from
 worst_turns_corpus/worst_cache_sessions in the data below) that actually show
@@ -441,13 +447,13 @@ RESPOND WITH ONLY A VALID JSON OBJECT:
   "intro": "1 sentence summarizing friction trajectory (improving/worsening/stable)",
   "resolved": [
     {
-      "category": "friction that stopped",
+      "category": "exact key from DATA.friction, e.g. wrong_approach",
       "note": "brief note on resolution"
     }
   ],
   "ongoing": [
     {
-      "category": "concrete category name",
+      "category": "exact key from DATA.friction, e.g. wrong_approach",
       "title": "short title (<= 10 words, imperative, no trailing period, no emoji, plain text only)",
       "description": "1-2 sentences. Use 'you' not 'the user'.",
       "examples": ["specific example with consequence", "another example"],

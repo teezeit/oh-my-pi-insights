@@ -21,15 +21,16 @@ function session(id: string, d: number, model: string, cost: number, errors: num
 
 test("a model switch yields one cost and one errors delta with explicit windows", () => {
 	const metas = [];
-	for (let d = 1; d <= 10; d++) metas.push(session(`old${d}`, d, "openai/gpt-5.5", 10, 10));
-	for (let d = 11; d <= 20; d++) metas.push(session(`new${d}`, d, "anthropic/claude-opus-5", 5, 4));
+	for (let d = 1; d <= 20; d++) metas.push(session(`old${d}`, d, "openai/gpt-5.5", 10, 10));
+	for (let d = 21; d <= 40; d++) metas.push(session(`new${d}`, d, "anthropic/claude-opus-5", 5, 4));
 
 	const t = computeTemporalData(metas, new Map());
 
 	assert.ok(t.delta, "expected a delta");
 	assert.equal(t.delta.basis, "model_switch");
-	assert.deepEqual(t.delta.before, { start: "2026-09-01", end: "2026-09-10", sessions: 10 });
-	assert.deepEqual(t.delta.after, { start: "2026-09-11", end: "2026-09-20", sessions: 10 });
+	assert.equal(t.delta.insufficient, false);
+	assert.deepEqual(t.delta.before, { start: "2026-09-01", end: "2026-09-20", sessions: 20 });
+	assert.deepEqual(t.delta.after, { start: "2026-09-21", end: "2026-10-10", sessions: 20 });
 	assert.deepEqual(t.delta.cost_per_session, { before: 10, after: 5, pct: -50 });
 	assert.deepEqual(t.delta.errors_per_session, { before: 10, after: 4, pct: -60 });
 
@@ -39,7 +40,20 @@ test("a model switch yields one cost and one errors delta with explicit windows"
 	assert.ok(pcts.length >= 2, prose);
 	for (const p of pcts) assert.ok(p === 50 || p === 60, `stray ${p}% in: ${prose}`);
 	assert.match(prose, /2026-09-01/);
-	assert.match(prose, /2026-09-20/);
+	assert.match(prose, /2026-10-10/);
+});
+
+test("below MIN_WINDOW_SESSIONS, major_transition.impact names no pct (same gate as diff_headlines)", () => {
+	const metas = [];
+	for (let d = 1; d <= 10; d++) metas.push(session(`old${d}`, d, "openai/gpt-5.5", 10, 10));
+	for (let d = 11; d <= 20; d++) metas.push(session(`new${d}`, d, "anthropic/claude-opus-5", 5, 4));
+
+	const t = computeTemporalData(metas, new Map());
+
+	assert.ok(t.delta?.insufficient, "expected the model-switch delta to be insufficient at 10v10");
+	assert.ok(t.major_transition, "expected a major_transition");
+	assert.doesNotMatch(t.major_transition!.impact, /\d+%/, `impact must not quote a pct below the sample gate: ${t.major_transition!.impact}`);
+	assert.match(t.major_transition!.impact, /not enough sessions/i);
 });
 
 test("without a model switch the delta falls back to week over week", () => {
@@ -55,4 +69,40 @@ test("without a model switch the delta falls back to week over week", () => {
 	assert.deepEqual(t.delta.after, { start: "2026-09-10", end: "2026-09-10", sessions: 1 });
 	assert.equal(t.delta.cost_per_session.pct, 100);
 	assert.equal(t.delta.errors_per_session.pct, 0);
+});
+
+test("a 10-vs-10 week-over-week delta is marked insufficient and produces no cost/error headlines", () => {
+	const metas = [];
+	for (let i = 0; i < 10; i++) metas.push(session(`last${i}`, 17 + (i % 7), "m", 20, 10));
+	for (let i = 0; i < 10; i++) metas.push(session(`this${i}`, 24 + (i % 7), "m", 5, 2));
+
+	const t = computeTemporalData(metas, new Map());
+
+	assert.ok(t.delta, "expected a delta");
+	assert.equal(t.delta.basis, "week_over_week");
+	assert.equal(t.delta.before.sessions, 10);
+	assert.equal(t.delta.after.sessions, 10);
+	assert.equal(t.delta.insufficient, true);
+	assert.ok(
+		!t.diff_headlines.some((h) => h.startsWith("Cost") || h.startsWith("Errors")),
+		`unexpected cost/error headline: ${JSON.stringify(t.diff_headlines)}`,
+	);
+	assert.ok(
+		t.diff_headlines.some((h) => /not enough data/i.test(h)),
+		`expected an insufficient-data marker, got ${JSON.stringify(t.diff_headlines)}`,
+	);
+});
+
+test("resolved_friction excludes a type still present in the current run's friction counts (agg.friction)", () => {
+	const metas = [session("old1", 1, "m", 5, 0), session("new1", 30, "m", 5, 0)];
+	const facetsMap = new Map([
+		["old1", { session_id: "old1", underlying_goal: "", goal_categories: {}, outcome: "fully_achieved", user_satisfaction_counts: {}, assistant_helpfulness: "", session_type: "single_task", friction_counts: { wrong_approach: 2 } as Record<string, number>, friction_detail: "", primary_success: "none", brief_summary: "x" }],
+		["new1", { session_id: "new1", underlying_goal: "", goal_categories: {}, outcome: "fully_achieved", user_satisfaction_counts: {}, assistant_helpfulness: "", session_type: "single_task", friction_counts: {} as Record<string, number>, friction_detail: "", primary_success: "none", brief_summary: "x" }],
+	]);
+
+	const withoutCurrent = computeTemporalData(metas, facetsMap);
+	assert.ok(withoutCurrent.resolved_friction.includes("wrong_approach"));
+
+	const withCurrent = computeTemporalData(metas, facetsMap, { wrong_approach: 5 });
+	assert.ok(!withCurrent.resolved_friction.includes("wrong_approach"));
 });

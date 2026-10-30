@@ -112,15 +112,23 @@ test("falls back to a generic config_changed when the hash differs but no tracke
 
 let agentDir: string;
 let dataDir: string;
+let home: string;
+let cwd: string;
 
 before(async () => {
 	agentDir = await mkdtemp(join(tmpdir(), "omp-insights-harness-agent-"));
 	dataDir = await mkdtemp(join(tmpdir(), "omp-insights-harness-data-"));
+	// Isolates skill discovery from the real machine's ~/.agents/skills,
+	// ~/.claude/skills and any project-level skill roots under the real cwd.
+	home = await mkdtemp(join(tmpdir(), "omp-insights-harness-home-"));
+	cwd = await mkdtemp(join(tmpdir(), "omp-insights-harness-cwd-"));
 });
 
 after(async () => {
 	await rm(agentDir, { recursive: true, force: true });
 	await rm(dataDir, { recursive: true, force: true });
+	await rm(home, { recursive: true, force: true });
+	await rm(cwd, { recursive: true, force: true });
 });
 
 test("gatherHarnessSnapshot reads memory backend, model roles, skills, hooks and an AGENTS.md hash from the agent dir", async () => {
@@ -130,12 +138,18 @@ test("gatherHarnessSnapshot reads memory backend, model roles, skills, hooks and
 		"utf-8",
 	);
 	await mkdir(join(agentDir, "skills", "orca-cli"), { recursive: true });
+	await writeFile(join(agentDir, "skills", "orca-cli", "SKILL.md"), "---\nname: orca-cli\n---\n", "utf-8");
 	await mkdir(join(agentDir, "managed-skills", "landing-webapp-backend-change"), { recursive: true });
+	await writeFile(
+		join(agentDir, "managed-skills", "landing-webapp-backend-change", "SKILL.md"),
+		"---\nname: landing-webapp-backend-change\n---\n",
+		"utf-8",
+	);
 	await mkdir(join(agentDir, "hooks", "pre"), { recursive: true });
 	await writeFile(join(agentDir, "hooks", "pre", "eval.ts"), "", "utf-8");
 	await writeFile(join(agentDir, "AGENTS.md"), "# rules\n", "utf-8");
 
-	const snap = await gatherHarnessSnapshot(agentDir);
+	const snap = await gatherHarnessSnapshot(agentDir, home, cwd);
 
 	assert.equal(snap.memory_backend, "mnemopi");
 	assert.deepEqual(snap.model_roles, { default: "anthropic/claude-opus-5" });
@@ -147,8 +161,10 @@ test("gatherHarnessSnapshot reads memory backend, model roles, skills, hooks and
 
 test("gatherHarnessSnapshot defaults to omp's memory.backend default (off) / empty state when nothing is set up", async () => {
 	const emptyAgentDir = await mkdtemp(join(tmpdir(), "omp-insights-harness-empty-"));
+	const emptyHome = await mkdtemp(join(tmpdir(), "omp-insights-harness-empty-home-"));
+	const emptyCwd = await mkdtemp(join(tmpdir(), "omp-insights-harness-empty-cwd-"));
 	try {
-		const snap = await gatherHarnessSnapshot(emptyAgentDir);
+		const snap = await gatherHarnessSnapshot(emptyAgentDir, emptyHome, emptyCwd);
 		assert.equal(snap.memory_backend, "off");
 		assert.deepEqual(snap.model_roles, {});
 		assert.deepEqual(snap.skills, []);
@@ -157,6 +173,8 @@ test("gatherHarnessSnapshot defaults to omp's memory.backend default (off) / emp
 		assert.equal(snap.config_hash, "");
 	} finally {
 		await rm(emptyAgentDir, { recursive: true, force: true });
+		await rm(emptyHome, { recursive: true, force: true });
+		await rm(emptyCwd, { recursive: true, force: true });
 	}
 });
 
