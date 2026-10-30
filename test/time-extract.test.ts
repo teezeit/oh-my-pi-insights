@@ -111,6 +111,107 @@ test("classifyWait: a poll helper labeled with 'preview' deploy wording is a CI 
 	assert.equal(classifyWait("eval", 'poll3(action="Waiting for preview deploy")'), "ci");
 });
 
+// ── classifyWait: built-in CI/CD recognition (zero configuration) ──────────
+
+test("classifyWait: jenkins-cli build with a wait flag is a CI wait", () => {
+	assert.equal(classifyWait("bash", "jenkins-cli -s http://jenkins:8080 build my-job -w"), "ci");
+});
+
+test("classifyWait: java -jar jenkins-cli.jar build is a CI wait", () => {
+	assert.equal(classifyWait("bash", "java -jar jenkins-cli.jar -s http://jenkins:8080/ build my-job"), "ci");
+});
+
+test("classifyWait: curl polling a Jenkins job's lastBuild api/json is a CI wait", () => {
+	assert.equal(classifyWait("bash", "curl -s http://jenkins/job/my-job/lastBuild/api/json"), "ci");
+});
+
+test("classifyWait: circleci CLI workflow command is a CI wait", () => {
+	assert.equal(classifyWait("bash", "circleci workflow show --pipeline-id abc123"), "ci");
+});
+
+test("classifyWait: curl to circleci.com/api/v2/pipeline is a CI wait", () => {
+	assert.equal(classifyWait("bash", "curl https://circleci.com/api/v2/pipeline/abc123"), "ci");
+});
+
+test("classifyWait: bk build watch is a CI wait", () => {
+	assert.equal(classifyWait("bash", "bk build watch 123"), "ci");
+});
+
+test("classifyWait: curl to api.buildkite.com builds endpoint is a CI wait", () => {
+	assert.equal(classifyWait("bash", "curl https://api.buildkite.com/v2/orgs/x/pipelines/y/builds/123"), "ci");
+});
+
+test("classifyWait: az pipelines run is a CI wait", () => {
+	assert.equal(classifyWait("bash", "az pipelines run --name my-pipeline"), "ci");
+});
+
+test("classifyWait: az build show is a CI wait", () => {
+	assert.equal(classifyWait("bash", "az build show --id 42"), "ci");
+});
+
+test("classifyWait: gh workflow run followed by gh run watch is a CI wait", () => {
+	assert.equal(classifyWait("bash", "gh workflow run deploy.yml && gh run watch"), "ci");
+});
+
+test("classifyWait: kubectl rollout status is a CI wait", () => {
+	assert.equal(classifyWait("bash", "kubectl rollout status deployment/web"), "ci");
+});
+
+test("classifyWait: argocd app wait is a CI wait", () => {
+	assert.equal(classifyWait("bash", "argocd app wait my-app"), "ci");
+});
+
+test("classifyWait: argocd app sync --wait is a CI wait", () => {
+	assert.equal(classifyWait("bash", "argocd app sync my-app --wait"), "ci");
+});
+
+test("classifyWait: helm upgrade --wait is a CI wait", () => {
+	assert.equal(classifyWait("bash", "helm upgrade my-app ./chart --wait"), "ci");
+});
+
+test("classifyWait: netlify watch is a CI wait", () => {
+	assert.equal(classifyWait("bash", "netlify watch"), "ci");
+});
+
+test("classifyWait: fly status --watch is a CI wait", () => {
+	assert.equal(classifyWait("bash", "fly status --watch"), "ci");
+});
+
+test("classifyWait: flyctl status --watch is a CI wait", () => {
+	assert.equal(classifyWait("bash", "flyctl status --watch"), "ci");
+});
+
+test("classifyWait: gcloud builds submit (synchronous) is a CI wait", () => {
+	assert.equal(classifyWait("bash", "gcloud builds submit --tag gcr.io/proj/img ."), "ci");
+});
+
+test("classifyWait: gcloud builds log --stream is a CI wait", () => {
+	assert.equal(classifyWait("bash", "gcloud builds log abc123 --stream"), "ci");
+});
+
+test("classifyWait: aws codebuild batch-get-builds is a CI wait", () => {
+	assert.equal(classifyWait("bash", "aws codebuild batch-get-builds --ids abc123"), "ci");
+});
+
+test("classifyWait: aws codepipeline get-pipeline-state is a CI wait", () => {
+	assert.equal(classifyWait("bash", "aws codepipeline get-pipeline-state --name my-pipeline"), "ci");
+});
+
+test("classifyWait: a CI/CD wait command inside a bash polling loop is still a CI wait, and commandFamily labels it 'polling: ci'", () => {
+	const text = 'for i in $(seq 1 30); do kubectl rollout status deployment/web; sleep 20; done';
+	assert.equal(classifyWait("bash", text), "ci");
+	assert.equal(commandFamily("bash", text), "polling: ci");
+});
+
+test("classifyWait: built-in CI/CD commands are NOT CI waits without the waiting flag/shape", () => {
+	assert.equal(classifyWait("bash", "fly deploy"), null);
+	assert.equal(classifyWait("bash", "kubectl apply -f x.yaml"), null);
+	assert.equal(classifyWait("bash", "helm upgrade my-app ./chart"), null);
+	assert.equal(classifyWait("bash", "gcloud builds submit --async --tag gcr.io/proj/img ."), null);
+	assert.equal(classifyWait("bash", "echo pipeline"), null);
+	assert.equal(classifyWait("eval", "const pipeline = [];"), null);
+});
+
 // ── textNamesReview: whole-token matching, not substring ───────────────────
 
 test("textNamesReview: matches whole-word and camelCase/digit-boundary review tokens", () => {

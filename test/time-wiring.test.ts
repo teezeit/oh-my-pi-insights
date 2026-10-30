@@ -208,6 +208,12 @@ before(async () => {
 	process.env.CALL_COUNTER_FILE = callCounterFile;
 
 	process.env.HOME = home;
+	// Why: running the suite inside omp exports PI_CODING_AGENT_DIR (and a
+	// profile may set OMP_PROFILE/PI_PROFILE); resolveAgentDir prefers those
+	// over $HOME, so without this the tests read and WRITE the real agent dir.
+	delete process.env.PI_CODING_AGENT_DIR;
+	delete process.env.OMP_PROFILE;
+	delete process.env.PI_PROFILE;
 	// Dynamic by necessity, not preference: index.ts resolves ~/.omp/agent
 	// and OMP_BIN from env in module-level constants, so the module must not
 	// load until the env vars above point at the fixture corpus/fake binary.

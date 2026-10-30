@@ -1,0 +1,261 @@
+// SPDX-FileCopyrightText: 2026 Tobias Hoelzer (omp port)
+// SPDX-License-Identifier: AGPL-3.0-only
+
+
+// Issue #21 "retro": an optional (default-off) extension that hooks
+// session_stop. After a big request it hands the agent a deterministic data
+// block plus a "write one retro file, propose only" instruction via
+// additionalContext, so the agent reflects on its own time usage without any
+// code/config/skill edits being in scope for that continuation.
+
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { DATA_DIR } from "./cache.ts";
+import { readJsonl } from "./sources/omp.ts";
+import { isHumanMessage } from "./stats.ts";
+import { extractTimeSplit } from "./time.ts";
+import type { AnyEntry, AnyMessage, ContentBlock, SessionTimeSplit, TimeBucket } from "./types.ts";
+
+// ─── Host API (structural) ────────────────────────────────────────────────────
+
+// Why: same rationale as index.ts's ExtensionAPI note - typed structurally
+// against what omp's session_stop hook actually passes, not a package import.
+
+export type SessionStopEvent = {
+	messages?: unknown;
+	turn_id?: string;
+	last_assistant_message?: { stopReason?: string } | null;
+	session_id?: string;
+	session_file?: string;
+	stop_hook_active?: boolean;
+	signal?: { aborted?: boolean };
+};
+
+export type SessionStopContext = {
+	hasUI: boolean;
+};
+
+export type SessionStopResult = { continue: true; additionalContext: string };
+
+export type RetroExtensionAPI = {
+	on(
+		event: "session_stop",
+		handler: (
+			event: SessionStopEvent,
+			ctx: SessionStopContext,
+		) => Promise<SessionStopResult | undefined> | SessionStopResult | undefined,
+	): void;
+};
+
+export type RetroOptions = {
+	dataDir?: string;
+	now?: () => number;
+	env?: Record<string, string | undefined>;
+};
+
+const DEFAULT_MIN_MINUTES = 30;
+const DEFAULT_MIN_TOOL_CALLS = 100;
+
+/** `--retro-...` has no flag form (this hook has no command line); env only, positive numbers, else the defaults. */
+export function resolveRetroThresholds(
+	env: Record<string, string | undefined>,
+): { minMinutes: number; minToolCalls: number } {
+	const minutes = Number(env.OMP_INSIGHTS_RETRO_MIN_MINUTES);
+	const toolCalls = Number(env.OMP_INSIGHTS_RETRO_MIN_TOOL_CALLS);
+	return {
+		minMinutes: Number.isFinite(minutes) && minutes > 0 ? minutes : DEFAULT_MIN_MINUTES,
+		minToolCalls: Number.isFinite(toolCalls) && toolCalls > 0 ? toolCalls : DEFAULT_MIN_TOOL_CALLS,
+	};
+}
+
+/**
+ * The last human (user-attributed) message record in a session log: its
+ * index (so the caller can slice everything after it as "this request") and
+ * its epoch-ms timestamp. null when the log has no human message at all.
+ */
+export function findLastHumanMessage(entries: AnyEntry[]): { index: number; ts: number } | null {
+	let found: { index: number; ts: number } | null = null;
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
+		if (entry.type !== "message") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg || msg.role !== "user" || !isHumanMessage(msg)) continue;
+		const ts =
+			typeof msg.timestamp === "number"
+				? msg.timestamp
+				: typeof entry.timestamp === "string"
+					? Date.parse(entry.timestamp)
+					: Number.NaN;
+		if (Number.isNaN(ts)) continue;
+		found = { index: i, ts };
+	}
+	return found;
+}
+
+/** Assistant `toolCall` content blocks across the given entries (the current request's span). */
+export function countToolCalls(entries: AnyEntry[]): number {
+	let count = 0;
+	for (const entry of entries) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg || msg.role !== "assistant") continue;
+		const content = msg.content;
+		if (!Array.isArray(content)) continue;
+		for (const block of content as ContentBlock[]) {
+			if (block.type === "toolCall") count++;
+		}
+	}
+	return count;
+}
+
+/** `toolResult` entries with `isError === true` across the given entries. */
+export function countToolErrors(entries: AnyEntry[]): number {
+	let count = 0;
+	for (const entry of entries) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg || msg.role !== "toolResult") continue;
+		if (msg.isError === true) count++;
+	}
+	return count;
+}
+
+function pad2(n: number): string {
+	return n < 10 ? `0${n}` : `${n}`;
+}
+
+function formatDuration(seconds: number): string {
+	const total = Math.max(0, Math.round(seconds));
+	const h = Math.floor(total / 3600);
+	const m = Math.round((total % 3600) / 60);
+	return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/** `<dataDir>/retros/<YYYY-MM-DD>T<HH-MM>_<first 8 chars of session id>.md`, local time. */
+export function buildRetroPath(dataDir: string, now: Date, sessionId: string): string {
+	const date = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+	const time = `${pad2(now.getHours())}-${pad2(now.getMinutes())}`;
+	const shortId = (sessionId || "unknown").slice(0, 8);
+	return join(dataDir, "retros", `${date}T${time}_${shortId}.md`);
+}
+
+const BUCKET_ORDER: TimeBucket[] = ["model", "tools", "agents", "review", "ci", "you", "elsewhere", "idle"];
+
+function formatTimeSplit(split: SessionTimeSplit): string {
+	const lines: string[] = [];
+	for (const bucket of BUCKET_ORDER) {
+		const sec = split.buckets[bucket] ?? 0;
+		if (sec <= 0) continue;
+		const share =
+			bucket !== "idle" && split.active_sec > 0 ? ` (${Math.round((sec / split.active_sec) * 100)}% of active time)` : "";
+		lines.push(`- ${bucket}: ${formatDuration(sec)}${share}`);
+	}
+	return lines.length > 0 ? lines.join("\n") : "- no time-split data";
+}
+
+function topCommandFamilies(split: SessionTimeSplit, limit = 3): string {
+	const entries = Object.entries(split.busy_by_command).sort((a, b) => b[1] - a[1]).slice(0, limit);
+	if (entries.length === 0) return "- none";
+	return entries.map(([name, sec]) => `- ${name}: ${formatDuration(sec)}`).join("\n");
+}
+
+export type RetroRequestData = {
+	wallClockMinutes: number;
+	toolCalls: number;
+	toolErrors: number;
+	split: SessionTimeSplit;
+};
+
+/**
+ * The hidden-message payload: this request's deterministic numbers plus the
+ * "write one retro file, propose only" instruction (issue #21's decisions).
+ */
+export function buildRetroContext(data: RetroRequestData, retroPath: string): string {
+	return [
+		"This request ran long enough to warrant a retro (issue #21).",
+		"",
+		"## Request data",
+		`- Wall clock: ${formatDuration(data.wallClockMinutes * 60)}`,
+		`- Tool calls: ${data.toolCalls}`,
+		`- Tool errors: ${data.toolErrors}`,
+		"- Time split:",
+		formatTimeSplit(data.split),
+		"- Top command families by busy time:",
+		topCommandFamilies(data.split),
+		"",
+		"## Instructions",
+		`Write a short retro to ${retroPath} (the directory already exists). The retro file must have these sections:`,
+		"- What went well",
+		"- What went badly",
+		"- Biggest time sink (quote the numbers above)",
+		"- Improvement proposals (each: change type rule|hook|skill|config|workflow, what, why, expected effect on time)",
+		"",
+		"This is a proposals-only pass: do not edit any rule, hook, skill, config or code, and do not start any new work. The only allowed action is writing that one retro file.",
+		"",
+		"After writing the file, reply with exactly these three lines and nothing else:",
+		"Time sink: <one line>",
+		"Proposal: <one line>",
+		`Retro: ${retroPath}`,
+	].join("\n");
+}
+
+/**
+ * Pure decision + payload builder for one session_stop event. Returns
+ * undefined whenever the retro shouldn't fire: a re-entrant stop-hook
+ * continuation, no UI, an aborted turn, an unreadable session file, no human
+ * message in it, or the request stayed under both thresholds.
+ */
+export async function buildRetroResult(
+	event: SessionStopEvent,
+	ctx: SessionStopContext,
+	options: { dataDir: string; now: () => number; env: Record<string, string | undefined> },
+): Promise<SessionStopResult | undefined> {
+	if (event.stop_hook_active) return undefined;
+	if (ctx.hasUI === false) return undefined;
+	if (event.last_assistant_message?.stopReason === "aborted") return undefined;
+	if (!event.session_file) return undefined;
+
+	let entries: AnyEntry[];
+	try {
+		entries = await readJsonl(event.session_file);
+	} catch {
+		return undefined;
+	}
+
+	const lastHuman = findLastHumanMessage(entries);
+	if (!lastHuman) return undefined;
+
+	// Why include the human message itself: extractTimeSplit starts its range at the first human message.
+	const requestEntries = entries.slice(lastHuman.index);
+	const nowMs = options.now();
+	const wallClockMinutes = (nowMs - lastHuman.ts) / 60000;
+	const toolCalls = countToolCalls(requestEntries);
+	const toolErrors = countToolErrors(requestEntries);
+
+	const { minMinutes, minToolCalls } = resolveRetroThresholds(options.env);
+	if (wallClockMinutes < minMinutes && toolCalls < minToolCalls) return undefined;
+
+	const sessionId = typeof event.session_id === "string" && event.session_id ? event.session_id : "unknown";
+	const split = extractTimeSplit(requestEntries, sessionId, "");
+	const retroPath = buildRetroPath(options.dataDir, new Date(nowMs), sessionId);
+
+	await mkdir(join(options.dataDir, "retros"), { recursive: true });
+
+	const additionalContext = buildRetroContext({ wallClockMinutes, toolCalls, toolErrors, split }, retroPath);
+	return { continue: true, additionalContext };
+}
+
+// ─── Extension Entry ──────────────────────────────────────────────────────────
+
+export default function (pi: RetroExtensionAPI, options: RetroOptions = {}): void {
+	const dataDir = options.dataDir ?? DATA_DIR;
+	const now = options.now ?? Date.now;
+	const env = options.env ?? process.env;
+	pi.on("session_stop", async (event, ctx) => {
+		try {
+			return await buildRetroResult(event, ctx, { dataDir, now, env });
+		} catch {
+			return undefined;
+		}
+	});
+}

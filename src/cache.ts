@@ -97,7 +97,8 @@ export async function ensureDirs(): Promise<void> {
 // v14: "review" bucket (reviewer-agent waits, review/verdict polling) and CI API polling (glab/gh api pipelines) counted as CI again.
 // v15: background jobs delivered via async-result count (only where the session was otherwise idle); review by agent type before job name.
 // v16: review wording matched by whole word ("ModelPreview" is no review).
-export const META_SCHEMA_VERSION = 16;
+// v17: built-in CI/CD waits beyond GitLab/GitHub (Jenkins, CircleCI, Buildkite, Azure, kubectl/argo/helm, cloud builds).
+export const META_SCHEMA_VERSION = 17;
 
 export async function loadCachedMeta(
 	sourceName: string,

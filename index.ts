@@ -109,6 +109,21 @@ import {
 	toolErrorCategory,
 } from "./src/stats.ts";
 import { classifyWait, commandFamily, extractTimeSplit, IDLE_CAP_SEC } from "./src/time.ts";
+import retroExtension, {
+	buildRetroContext,
+	buildRetroPath,
+	buildRetroResult,
+	countToolCalls,
+	countToolErrors,
+	findLastHumanMessage,
+	resolveRetroThresholds,
+	type RetroExtensionAPI,
+	type RetroOptions,
+	type RetroRequestData,
+	type SessionStopContext,
+	type SessionStopEvent,
+	type SessionStopResult,
+} from "./src/retro.ts";
 import type {
 	AggregatedData,
 	ScanSummary,
@@ -1080,6 +1095,14 @@ export {
 	resolveProjectList,
 	saveHarnessSnapshot,
 	toolErrorCategory,
+	retroExtension,
+	buildRetroContext,
+	buildRetroPath,
+	buildRetroResult,
+	countToolCalls,
+	countToolErrors,
+	findLastHumanMessage,
+	resolveRetroThresholds,
 };
 export type {
 	AggregatedData,
@@ -1104,6 +1127,12 @@ export type {
 	ReportDiffEntry,
 	EvidenceLink,
 	UserContext,
+	RetroExtensionAPI,
+	RetroOptions,
+	RetroRequestData,
+	SessionStopContext,
+	SessionStopEvent,
+	SessionStopResult,
 };
 export type { BudgetTarget } from "./src/postprocess.ts";
 

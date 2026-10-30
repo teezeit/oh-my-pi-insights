@@ -34,6 +34,73 @@ const CI_TERMS_RE =
 // doesn't match (see the dedicated regression test for that).
 const GLAB_API_CI_RE = /\bglab\b[\s\S]{0,15}\bapi\b[\s\S]{0,60}\b(?:pipelines|jobs)\b/i;
 const GH_API_CI_RE = /\bgh\b[\s\S]{0,15}\bapi\b[\s\S]{0,80}\b(?:actions\/runs|check-runs|statuses)\b/i;
+
+// Built-in CI/CD recognition (zero configuration): every common CI/CD CLI
+// and polling-API shape below, covering the providers people actually run
+// from a terminal or an eval subprocess call. Same bounded-gap-not-bare-word
+// style as GLAB_API_CI_RE/GH_API_CI_RE above, so a token-array eval call
+// (`subprocess.run(['kubectl', 'rollout', 'status', ...])`) is recognized
+// the same as the equivalent bash command line.
+//
+// Jenkins: `jenkins-cli ... build -s|-w` (synchronous/wait build flags) or
+// `java -jar jenkins-cli.jar ... build`, and curl/wget polling a build's
+// status via `/job/<name>/.../api/json` or `lastBuild`.
+const JENKINS_CLI_RE =
+	/\bjenkins-cli(?:\.jar)?\b[\s\S]{0,60}\bbuild\b[\s\S]{0,40}(?:-s\b|-w\b)|\bjava\s+-jar\s+jenkins-cli\.jar\b[\s\S]{0,60}\bbuild\b/i;
+const JENKINS_API_RE = /\b(?:curl|wget)\b[\s\S]{0,80}\/job\/[\s\S]{0,120}\b(?:api\/json|lastBuild)\b/i;
+
+// CircleCI: the `circleci` CLI operating on a pipeline/workflow, or a
+// direct API call against circleci.com/api/v2/(pipeline|workflow).
+const CIRCLECI_RE = /\bcircleci\b[\s\S]{0,15}\b(?:pipeline|workflow)\b|\bcircleci\.com\/api\/v2\/(?:pipeline|workflow)\b/i;
+
+// Buildkite: `bk build view|watch`, or a direct API call to
+// api.buildkite.com/v2/.../builds.
+const BUILDKITE_RE = /\bbk\b[\s\S]{0,15}\bbuild\b[\s\S]{0,15}\b(?:view|watch)\b|\bapi\.buildkite\.com\/v2\/[\s\S]{0,80}\/builds\b/i;
+
+// Azure DevOps: `az pipelines run`, `az pipelines runs show`, `az build show`.
+const AZURE_DEVOPS_RE =
+	/\baz\b[\s\S]{0,15}\bpipelines\b[\s\S]{0,20}\b(?:run\b|runs\s+show\b)|\baz\b[\s\S]{0,15}\bbuild\b[\s\S]{0,15}\bshow\b/i;
+
+// Kubernetes/CD rollout waits: `kubectl rollout status`, `argocd app wait`
+// or `argocd app sync --wait`, `helm upgrade|install ... --wait`. Plain
+// `kubectl apply` or a `helm upgrade` with no `--wait` flag is real tool
+// work (the deploy itself kicked off, not waited on), not a wait.
+const K8S_ROLLOUT_RE =
+	/\bkubectl\b[\s\S]{0,15}\brollout\b[\s\S]{0,15}\bstatus\b|\bargocd\b[\s\S]{0,15}\bapp\b[\s\S]{0,15}\bwait\b|\bargocd\b[\s\S]{0,15}\bapp\b[\s\S]{0,15}\bsync\b[\s\S]{0,40}--wait\b|\bhelm\b[\s\S]{0,15}\b(?:upgrade|install)\b[\s\S]{0,80}--wait\b/i;
+
+// Deploy-status waits: `netlify watch`, `flyctl|fly status --watch`
+// (`vercel inspect` is already covered by CI_TERMS_RE above). `fly deploy`
+// on its own is real tool work (the deploy itself), not a wait on
+// something else, so it is deliberately NOT matched here.
+const NETLIFY_FLY_RE = /\bnetlify\b[\s\S]{0,15}\bwatch\b|\b(?:flyctl|fly)\b[\s\S]{0,15}\bstatus\b[\s\S]{0,15}--watch\b/i;
+
+// Google Cloud Build / AWS CodeBuild/CodePipeline polling: `gcloud builds
+// submit` (blocks until the build finishes unless `--async` opts out, so
+// the negative lookahead excludes an `--async` call within the same
+// invocation), `gcloud builds log --stream`, `aws codebuild
+// batch-get-builds`, `aws codepipeline get-pipeline-state`.
+const GCLOUD_BUILDS_SUBMIT_RE = /\bgcloud\b[\s\S]{0,15}\bbuilds\b[\s\S]{0,15}\bsubmit\b(?![\s\S]{0,60}--async\b)/i;
+const GCLOUD_BUILDS_LOG_RE = /\bgcloud\b[\s\S]{0,15}\bbuilds\b[\s\S]{0,15}\blog\b[\s\S]{0,40}--stream\b/i;
+const AWS_CI_RE =
+	/\baws\b[\s\S]{0,15}\bcodebuild\b[\s\S]{0,15}\bbatch-get-builds\b|\baws\b[\s\S]{0,15}\bcodepipeline\b[\s\S]{0,15}\bget-pipeline-state\b/i;
+
+// Every built-in CI/CD wait signature, scanned as a group so
+// classifyBashEvalWait and commandFamily (both built on it) always agree.
+const CI_WAIT_PATTERNS: readonly RegExp[] = [
+	CI_TERMS_RE,
+	GLAB_API_CI_RE,
+	GH_API_CI_RE,
+	JENKINS_CLI_RE,
+	JENKINS_API_RE,
+	CIRCLECI_RE,
+	BUILDKITE_RE,
+	AZURE_DEVOPS_RE,
+	K8S_ROLLOUT_RE,
+	NETLIFY_FLY_RE,
+	GCLOUD_BUILDS_SUBMIT_RE,
+	GCLOUD_BUILDS_LOG_RE,
+	AWS_CI_RE,
+];
 const AGENT_TERM_RE = /\b(orca|worker|dispatch|agent|bg_\w+)\b/i;
 const SLEEP_CALL_RE = /\btime\.sleep\s*\(|\bsleep\s+\d/i;
 const LOOP_KEYWORD_RE = /\b(while|until|for)\b/i;
@@ -109,7 +176,7 @@ function classifyPollHelper(text: string): WaitKind {
 // (orca/worker/dispatch/agent/bg_*), and only lands as generic "polling"
 // (bucket tools) if that also finds nothing.
 function classifyBashEvalWait(text: string): { kind: Exclude<WaitKind, null>; target: string } | null {
-	if (CI_TERMS_RE.test(text) || GLAB_API_CI_RE.test(text) || GH_API_CI_RE.test(text)) return { kind: "ci", target: "ci" };
+	if (CI_WAIT_PATTERNS.some((re) => re.test(text))) return { kind: "ci", target: "ci" };
 
 	const pollLabel = classifyPollHelper(text);
 	if (pollLabel === "review") return { kind: "review", target: "review" };

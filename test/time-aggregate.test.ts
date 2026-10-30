@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { aggregateTime, buildTimeLevers, type SessionMeta } from "../index.ts";
+import { isHeavyModel } from "../src/time-aggregate.ts";
 import { meta } from "./helpers.ts";
 
 type TimeSplit = SessionMeta["time_split"];
@@ -161,6 +162,52 @@ test("slow_model fires for opus as the dominant largest-bucket model, not for ha
 	assert.match(opusLever!.title, /claude-opus-5/);
 
 	assert.ok(!aggregateTime([haiku]).levers.some((l) => l.id === "slow_model"));
+});
+
+test("isHeavyModel recognizes heavy/flagship tiers across providers", () => {
+	const heavy = [
+		"claude-opus-5",
+		"o3",
+		"gpt-5-pro",
+		"gemini-2.5-pro",
+		"grok-4-heavy",
+		"mistral-large",
+		"llama-3.1-405b",
+		"deepseek-r1",
+	];
+	for (const name of heavy) assert.ok(isHeavyModel(name), `expected ${name} to be heavy`);
+
+	const fast = ["o3-mini", "gemini-2.5-flash", "claude-haiku-4-5", "claude-sonnet-5", "gpt-5-mini", "mistral-small"];
+	for (const name of fast) assert.ok(!isHeavyModel(name), `expected ${name} to be fast-tier`);
+});
+
+test("slow_model fires for gemini-2.5-pro as the dominant largest-bucket model, not for gemini-2.5-flash", () => {
+	const pro = meta({
+		session_id: "gemini-pro-sess",
+		time_split: zeroSplit({
+			buckets: { model: 80, tools: 10, agents: 0, ci: 0, you: 10, elsewhere: 0, idle: 0 },
+			active_sec: 100,
+		}),
+		model_usage: {
+			"gemini-2.5-pro": { input_tokens: 1000, output_tokens: 1000, cost: 10, message_count: 5 },
+		},
+	});
+	const flash = meta({
+		session_id: "gemini-flash-sess",
+		time_split: zeroSplit({
+			buckets: { model: 80, tools: 10, agents: 0, ci: 0, you: 10, elsewhere: 0, idle: 0 },
+			active_sec: 100,
+		}),
+		model_usage: {
+			"gemini-2.5-flash": { input_tokens: 1000, output_tokens: 1000, cost: 10, message_count: 5 },
+		},
+	});
+
+	const proLever = aggregateTime([pro]).levers.find((l) => l.id === "slow_model");
+	assert.ok(proLever, "expected slow_model lever for gemini-2.5-pro");
+	assert.match(proLever!.title, /gemini-2\.5-pro/);
+
+	assert.ok(!aggregateTime([flash]).levers.some((l) => l.id === "slow_model"));
 });
 
 test("serial_agent_waits fires when subagents were not busy in parallel, not when they were", () => {

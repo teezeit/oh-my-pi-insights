@@ -214,3 +214,43 @@ test("slowest requests table has an Active column and is sorted by active_sec", 
 	const wallIdx = html.indexOf("slow-wall");
 	assert.ok(activeIdx >= 0 && wallIdx >= 0 && activeIdx < wallIdx, "higher active_sec must rank first");
 });
+
+test("unrecognized polling waiting shows under the bucket chart with its share of Tools, in both HTML and markdown", () => {
+	const withPolling = agg({
+		buckets: { model: 7800, tools: 20000, agents: 1800, review: 400, ci: 600, you: 1200, elsewhere: 300, idle: 900 },
+		busy_by_command: { "polling: generic": 15360, "pnpm test": 1980 },
+	});
+
+	const html = renderTimeSection(withPolling);
+	assert.match(html, /Unrecognized waiting.*4h 16m/s);
+	assert.match(html, /77%/, "share of Tools bucket (15360/20000) must be shown");
+	assert.ok(!html.includes("polling: generic"), "polling: generic must not appear in the Top Command Families table");
+	assert.ok(html.includes("pnpm test"), "real commands must still appear in the table");
+
+	const md = renderTimeMarkdown(withPolling);
+	assert.match(md, /Unrecognized waiting.*4h 16m/s);
+	assert.ok(!md.includes("polling: generic"));
+	assert.ok(md.includes("pnpm test"));
+});
+
+test("unrecognized polling waiting sums both the generic and bare polling keys", () => {
+	const withBoth = agg({
+		buckets: { model: 7800, tools: 20000, agents: 1800, review: 400, ci: 600, you: 1200, elsewhere: 300, idle: 900 },
+		busy_by_command: { "polling: generic": 10000, "polling: polling": 5360, "pnpm test": 1980 },
+	});
+	const html = renderTimeSection(withBoth);
+	assert.match(html, /Unrecognized waiting.*4h 16m/s);
+});
+
+test("no unrecognized polling line when those keys are absent", () => {
+	const html = renderTimeSection(agg());
+	assert.ok(!html.includes("Unrecognized waiting"));
+	const md = renderTimeMarkdown(agg());
+	assert.ok(!md.includes("Unrecognized waiting"));
+});
+
+test("zero-session aggregate never shows an unrecognized waiting line", () => {
+	const z = zeroAgg();
+	assert.ok(!renderTimeSection(z).includes("Unrecognized waiting"));
+	assert.ok(!renderTimeMarkdown(z).includes("Unrecognized waiting"));
+});

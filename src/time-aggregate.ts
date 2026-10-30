@@ -17,6 +17,34 @@ function zeroBuckets(): Record<TimeBucket, number> {
 	return { model: 0, tools: 0, agents: 0, review: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 };
 }
 
+// Heavy/flagship model tiers recognized across providers with zero
+// configuration, for the slow_model lever: every provider names its
+// fast/cheap tier differently, so matching is "never match these fast-tier
+// markers" first (checked before any family rule, so e.g. "gpt-5-pro-mini"
+// stays fast), then one rule per flagship naming convention. Exported so
+// callers/tests can check a model name directly instead of re-deriving
+// the rule.
+const FAST_TIER_RE = /\b(?:mini|flash|haiku|lite|small|nano|sonnet)\b/;
+const OPENAI_REASONING_RE = /\bo[13]\b/;
+const PRO_SUFFIX_RE = /(?:^|[-_])pro(?:$|[-_])/;
+const GROK_HEAVY_RE = /\bgrok\b[\s\S]*\bheavy\b/;
+const MISTRAL_LARGE_RE = /\blarge\b/;
+const LLAMA_405B_RE = /\b405b\b/;
+const DEEPSEEK_R1_RE = /\br1\b/;
+export function isHeavyModel(name: string): boolean {
+	const n = name.toLowerCase();
+	if (FAST_TIER_RE.test(n)) return false;
+	return (
+		/\bopus\b/.test(n) || // Anthropic
+		OPENAI_REASONING_RE.test(n) || // OpenAI o1/o3 (o3-mini already excluded above)
+		PRO_SUFFIX_RE.test(n) || // "-pro" suffix across providers (gpt-5-pro, gemini-2.5-pro, ...)
+		GROK_HEAVY_RE.test(n) || // xAI grok-*-heavy
+		MISTRAL_LARGE_RE.test(n) || // Mistral large
+		LLAMA_405B_RE.test(n) || // Meta/llama 405b
+		DEEPSEEK_R1_RE.test(n) // DeepSeek r1
+	);
+}
+
 /**
  * True when some OTHER session has a human message strictly inside
  * [start, end): the user was active elsewhere during this session's gap, so
@@ -206,7 +234,7 @@ export function buildTimeLevers(agg: Omit<TimeAggregate, "levers">, metas: Sessi
 	}
 
 	// slow_model: model is the largest active bucket and the dominant model
-	// by cost is an opus/large-tier model.
+	// by cost is a heavy/flagship-tier model (see isHeavyModel).
 	const largestBucket = ACTIVE_BUCKETS.reduce((best, b) => (agg.buckets[b] > agg.buckets[best] ? b : best), "model" as TimeBucket);
 	if (largestBucket === "model" && agg.buckets.model > 0) {
 		const costByModel = new Map<string, number>();
@@ -223,7 +251,7 @@ export function buildTimeLevers(agg: Omit<TimeAggregate, "levers">, metas: Sessi
 				dominantCost = cost;
 			}
 		}
-		if (dominant && /opus|large/i.test(dominant)) {
+		if (dominant && isHeavyModel(dominant)) {
 			const evidence_sessions = topSessions(metas.map((m) => ({ session_id: m.session_id, value: m.time_split?.buckets?.model ?? 0 })));
 			levers.push({
 				id: "slow_model",

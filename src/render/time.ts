@@ -111,6 +111,34 @@ function noDataSection(agg: TimeAggregate): string {
 </section>`;
 }
 
+const UNRECOGNIZED_POLLING_KEYS = ["polling: generic", "polling: polling"];
+
+/** Seconds counted inside the Tools bucket under an unrecognized polling-loop
+ * key ("polling: generic" / "polling: polling") - the classifier found a
+ * bash/eval sleep loop but could not tell what it was polling for. */
+function unrecognizedPollingSec(agg: TimeAggregate): number {
+	return UNRECOGNIZED_POLLING_KEYS.reduce((sum, key) => sum + (agg.busy_by_command[key] ?? 0), 0);
+}
+
+/** busy_by_command with the unrecognized polling keys stripped, so the Top
+ * Command Families table/list only shows real commands. */
+function visibleCommands(agg: TimeAggregate): Record<string, number> {
+	const out: Record<string, number> = {};
+	for (const [cmd, sec] of Object.entries(agg.busy_by_command)) {
+		if (!UNRECOGNIZED_POLLING_KEYS.includes(cmd)) out[cmd] = sec;
+	}
+	return out;
+}
+
+/** Plain-text sentence shown when unrecognized polling time is non-zero. */
+function unrecognizedPollingText(agg: TimeAggregate): string | undefined {
+	const sec = unrecognizedPollingSec(agg);
+	if (sec <= 0) return undefined;
+	const toolsSec = agg.buckets.tools ?? 0;
+	const share = toolsSec > 0 ? sec / toolsSec : 0;
+	return `Unrecognized waiting: ${fmtDuration(sec)} (${pct(share)} of Tools) inside Tools. These are polling loops whose target (CI/CD, review or agents) wasn't recognized, so they count as tool time.`;
+}
+
 // Local overrides for the #time section only: PAGE_STYLE ships 140px/40px
 // fixed columns for bar-label/bar-count, which truncates "You (busy
 // elsewhere)" and wraps "13% / 10h 50m" onto four lines at the viewport
@@ -140,8 +168,10 @@ export function renderTimeSection(agg: TimeAggregate): string {
 	if (agg.sessions === 0) return noDataSection(agg);
 
 	const bucketChart = [...ACTIVE_BUCKETS.map((b) => bucketRow(agg, b)), bucketRow(agg, "idle")].join("\n");
+	const unrecognizedText = unrecognizedPollingText(agg);
+	const unrecognizedBlock = unrecognizedText ? `<p class="muted"><strong>${esc(unrecognizedText)}</strong></p>\n` : "";
 
-	const topCommands = top8(agg.busy_by_command);
+	const topCommands = top8(visibleCommands(agg));
 	const commandsTable = topCommands.length
 		? `<div class="table-scroll"><table class="cost-table">
   <thead><tr><th>Command</th><th>Busy time</th></tr></thead>
@@ -182,6 +212,7 @@ export function renderTimeSection(agg: TimeAggregate): string {
 <div class="chart-box">
 ${bucketChart}
 </div>
+${unrecognizedBlock}
 
 <p class="muted">Subagent/advisor work ran <strong>${esc(fmtDuration(agg.subagent_busy_sec))}</strong> in parallel - not part of active time.</p>
 
@@ -260,9 +291,14 @@ export function renderTimeMarkdown(agg: TimeAggregate): string {
 		lines.push(`| ${label} | ${pct(share)} | ${fmtDuration(sec)} |`);
 	}
 	lines.push("");
+	const unrecognizedText = unrecognizedPollingText(agg);
+	if (unrecognizedText) {
+		lines.push(unrecognizedText);
+		lines.push("");
+	}
 	lines.push(`Subagent/advisor work ran ${fmtDuration(agg.subagent_busy_sec)} in parallel - not part of active time.`);
 
-	const topCommands = top8(agg.busy_by_command).slice(0, 5);
+	const topCommands = top8(visibleCommands(agg)).slice(0, 5);
 	if (topCommands.length) {
 		lines.push("");
 		lines.push("**Top command families:**");
@@ -287,6 +323,8 @@ export function timeWidgetLines(agg: TimeAggregate): string[] {
 		const share = agg.shares[b] ?? 0;
 		lines.push(`${BUCKET_LABEL[b]} ${pct(share)} ${fmtDuration(sec)}`);
 	}
+	const unrecognizedSec = unrecognizedPollingSec(agg);
+	if (unrecognizedSec > 0 && lines.length < 9) lines.push(`Unrecognized waiting ${fmtDuration(unrecognizedSec)}`);
 	if (agg.levers[0]) lines.push(`Top lever: ${agg.levers[0].title}`);
 	return lines;
 }

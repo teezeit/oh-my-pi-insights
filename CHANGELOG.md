@@ -13,6 +13,24 @@ package identity that does not exist, since this targets a different harness.
 
 ### Added
 
+- **Optional end-of-work retro (#21).** Plugin feature `retro`, off by
+  default (`omp plugin features @teezeit/omp-insights --enable retro`). A
+  request that ran 30+ minutes or made 100+ tool calls ends with a retro:
+  what went well, what went badly, where its time went, and improvement
+  proposals (proposals only, no edits). Written to `usage-data/retros/`;
+  the chat shows the time sink, the top proposal and the file path. Uses
+  omp's `session_stop` hook; skips subagents, headless runs and aborted
+  requests. Thresholds via `OMP_INSIGHTS_RETRO_MIN_MINUTES` and
+  `OMP_INSIGHTS_RETRO_MIN_TOOL_CALLS`.
+
+## 0.1.0-rc.2 - 2026-10-30
+
+Release candidate. Install from git tag `v0.1.0-rc.2`; requires omp
+`>=18.8.4 <19`. Adds `/insights time` and fixes cost double counting for
+forked sessions. Every cached session meta recomputes once on the first run.
+
+### Added
+
 - **Report history.** Each run still overwrites `report.html` (and
   `report.md` with `--md`), and now also writes a timestamped copy to
   `usage-data/reports/report-<timestamp>.html` / `.md`.
@@ -32,6 +50,16 @@ package identity that does not exist, since this targets a different harness.
   helper calls are classified by their label. Pipeline API polling
   (`glab api .../pipelines`, `gh api .../check-runs`) counts as CI/CD
   again. Session-meta schema bumped to 14.
+- **Zero-config CI/CD detection beyond GitLab/GitHub.** Waits on Jenkins,
+  CircleCI, Buildkite, Azure DevOps, `kubectl rollout status`, Argo CD,
+  `helm --wait`, Netlify/Fly watchers and Google/AWS builds count as CI/CD,
+  also inside polling loops. The slow-model tip recognizes heavy tiers of
+  every major provider (Opus, o1/o3, `-pro`, Gemini Pro, Grok Heavy,
+  Mistral Large, Llama 405B, DeepSeek R1), not just Opus.
+- **Unrecognized waiting is visible.** Polling loops whose target isn't
+  recognized stay in Tools but get their own "Unrecognized waiting" line
+  and no longer appear as a `polling: generic` command. Session-meta schema
+  bumped to 17.
 - **Background jobs count in the time view (#20).** Subagents and
   background `bash` jobs that report back on their own (`async-result`
   records) were ignored, so their time showed up as waiting on you or idle

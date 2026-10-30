@@ -13,11 +13,11 @@ built from your local session history.
 
 ## Install
 
-Current release: **`v0.1.0-rc.1`** (release candidate; not yet on npm).
+Current release: **`v0.1.0-rc.2`** (release candidate; not yet on npm).
 Requires omp `>=18.8.4 <19` (check with `omp --version`).
 
 ```bash
-omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.1"
+omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.2"
 omp plugin list            # shows the installed version and path
 omp plugin doctor          # verifies the install
 ```
@@ -178,8 +178,12 @@ section.
 
 Totals sum time across sessions, not unique calendar hours: parallel
 sessions overlap. The "busy elsewhere" split is inferred from messages in
-other selected sessions, not proof of what you did. CI/CD and agent polling
-are classified from command/code patterns. Background subagents and
+other selected sessions, not proof of what you did. No configuration: CI/CD
+waits are recognized built-in for GitHub, GitLab, Jenkins, CircleCI,
+Buildkite, Azure DevOps, kubectl/Argo CD/Helm rollouts and common cloud
+builds, from the command text (also inside polling loops). Polling whose
+target isn't recognized stays in Tools and is shown as an "Unrecognized
+waiting" line, so a miss is visible. Background subagents and
 background `bash` jobs count from their completion records, but only for
 time when the session was otherwise idle, so parallel work is never counted
 as waiting. Review is decided by the agent type (`reviewer`,
@@ -187,6 +191,25 @@ as waiting. Review is decided by the agent type (`reviewer`,
 the type is unknown. Claude Code timing is
 best-effort from message and tool timestamps; it lacks omp's detailed
 generation and tool-start records.
+
+### Optional: end-of-work retro
+
+Off by default. When enabled, a request that ran 30+ minutes or made 100+
+tool calls ends with a short retro instead of stopping right away: what went
+well, what went badly, where that request's time went (same breakdown as
+`/insights time`), and improvement proposals (rules, hooks, skills, config,
+workflow). The full retro is written to `usage-data/retros/`; the chat shows
+three lines: the biggest time sink, the top proposal and the file path. It
+only proposes and never edits anything. It costs one extra model turn per big
+request, and skips subagents, headless runs and requests you aborted.
+
+```bash
+omp plugin features @teezeit/omp-insights --enable retro    # turn on
+omp plugin features @teezeit/omp-insights --disable retro   # turn off
+```
+
+Restart omp after changing it. Thresholds: `OMP_INSIGHTS_RETRO_MIN_MINUTES`
+(default 30) and `OMP_INSIGHTS_RETRO_MIN_TOOL_CALLS` (default 100).
 
 ## What omp gives it that Pi did not
 
@@ -302,6 +325,7 @@ Read-only against `~/.omp/agent/sessions`. Results are cached in
 | `reports/report-<timestamp>.html` / `.md` | Copy of every generated report, never overwritten or pruned |
 | `time.html` | Last `/insights time` page |
 | `reports/time-<timestamp>.html` | Copy of every `/insights time` page |
+| `retros/<date>T<time>_<session>.md` | End-of-work retros (only with the optional `retro` feature) |
 | `session-set.json` | Audit manifest for the last run |
 
 ## Requirements
