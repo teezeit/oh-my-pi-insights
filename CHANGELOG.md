@@ -22,8 +22,9 @@ package identity that does not exist, since this targets a different harness.
 - **Retro file names say which project and session.** Retros are named
   `<date>T<time>_<project>_<last 8 chars of the session id>.md` (worktrees
   read as `<repo>-<worktree>`), and each file starts with the full session
-  id and `omp -r <id>` to reopen it. The old short id (first 8 characters)
-  was shared by sessions started around the same minute.
+  id, `omp -r <id>` to reopen it, and the path of the session's `.jsonl`
+  log. The old short id (first 8 characters) was shared by sessions
+  started around the same minute.
 - **Retro prompt names no issue number.** The hidden retro instruction no
   longer says "(issue #21)", so retros don't cite this repo's issue tracker.
 

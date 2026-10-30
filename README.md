@@ -327,7 +327,7 @@ reports and retros carry over without recomputing anything:
 | `reports/report-<timestamp>.html` / `.md` | Copy of every generated report, never overwritten or pruned |
 | `time.html` | Last `/insights time` page |
 | `reports/time-<timestamp>.html` | Copy of every `/insights time` page |
-| `retros/<date>T<time>_<project>_<id>.md` | End-of-work retros (only with the optional `retro` feature); `<id>` is the last 8 characters of the session id, and the file starts with the full id and `omp -r <id>` to reopen it |
+| `retros/<date>T<time>_<project>_<id>.md` | End-of-work retros (only with the optional `retro` feature); `<id>` is the last 8 characters of the session id. Each file starts with the full session id, `omp -r <id>` to reopen it, and the path of the session's `.jsonl` log |
 | `session-set.json` | Audit manifest for the last run |
 
 ## Requirements
