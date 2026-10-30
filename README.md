@@ -275,7 +275,7 @@ Read-only against `~/.omp/agent/sessions`. Results are cached in
 
 - omp `>=18.8.4 <19` (declared as `engines.omp` in `package.json`; omp does
   not enforce it, so check `omp --version`). Developed against `omp/18.1.14`,
-  verified on `omp/18.8.4`.
+  verified on `omp/18.13.1`.
 - Node `>=22.6` only for running the tests; inside omp there are no runtime
   dependencies beyond built-ins.
 
