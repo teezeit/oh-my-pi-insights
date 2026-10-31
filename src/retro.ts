@@ -12,7 +12,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { DATA_DIR, migrateLegacyDataDir } from "./cache.ts";
 import { readJsonl } from "./sources/omp.ts";
-import { isHumanMessage } from "./stats.ts";
+import { extractTextFromContent, isHumanMessage } from "./stats.ts";
 import { extractTimeSplit } from "./time.ts";
 import type { AnyEntry, AnyMessage, ContentBlock, SessionTimeSplit, TimeBucket } from "./types.ts";
 
@@ -120,6 +120,95 @@ export function countToolErrors(entries: AnyEntry[]): number {
 	return count;
 }
 
+// ─── Corrections ────────────────────────────────────────────────────────────
+
+// Why English+German: Tobias writes to the agent in both. Patterns are
+// intentionally loose (a correction is a short, blunt exchange); the false
+// positive list below exists because the same words show up in routine
+// praise, quoted preferences text, or this very file's own instructions.
+const CORRECTION_PATTERNS: RegExp[] = [
+	/^no\b/i,
+	/not that/i,
+	/i said/i,
+	/\bagain\b/i,
+	/\bstop\b/i,
+	/don't/i,
+	/\bwrong\b/i,
+	// German
+	/\bnein\b/i,
+	/\bfalsch\b/i,
+	/\bnochmal\b/i,
+	/hab doch gesagt/i,
+];
+
+const CORRECTION_FALSE_POSITIVES: RegExp[] = [/don't worry/i, /no problem/i, /stop on green/i];
+
+/** A human message that reads as a correction: one of the EN/DE phrases above, unless it's a known false positive. */
+export function isCorrectionMessage(text: string): boolean {
+	const trimmed = text.trim();
+	if (!trimmed) return false;
+	if (CORRECTION_FALSE_POSITIVES.some((re) => re.test(trimmed))) return false;
+	return CORRECTION_PATTERNS.some((re) => re.test(trimmed));
+}
+
+/** True when the nearest preceding message entry is an assistant turn the provider reports as stopReason "aborted". */
+export function followsAbortedTurn(entries: AnyEntry[], humanIndex: number): boolean {
+	for (let i = humanIndex - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry.type !== "message") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg) continue;
+		return msg.role === "assistant" && typeof msg.stopReason === "string" && msg.stopReason === "aborted";
+	}
+	return false;
+}
+
+export type CorrectionHit = { text: string; reason: "phrase" | "abort-follow" };
+
+/**
+ * Human messages from `fromIndex` onward that read as a correction: a
+ * phrase match, or a message that directly follows an aborted assistant
+ * turn (the user interrupted and immediately said something else).
+ * `fromIndex` is the request's start (today: the last human message, same
+ * span the thresholds below already use - see the "request" note on
+ * `buildRetroResult`).
+ */
+export function detectCorrections(entries: AnyEntry[], fromIndex: number): CorrectionHit[] {
+	const hits: CorrectionHit[] = [];
+	for (let i = fromIndex; i < entries.length; i++) {
+		const entry = entries[i];
+		if (entry.type !== "message") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg || msg.role !== "user" || !isHumanMessage(msg)) continue;
+		const text = extractTextFromContent(msg.content).trim();
+		if (!text) continue;
+		if (isCorrectionMessage(text)) hits.push({ text, reason: "phrase" });
+		else if (followsAbortedTurn(entries, i)) hits.push({ text, reason: "abort-follow" });
+	}
+	return hits;
+}
+
+/** Up to `limit` correction quotes, each capped at `maxChars`, for the deterministic data block. */
+export function quoteCorrections(hits: CorrectionHit[], limit = 5, maxChars = 200): string[] {
+	return hits.slice(0, limit).map((h) => (h.text.length > maxChars ? h.text.slice(0, maxChars) : h.text));
+}
+
+/** Up to `limit` failed-tool-result lines ("tool: first output line") from `fromIndex` onward, each capped at `maxChars`. */
+export function collectFailedToolLines(entries: AnyEntry[], fromIndex: number, limit = 5, maxChars = 200): string[] {
+	const lines: string[] = [];
+	for (let i = fromIndex; i < entries.length && lines.length < limit; i++) {
+		const entry = entries[i];
+		if (entry.type !== "message") continue;
+		const msg = entry.message as AnyMessage | undefined;
+		if (!msg || msg.role !== "toolResult" || msg.isError !== true) continue;
+		const toolName = typeof msg.toolName === "string" && msg.toolName ? msg.toolName : "tool";
+		const firstLine = extractTextFromContent(msg.content).trim().split("\n")[0]?.trim() ?? "";
+		const line = firstLine ? `${toolName}: ${firstLine}` : `${toolName}: (no output)`;
+		lines.push(line.length > maxChars ? line.slice(0, maxChars) : line);
+	}
+	return lines;
+}
+
 function pad2(n: number): string {
 	return n < 10 ? `0${n}` : `${n}`;
 }
@@ -207,6 +296,10 @@ export type RetroRequestData = {
 	cwd: string;
 	/** Absolute path of the session's .jsonl log, so the retro links straight to it. */
 	sessionFile: string;
+	/** Up to 5 quoted correction lines from this request; see detectCorrections/quoteCorrections. */
+	corrections: string[];
+	/** Up to 5 failed-tool-result first lines from this request; see collectFailedToolLines. */
+	failedTools: string[];
 };
 
 /**
@@ -225,6 +318,10 @@ export function buildRetroContext(data: RetroRequestData, retroPath: string): st
 		formatTimeSplit(data.split),
 		"- Top command families by busy time:",
 		topCommandFamilies(data.split),
+		"- Corrections quoted from this request:",
+		data.corrections.length > 0 ? data.corrections.map((c) => `- "${c}"`).join("\n") : "- none",
+		"- Failed tool results from this request:",
+		data.failedTools.length > 0 ? data.failedTools.map((t) => `- ${t}`).join("\n") : "- none",
 		"",
 		"## Instructions",
 		`Write a short retro to ${retroPath} (the directory already exists). The retro file must start with these lines verbatim (values already filled in):`,
@@ -235,13 +332,22 @@ export function buildRetroContext(data: RetroRequestData, retroPath: string): st
 		`Log: ${data.sessionFile}`,
 		`Project: ${data.cwd}`,
 		"",
-		"Then these sections:",
-		"- What went well",
-		"- What went badly",
-		"- Biggest time sink (quote the numbers above)",
-		"- Improvement proposals (each: change type rule|hook|skill|config|workflow, what, why, expected effect on time)",
+		'Then these sections, in this order (no "What went well" or "What went badly"):',
 		"",
-		"This is a proposals-only pass: do not edit any rule, hook, skill, config or code, and do not start any new work. The only allowed action is writing that one retro file.",
+		"## Biggest time sink",
+		"One line, quoting the numbers above.",
+		"",
+		"## Corrections and lessons",
+		"Up to 5 lines: every correction Tobias gave and every fact you learned from tool output in this request. Each line:",
+		'- [<target>] <what you learned or were corrected on, one line> | moment: "<quoted user or tool line, max 120 chars>"',
+		'<target> is one of: check, reviewer-standard, skill, pointer, preferences, none (routing order: check/hook > reviewer standard > skill > pointer in AGENTS.md > preferences.md > memory). Drop any candidate you cannot trace to a quoted moment. Write "- none" if nothing qualifies.',
+		"",
+		"## Improvement proposals",
+		"Up to 5 lines, ranked by impact, drawn from these categories: navigation, automated-check, coding-standard, global-AGENTS.md, tool-economy, no-ops, information-access, user-preference. Same line format as above:",
+		'- [<target>] <proposed change, one line> | moment: "<quoted user or tool line, max 120 chars>"',
+		'Drop any candidate you cannot quote. Write "- none" if nothing qualifies.',
+		"",
+		"This is a proposals-only pass: do not edit any rule, hook, skill, config or code, and do not start any new work. The only allowed action is writing that one retro file. Keep the whole file at or under about 40 lines.",
 		"",
 		"After writing the file, reply with exactly these three lines and nothing else:",
 		"Time sink: <one line>",
@@ -254,7 +360,15 @@ export function buildRetroContext(data: RetroRequestData, retroPath: string): st
  * Pure decision + payload builder for one session_stop event. Returns
  * undefined whenever the retro shouldn't fire: a re-entrant stop-hook
  * continuation, no UI, an aborted turn, an unreadable session file, no human
- * message in it, or the request stayed under both thresholds.
+ * message in it, or the request stayed under both thresholds with no
+ * correction in it.
+ *
+ * "This request": there is no cross-call state to find where "the previous
+ * retro" left off, so this reuses the same span the time/tool-call
+ * thresholds already use - entries from the last human message onward. A
+ * correction is almost always that very message (the user's next reply
+ * after a miss), so this still catches the common case without the added
+ * complexity of a persisted marker.
  */
 export async function buildRetroResult(
 	event: SessionStopEvent,
@@ -283,8 +397,9 @@ export async function buildRetroResult(
 	const toolCalls = countToolCalls(requestEntries);
 	const toolErrors = countToolErrors(requestEntries);
 
+	const corrections = detectCorrections(entries, lastHuman.index);
 	const { minMinutes, minToolCalls } = resolveRetroThresholds(options.env);
-	if (wallClockMinutes < minMinutes && toolCalls < minToolCalls) return undefined;
+	if (wallClockMinutes < minMinutes && toolCalls < minToolCalls && corrections.length === 0) return undefined;
 
 	const sessionId = typeof event.session_id === "string" && event.session_id ? event.session_id : "unknown";
 	const split = extractTimeSplit(requestEntries, sessionId, "");
@@ -298,7 +413,19 @@ export async function buildRetroResult(
 	await mkdir(join(options.dataDir, "retros"), { recursive: true });
 
 	const additionalContext = buildRetroContext(
-		{ wallClockMinutes, toolCalls, toolErrors, split, now, project, sessionId, cwd, sessionFile: event.session_file },
+		{
+			wallClockMinutes,
+			toolCalls,
+			toolErrors,
+			split,
+			now,
+			project,
+			sessionId,
+			cwd,
+			sessionFile: event.session_file,
+			corrections: quoteCorrections(corrections),
+			failedTools: collectFailedToolLines(entries, lastHuman.index),
+		},
 		retroPath,
 	);
 	return { continue: true, additionalContext };

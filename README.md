@@ -194,14 +194,19 @@ generation and tool-start records.
 
 ### Optional: end-of-work retro
 
-Off by default. When enabled, a request that ran 30+ minutes or made 100+
-tool calls ends with a short retro instead of stopping right away: what went
-well, what went badly, where that request's time went (same breakdown as
-`/insights time`), and improvement proposals (rules, hooks, skills, config,
-workflow). The full retro is written to `omp-insights/retros/`; the chat shows
-three lines: the biggest time sink, the top proposal and the file path. It
-only proposes and never edits anything. It costs one extra model turn per big
-request, and skips subagents, headless runs and requests you aborted.
+Off by default. When enabled, a request ends with a short retro instead of
+stopping right away when it ran 30+ minutes, made 100+ tool calls, or
+contains a correction: a human message that reads as a correction (EN/DE
+phrases like "no", "not that", "I said", "stop", "don't", "nein", "falsch",
+"nochmal") or that directly follows an aborted assistant turn. The retro
+covers the biggest time sink, up to 5 corrections and lessons, and up to 5
+improvement proposals, each traced to a quoted moment and a routing target
+(check/reviewer-standard/skill/pointer/preferences/none) so it's clear where
+a fix belongs, not just that one is wanted. The full retro is written to
+`omp-insights/retros/`; the chat shows three lines: the biggest time sink,
+the top proposal and the file path. It only proposes and never edits
+anything. It costs one extra model turn per big request, and skips
+subagents, headless runs and requests you aborted.
 
 ```bash
 omp plugin features @teezeit/omp-insights --enable retro    # turn on

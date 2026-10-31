@@ -7,10 +7,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import {
+	buildRetroContext,
 	buildRetroPath,
+	collectFailedToolLines,
+	detectCorrections,
+	followsAbortedTurn,
+	isCorrectionMessage,
+	quoteCorrections,
 	retroExtension,
 	slugifyProject,
 	type RetroExtensionAPI,
+	type RetroRequestData,
 	type SessionStopContext,
 	type SessionStopEvent,
 	type SessionStopResult,
@@ -59,11 +66,37 @@ function assistantEntry(at: Date, toolCallCount: number): Record<string, unknown
 	};
 }
 
-function toolErrorEntry(at: Date, toolCallId: string): Record<string, unknown> {
+function toolErrorEntry(at: Date, toolCallId: string, text?: string, toolName = "bash"): Record<string, unknown> {
 	return {
 		type: "message",
 		timestamp: ts(at),
-		message: { role: "toolResult", toolCallId, toolName: "bash", isError: true, content: [] },
+		message: {
+			role: "toolResult",
+			toolCallId,
+			toolName,
+			isError: true,
+			content: text === undefined ? [] : [{ type: "text", text }],
+		},
+	};
+}
+
+function emptySplit(): RetroRequestData["split"] {
+	return {
+		buckets: { model: 0, tools: 0, agents: 0, review: 0, ci: 0, you: 0, elsewhere: 0, idle: 0 },
+		active_sec: 0,
+		busy_by_tool: {},
+		busy_by_command: {},
+		subagent_busy_sec: 0,
+		slowest_requests: [],
+		you_gaps: [],
+	};
+}
+
+function assistantAbortedEntry(at: Date): Record<string, unknown> {
+	return {
+		type: "message",
+		timestamp: ts(at),
+		message: { role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "partial..." }] },
 	};
 }
 
@@ -270,4 +303,191 @@ test("retro path and header pick up the project slug and full session id from th
 	assert.ok(result!.additionalContext.includes(`Log: ${file}`), "header names the session log file");
 	assert.match(result!.additionalContext, /Project: \/x\/peach\/\.worktrees\/develop-content/);
 	assert.match(result!.additionalContext, /# Retro \d{4}-\d{2}-\d{2} \d{2}:\d{2} - peach-develop-content/);
+});
+
+test("isCorrectionMessage: EN and DE positives", () => {
+	assert.equal(isCorrectionMessage("No, that's not what I asked for"), true);
+	assert.equal(isCorrectionMessage("not that one, the other file"), true);
+	assert.equal(isCorrectionMessage("I said the backend, not the frontend"), true);
+	assert.equal(isCorrectionMessage("please do it again, you missed a line"), true);
+	assert.equal(isCorrectionMessage("stop editing that file"), true);
+	assert.equal(isCorrectionMessage("don't do that"), true);
+	assert.equal(isCorrectionMessage("this is wrong"), true);
+	assert.equal(isCorrectionMessage("nein, das ist falsch"), true);
+	assert.equal(isCorrectionMessage("mach das nochmal"), true);
+	assert.equal(isCorrectionMessage("ich hab doch gesagt du sollst warten"), true);
+});
+
+test("isCorrectionMessage: false positives are guarded", () => {
+	assert.equal(isCorrectionMessage("don't worry about it, looks fine"), false);
+	assert.equal(isCorrectionMessage("no problem, go ahead"), false);
+	assert.equal(isCorrectionMessage("stop on green means stop once the check passes"), false);
+});
+
+test("isCorrectionMessage: plain requests are not corrections", () => {
+	assert.equal(isCorrectionMessage("add a new endpoint for users"), false);
+	assert.equal(isCorrectionMessage(""), false);
+	assert.equal(isCorrectionMessage("   "), false);
+});
+
+test("followsAbortedTurn: true right after an aborted assistant turn, false otherwise", () => {
+	const t0 = new Date("2026-10-31T09:00:00.000Z");
+	const entries = [
+		humanEntry(t0, "build the thing"),
+		assistantAbortedEntry(new Date(t0.getTime() + 1000)),
+		humanEntry(new Date(t0.getTime() + 2000), "hold on"),
+		assistantEntry(new Date(t0.getTime() + 3000), 1),
+		humanEntry(new Date(t0.getTime() + 4000), "continue please"),
+	];
+	assert.equal(followsAbortedTurn(entries, 2), true, "message right after the abort");
+	assert.equal(followsAbortedTurn(entries, 4), false, "message after a normal, non-aborted turn");
+	assert.equal(followsAbortedTurn(entries, 0), false, "first message has nothing before it");
+});
+
+test("detectCorrections: phrase matches and abort-follow, in order, text extracted verbatim", () => {
+	const t0 = new Date("2026-10-31T10:00:00.000Z");
+	const entries = [
+		humanEntry(t0, "build the thing"),
+		assistantAbortedEntry(new Date(t0.getTime() + 1000)),
+		humanEntry(new Date(t0.getTime() + 2000), "hold on, let me rethink"),
+		assistantEntry(new Date(t0.getTime() + 3000), 1),
+		humanEntry(new Date(t0.getTime() + 4000), "no, not that one"),
+	];
+	const hits = detectCorrections(entries, 0);
+	assert.deepEqual(
+		hits.map((h) => h.reason),
+		["abort-follow", "phrase"],
+	);
+	assert.equal(hits[0]!.text, "hold on, let me rethink");
+	assert.equal(hits[1]!.text, "no, not that one");
+});
+
+test("detectCorrections: no hits when nothing in range matches", () => {
+	const t0 = new Date("2026-10-31T11:00:00.000Z");
+	const entries = [humanEntry(t0, "add a new endpoint"), assistantEntry(new Date(t0.getTime() + 1000), 2)];
+	assert.deepEqual(detectCorrections(entries, 0), []);
+});
+
+test("quoteCorrections: caps at 5 hits and 200 chars each", () => {
+	const hits = Array.from({ length: 7 }, (_, i) => ({ text: `correction number ${i}`, reason: "phrase" as const }));
+	const quoted = quoteCorrections(hits);
+	assert.equal(quoted.length, 5);
+	assert.deepEqual(quoted, hits.slice(0, 5).map((h) => h.text));
+
+	const longText = "x".repeat(250);
+	assert.equal(quoteCorrections([{ text: longText, reason: "phrase" }])[0]!.length, 200);
+});
+
+test("collectFailedToolLines: first line, tool name prefix, skips ok results, caps at 5 and 200 chars", () => {
+	const t0 = new Date("2026-10-31T12:00:00.000Z");
+	const okResult = {
+		type: "message",
+		timestamp: ts(t0),
+		message: { role: "toolResult", toolCallId: "tc-ok", toolName: "bash", isError: false, content: [] },
+	};
+	const manyErrors = Array.from({ length: 6 }, (_, i) =>
+		toolErrorEntry(new Date(t0.getTime() + i * 1000), `tc-${i}`, `line one of error ${i}\nmore detail here`),
+	);
+	const entries = [okResult, ...manyErrors, toolErrorEntry(new Date(t0.getTime() + 60_000), "tc-long", "y".repeat(250))];
+	const lines = collectFailedToolLines(entries, 0);
+	assert.equal(lines.length, 5, "capped at 5");
+	assert.equal(lines[0], "bash: line one of error 0");
+	assert.ok(!lines.some((l) => l.includes("more detail here")), "only the first line is kept");
+});
+
+test("collectFailedToolLines: no output falls back to a placeholder", () => {
+	const t0 = new Date("2026-10-31T12:30:00.000Z");
+	const entries = [toolErrorEntry(t0, "tc-empty")];
+	assert.deepEqual(collectFailedToolLines(entries, 0), ["bash: (no output)"]);
+});
+
+test("trigger: a correction fires the retro even under both time and tool-call thresholds", async () => {
+	const humanAt = new Date("2026-10-31T13:00:00.000Z");
+	const nowMs = humanAt.getTime() + 2 * 60_000;
+	const entries = [humanEntry(humanAt, "no, not that, I said the other file"), assistantEntry(new Date(humanAt.getTime() + 30_000), 2)];
+	const file = await writeSession("req-correction-trigger", entries);
+
+	const host = fakeHost();
+	retroExtension(host.pi, { dataDir, now: () => nowMs, env: {} });
+	const result = await host.run({ session_id: SID, session_file: file });
+	assert.ok(result, "a correction must trigger the retro regardless of thresholds");
+	assert.match(result!.additionalContext, /Corrections quoted from this request:/);
+	assert.match(result!.additionalContext, /"no, not that, I said the other file"/);
+});
+
+test("trigger: a message right after an aborted turn fires the retro under both thresholds", async () => {
+	const humanAt = new Date("2026-10-31T13:10:00.000Z");
+	const nowMs = humanAt.getTime() + 2 * 60_000;
+	const entries = [
+		humanEntry(new Date(humanAt.getTime() - 5000), "build the thing"),
+		assistantAbortedEntry(humanAt),
+		humanEntry(new Date(humanAt.getTime() + 1000), "let me think about this differently"),
+		assistantEntry(new Date(humanAt.getTime() + 2000), 1),
+	];
+	const file = await writeSession("req-abort-follow-trigger", entries);
+
+	const host = fakeHost();
+	retroExtension(host.pi, { dataDir, now: () => nowMs, env: {} });
+	const result = await host.run({ session_id: SID, session_file: file });
+	assert.ok(result, "a message right after an abort must trigger the retro");
+});
+
+test("trigger: a known false positive does not fire the retro under both thresholds", async () => {
+	const humanAt = new Date("2026-10-31T13:20:00.000Z");
+	const nowMs = humanAt.getTime() + 2 * 60_000;
+	const entries = [humanEntry(humanAt, "no problem, continue with the plan"), assistantEntry(new Date(humanAt.getTime() + 30_000), 2)];
+	const file = await writeSession("req-false-positive", entries);
+
+	const host = fakeHost();
+	retroExtension(host.pi, { dataDir, now: () => nowMs, env: {} });
+	const result = await host.run({ session_id: SID, session_file: file });
+	assert.equal(result, undefined);
+});
+
+test("buildRetroContext: new sections, contract line format, and data block with corrections and failed tools", () => {
+	const data: RetroRequestData = {
+		wallClockMinutes: 45,
+		toolCalls: 12,
+		toolErrors: 1,
+		split: emptySplit(),
+		now: new Date(2026, 9, 31, 14, 0, 0),
+		project: "oh-my-pi-insights",
+		sessionId: SID,
+		cwd: "/x/oh-my-pi-insights",
+		sessionFile: "/x/sessions/log.jsonl",
+		corrections: ["no, not that one"],
+		failedTools: ["bash: command not found: foo"],
+	};
+	const context = buildRetroContext(data, "/data/retros/out.md");
+
+	assert.match(context, /## Biggest time sink/);
+	assert.match(context, /## Corrections and lessons/);
+	assert.match(context, /## Improvement proposals/);
+	assert.ok(!context.includes("## What went well"));
+	assert.ok(!context.includes("## What went badly"));
+	assert.match(context, /\[<target>\].*\| moment: "<quoted user or tool line, max 120 chars>"/);
+	assert.match(context, /check, reviewer-standard, skill, pointer, preferences, none/);
+	assert.match(context, /navigation, automated-check, coding-standard, global-AGENTS\.md, tool-economy, no-ops, information-access, user-preference/);
+	assert.match(context, /Write "- none" if nothing qualifies/);
+	assert.match(context, /Corrections quoted from this request:[\s\S]*- "no, not that one"/);
+	assert.match(context, /Failed tool results from this request:[\s\S]*- bash: command not found: foo/);
+});
+
+test("buildRetroContext: empty corrections and failed tools render as none", () => {
+	const data: RetroRequestData = {
+		wallClockMinutes: 45,
+		toolCalls: 12,
+		toolErrors: 0,
+		split: emptySplit(),
+		now: new Date(2026, 9, 31, 14, 0, 0),
+		project: "oh-my-pi-insights",
+		sessionId: SID,
+		cwd: "/x/oh-my-pi-insights",
+		sessionFile: "/x/sessions/log.jsonl",
+		corrections: [],
+		failedTools: [],
+	};
+	const context = buildRetroContext(data, "/data/retros/out.md");
+	assert.match(context, /Corrections quoted from this request:\n- none/);
+	assert.match(context, /Failed tool results from this request:\n- none/);
 });

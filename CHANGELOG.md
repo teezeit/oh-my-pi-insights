@@ -9,6 +9,38 @@ Versioning restarts at `0.1.0` for this fork. Upstream
 `1.2.3`; carrying that number forward would have implied a continuity of
 package identity that does not exist, since this targets a different harness.
 
+## Unreleased
+
+### Added
+
+- **Retro fires on a correction.** Besides the 30 minute / 100 tool call
+  thresholds, the retro now also fires when the request's human message
+  reads as a correction: an EN/DE phrase match (`no`, `not that`, `I said`,
+  `again`, `stop`, `don't`, `wrong`, `nein`, `falsch`, `nochmal`, `hab doch
+  gesagt`, guarded against "don't worry"/"no problem"/"stop on green"), or a
+  message that directly follows an assistant turn with `stopReason:
+  "aborted"`. "The request" is the same span the thresholds already use
+  (since the last human message); a correction earlier in a long session
+  that a later, short turn doesn't repeat is not caught by this pass.
+- **Deterministic corrections and failed-tool-result data.** The hidden data
+  block now quotes up to 5 corrections (max 200 chars each) and up to 5
+  failed tool results (first output line, max 200 chars) from the request,
+  code-extracted so the agent has exact quotes to trace proposals to.
+
+### Changed
+
+- **Retro output reshaped.** "What went well" and "What went badly" are
+  gone. Sections are now Biggest time sink (one line), Corrections and
+  lessons (up to 5) and Improvement proposals (up to 5, ranked across
+  Pocock's categories: navigation, automated-check, coding-standard,
+  global-AGENTS.md, tool-economy, no-ops, information-access, plus
+  user-preference). Every corrections/proposals line follows
+  `- [<target>] <change> | moment: "<quoted line, max 120 chars>"`, target
+  one of check/reviewer-standard/skill/pointer/preferences/none (the
+  routing order a lesson should follow); a candidate with no quotable
+  moment is dropped. The file stays at or under about 40 lines. This pass
+  still only writes the proposals; applying them is a separate, later step.
+
 ## 0.1.0-rc.3 - 2026-10-30
 
 Release candidate. Install from git tag `v0.1.0-rc.3`; requires omp
