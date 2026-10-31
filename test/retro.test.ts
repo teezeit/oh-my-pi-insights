@@ -457,6 +457,7 @@ test("buildRetroContext: new sections, contract line format, and data block with
 		sessionFile: "/x/sessions/log.jsonl",
 		corrections: ["no, not that one"],
 		failedTools: ["bash: command not found: foo"],
+		triggeredByCorrectionOnly: false,
 	};
 	const context = buildRetroContext(data, "/data/retros/out.md");
 
@@ -486,8 +487,33 @@ test("buildRetroContext: empty corrections and failed tools render as none", () 
 		sessionFile: "/x/sessions/log.jsonl",
 		corrections: [],
 		failedTools: [],
+		triggeredByCorrectionOnly: false,
 	};
 	const context = buildRetroContext(data, "/data/retros/out.md");
 	assert.match(context, /Corrections quoted from this request:\n- none/);
 	assert.match(context, /Failed tool results from this request:\n- none/);
+});
+
+test("buildRetroContext: first line names the correction when neither size threshold fired", () => {
+	const base: RetroRequestData = {
+		wallClockMinutes: 2,
+		toolCalls: 1,
+		toolErrors: 0,
+		split: emptySplit(),
+		now: new Date(2026, 9, 31, 14, 0, 0),
+		project: "oh-my-pi-insights",
+		sessionId: SID,
+		cwd: "/x/oh-my-pi-insights",
+		sessionFile: "/x/sessions/log.jsonl",
+		corrections: ["no, not that one"],
+		failedTools: [],
+		triggeredByCorrectionOnly: true,
+	};
+	const correctionOnly = buildRetroContext(base, "/data/retros/out.md");
+	assert.match(correctionOnly, /^This request contained a correction, so it gets a short retro\./);
+	assert.ok(!correctionOnly.includes("This request ran long enough to warrant a retro."));
+
+	const overThreshold = buildRetroContext({ ...base, triggeredByCorrectionOnly: false }, "/data/retros/out.md");
+	assert.match(overThreshold, /^This request ran long enough to warrant a retro\./);
+	assert.ok(!overThreshold.includes("This request contained a correction, so it gets a short retro."));
 });

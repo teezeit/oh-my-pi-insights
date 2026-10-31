@@ -300,6 +300,8 @@ export type RetroRequestData = {
 	corrections: string[];
 	/** Up to 5 failed-tool-result first lines from this request; see collectFailedToolLines. */
 	failedTools: string[];
+	/** True when neither size threshold was met and the retro fired only because the request contained a correction. */
+	triggeredByCorrectionOnly: boolean;
 };
 
 /**
@@ -308,7 +310,9 @@ export type RetroRequestData = {
  */
 export function buildRetroContext(data: RetroRequestData, retroPath: string): string {
 	return [
-		"This request ran long enough to warrant a retro.",
+		data.triggeredByCorrectionOnly
+			? "This request contained a correction, so it gets a short retro."
+			: "This request ran long enough to warrant a retro.",
 		"",
 		"## Request data",
 		`- Wall clock: ${formatDuration(data.wallClockMinutes * 60)}`,
@@ -399,7 +403,8 @@ export async function buildRetroResult(
 
 	const corrections = detectCorrections(entries, lastHuman.index);
 	const { minMinutes, minToolCalls } = resolveRetroThresholds(options.env);
-	if (wallClockMinutes < minMinutes && toolCalls < minToolCalls && corrections.length === 0) return undefined;
+	const overThreshold = wallClockMinutes >= minMinutes || toolCalls >= minToolCalls;
+	if (!overThreshold && corrections.length === 0) return undefined;
 
 	const sessionId = typeof event.session_id === "string" && event.session_id ? event.session_id : "unknown";
 	const split = extractTimeSplit(requestEntries, sessionId, "");
@@ -425,6 +430,7 @@ export async function buildRetroResult(
 			sessionFile: event.session_file,
 			corrections: quoteCorrections(corrections),
 			failedTools: collectFailedToolLines(entries, lastHuman.index),
+			triggeredByCorrectionOnly: !overThreshold,
 		},
 		retroPath,
 	);
