@@ -1,6 +1,6 @@
 {
   "name": "@teezeit/omp-insights",
-  "version": "0.1.0-rc.4",
+  "version": "0.1.0-rc.5",
   "type": "module",
   "description": "omp Insights extension: generates a personal usage insights report from your omp session history",
   "author": "Hari Srinivasan <harisrini21@gmail.com>",
@@ -39,7 +39,7 @@
     ],
     "features": {
       "retro": {
-        "description": "After a big request (30+ min or 100+ tool calls) the agent writes a short retro: what went well, what went badly, where the time went, improvement proposals. Proposals only.",
+        "description": "After a big request (30+ min or 100+ tool calls), or one where you corrected the agent, it writes a short retro: the biggest time sink, the corrections and lessons from that request, and ranked improvement proposals, each quoting the moment it came from. Proposals only.",
         "default": false,
         "extensions": [
           "./src/retro.ts"

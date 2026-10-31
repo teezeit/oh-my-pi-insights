@@ -13,11 +13,11 @@ built from your local session history.
 
 ## Install
 
-Current release: **`v0.1.0-rc.3`** (release candidate; not yet on npm).
+Current release: **`v0.1.0-rc.5`** (release candidate; not yet on npm).
 Requires omp `>=18.8.4 <19` (check with `omp --version`).
 
 ```bash
-omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.3"
+omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.5"
 omp plugin list            # shows the installed version and path
 omp plugin doctor          # verifies the install
 ```

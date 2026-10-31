@@ -9,6 +9,18 @@ Versioning restarts at `0.1.0` for this fork. Upstream
 `1.2.3`; carrying that number forward would have implied a continuity of
 package identity that does not exist, since this targets a different harness.
 
+## 0.1.0-rc.5 - 2026-10-31
+
+Release candidate. Install from git tag `v0.1.0-rc.5`; requires omp
+`>=18.8.4 <19`.
+
+### Fixed
+
+- The `retro` feature description (shown by `omp plugin list` and
+  `omp plugin features`) now describes the rc.4 retro: it also fires on a
+  correction and writes corrections, lessons and ranked proposals, not
+  "what went well/badly".
+
 ## 0.1.0-rc.4 - 2026-10-31
 
 Release candidate. Install from git tag `v0.1.0-rc.4`; requires omp
