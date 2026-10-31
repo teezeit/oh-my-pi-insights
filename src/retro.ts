@@ -8,7 +8,7 @@
 // additionalContext, so the agent reflects on its own time usage without any
 // code/config/skill edits being in scope for that continuation.
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DATA_DIR, migrateLegacyDataDir } from "./cache.ts";
 import { readJsonl } from "./sources/omp.ts";
@@ -132,7 +132,9 @@ const CORRECTION_PATTERNS: RegExp[] = [
 	/i said/i,
 	/\bagain\b/i,
 	/\bstop\b/i,
-	/don't/i,
+	// Why anchored: "don't" is a correction only as an instruction to the agent
+	// (sentence start or after "please"), not in "I don't know what this is about".
+	/(?:^|[.!?;:,]\s*|\bplease\s+)(?:don[’']?t|do not)\b/i,
 	/\bwrong\b/i,
 	// German
 	/\bnein\b/i,
@@ -304,11 +306,57 @@ export type RetroRequestData = {
 	triggeredByCorrectionOnly: boolean;
 };
 
+/** File in the data dir whose content replaces DEFAULT_RETRO_INSTRUCTIONS; `{{retroPath}}` is substituted. */
+export const RETRO_PROMPT_FILE = "retro-prompt.md";
+
 /**
- * The hidden-message payload: this request's deterministic numbers plus the
- * "write one retro file, propose only" instruction (issue #21's decisions).
+ * Everything after the retro file's header: sections, rules and the chat
+ * reply. Users edit this through RETRO_PROMPT_FILE without a release; the
+ * trigger, data block, path and header stay in code.
  */
-export function buildRetroContext(data: RetroRequestData, retroPath: string): string {
+export const DEFAULT_RETRO_INSTRUCTIONS = [
+	'Then these sections, in this order (no "What went well" or "What went badly"):',
+	"",
+	"## Biggest time sink",
+	"One line, quoting the numbers above.",
+	"",
+	"## Corrections and lessons",
+	"Up to 5 lines: every correction the user gave and every fact you learned from tool output in this request. Each line:",
+	'- [<target>] <what you learned or were corrected on, one line> | moment: "<quoted user or tool line, max 120 chars>"',
+	'<target> is one of: check, reviewer-standard, skill, pointer, preferences, none (routing order: check/hook > reviewer standard > skill > pointer in AGENTS.md > preferences.md > memory). Drop any candidate you cannot trace to a quoted moment. Write "- none" if nothing qualifies.',
+	"",
+	"## Improvement proposals",
+	"Up to 5 lines, ranked by impact, drawn from these categories: navigation, automated-check, coding-standard, global-AGENTS.md, tool-economy, no-ops, information-access, user-preference. Same line format as above:",
+	'- [<target>] <proposed change, one line> | moment: "<quoted user or tool line, max 120 chars>"',
+	'Drop any candidate you cannot quote. Write "- none" if nothing qualifies.',
+	"",
+	"This is a proposals-only pass: do not edit any rule, hook, skill, config or code, and do not start any new work. The only allowed action is writing that one retro file. Keep the whole file at or under about 40 lines.",
+	"",
+	"After writing the file, reply with exactly these three lines and nothing else:",
+	"Time sink: <one line>",
+	"Proposal: <one line>",
+	"Retro: {{retroPath}}",
+].join("\n");
+
+/** RETRO_PROMPT_FILE's content, or undefined when it is missing, unreadable or blank. */
+export async function readRetroInstructions(dataDir: string): Promise<string | undefined> {
+	try {
+		const text = await readFile(join(dataDir, RETRO_PROMPT_FILE), "utf-8");
+		return text.trim() ? text.trimEnd() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The hidden-message payload: this request's deterministic numbers, the
+ * retro file's header, then `instructions` (default: DEFAULT_RETRO_INSTRUCTIONS).
+ */
+export function buildRetroContext(
+	data: RetroRequestData,
+	retroPath: string,
+	instructions: string = DEFAULT_RETRO_INSTRUCTIONS,
+): string {
 	return [
 		data.triggeredByCorrectionOnly
 			? "This request contained a correction, so it gets a short retro."
@@ -336,27 +384,7 @@ export function buildRetroContext(data: RetroRequestData, retroPath: string): st
 		`Log: ${data.sessionFile}`,
 		`Project: ${data.cwd}`,
 		"",
-		'Then these sections, in this order (no "What went well" or "What went badly"):',
-		"",
-		"## Biggest time sink",
-		"One line, quoting the numbers above.",
-		"",
-		"## Corrections and lessons",
-		"Up to 5 lines: every correction Tobias gave and every fact you learned from tool output in this request. Each line:",
-		'- [<target>] <what you learned or were corrected on, one line> | moment: "<quoted user or tool line, max 120 chars>"',
-		'<target> is one of: check, reviewer-standard, skill, pointer, preferences, none (routing order: check/hook > reviewer standard > skill > pointer in AGENTS.md > preferences.md > memory). Drop any candidate you cannot trace to a quoted moment. Write "- none" if nothing qualifies.',
-		"",
-		"## Improvement proposals",
-		"Up to 5 lines, ranked by impact, drawn from these categories: navigation, automated-check, coding-standard, global-AGENTS.md, tool-economy, no-ops, information-access, user-preference. Same line format as above:",
-		'- [<target>] <proposed change, one line> | moment: "<quoted user or tool line, max 120 chars>"',
-		'Drop any candidate you cannot quote. Write "- none" if nothing qualifies.',
-		"",
-		"This is a proposals-only pass: do not edit any rule, hook, skill, config or code, and do not start any new work. The only allowed action is writing that one retro file. Keep the whole file at or under about 40 lines.",
-		"",
-		"After writing the file, reply with exactly these three lines and nothing else:",
-		"Time sink: <one line>",
-		"Proposal: <one line>",
-		`Retro: ${retroPath}`,
+		instructions.replaceAll("{{retroPath}}", retroPath),
 	].join("\n");
 }
 
@@ -433,6 +461,7 @@ export async function buildRetroResult(
 			triggeredByCorrectionOnly: !overThreshold,
 		},
 		retroPath,
+		await readRetroInstructions(options.dataDir),
 	);
 	return { continue: true, additionalContext };
 }

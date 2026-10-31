@@ -13,11 +13,11 @@ built from your local session history.
 
 ## Install
 
-Current release: **`v0.1.0-rc.5`** (release candidate; not yet on npm).
+Current release: **`v0.1.0-rc.6`** (release candidate; not yet on npm).
 Requires omp `>=18.8.4 <19` (check with `omp --version`).
 
 ```bash
-omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.5"
+omp plugin install "git+https://github.com/teezeit/oh-my-pi-insights.git#v0.1.0-rc.6"
 omp plugin list            # shows the installed version and path
 omp plugin doctor          # verifies the install
 ```
@@ -197,7 +197,7 @@ generation and tool-start records.
 Off by default. When enabled, a request ends with a short retro instead of
 stopping right away when it ran 30+ minutes, made 100+ tool calls, or
 contains a correction: a human message that reads as a correction (EN/DE
-phrases like "no", "not that", "I said", "stop", "don't", "nein", "falsch",
+phrases like "no", "not that", "I said", "stop", a sentence-initial "don't", "nein", "falsch",
 "nochmal") or that directly follows an aborted assistant turn. The retro
 covers the biggest time sink, up to 5 corrections and lessons, and up to 5
 improvement proposals, each traced to a quoted moment and a routing target
@@ -215,6 +215,15 @@ omp plugin features @teezeit/omp-insights --disable retro   # turn off
 
 Restart omp after changing it. Thresholds: `OMP_INSIGHTS_RETRO_MIN_MINUTES`
 (default 30) and `OMP_INSIGHTS_RETRO_MIN_TOOL_CALLS` (default 100).
+
+To change what the retro says without a new release, put your own
+instructions in `omp-insights/retro-prompt.md` (next to `retros/`). Its
+content replaces everything after the retro file's header: sections, rules
+and the chat reply; `{{retroPath}}` becomes the retro file's path. The
+trigger, the request data and the header stay fixed. A missing or blank
+file uses the built-in instructions (`DEFAULT_RETRO_INSTRUCTIONS` in
+`src/retro.ts`, a good starting point to copy). It is read on every retro,
+so edits apply without a restart.
 
 ## What omp gives it that Pi did not
 

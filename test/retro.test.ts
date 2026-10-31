@@ -324,6 +324,14 @@ test("isCorrectionMessage: false positives are guarded", () => {
 	assert.equal(isCorrectionMessage("stop on green means stop once the check passes"), false);
 });
 
+test("isCorrectionMessage: don't counts only when it is aimed at the agent", () => {
+	assert.equal(isCorrectionMessage("I don't know what this is about"), false);
+	assert.equal(isCorrectionMessage("we don't need that file anymore"), false);
+	assert.equal(isCorrectionMessage("ok. don't push yet"), true);
+	assert.equal(isCorrectionMessage("please don't merge it"), true);
+	assert.equal(isCorrectionMessage("Dont touch main"), true);
+});
+
 test("isCorrectionMessage: plain requests are not corrections", () => {
 	assert.equal(isCorrectionMessage("add a new endpoint for users"), false);
 	assert.equal(isCorrectionMessage(""), false);
@@ -516,4 +524,38 @@ test("buildRetroContext: first line names the correction when neither size thres
 	const overThreshold = buildRetroContext({ ...base, triggeredByCorrectionOnly: false }, "/data/retros/out.md");
 	assert.match(overThreshold, /^This request ran long enough to warrant a retro\./);
 	assert.ok(!overThreshold.includes("This request contained a correction, so it gets a short retro."));
+});
+
+test("retro-prompt.md in the data dir replaces the built-in instructions; header and data block stay", async () => {
+	const ownDir = join(root, "custom-prompt");
+	await mkdir(ownDir, { recursive: true });
+	await writeFile(join(ownDir, "retro-prompt.md"), "## My section\nReply with: Retro: {{retroPath}}\n", "utf-8");
+	const humanAt = new Date("2026-10-31T15:00:00.000Z");
+	const nowMs = humanAt.getTime() + 40 * 60_000;
+	const file = await writeSession("req-custom-prompt", [humanEntry(humanAt), assistantEntry(new Date(humanAt.getTime() + 60_000), 3)]);
+
+	const host = fakeHost();
+	retroExtension(host.pi, { dataDir: ownDir, now: () => nowMs, env: {} });
+	const context = (await host.run({ session_id: SID, session_file: file }))!.additionalContext;
+	assert.match(context, /## My section/);
+	assert.match(context, /Reply with: Retro: .*custom-prompt[\\/]retros[\\/].*\.md/);
+	assert.ok(!context.includes("{{retroPath}}"));
+	assert.ok(!context.includes("## Biggest time sink"), "built-in sections are replaced");
+	assert.match(context, /Tool calls: 3/);
+	assert.match(context, new RegExp(`Session: ${SID}`));
+});
+
+test("an empty retro-prompt.md falls back to the built-in instructions", async () => {
+	const ownDir = join(root, "empty-prompt");
+	await mkdir(ownDir, { recursive: true });
+	await writeFile(join(ownDir, "retro-prompt.md"), "  \n", "utf-8");
+	const humanAt = new Date("2026-10-31T16:00:00.000Z");
+	const nowMs = humanAt.getTime() + 40 * 60_000;
+	const file = await writeSession("req-empty-prompt", [humanEntry(humanAt), assistantEntry(new Date(humanAt.getTime() + 60_000), 3)]);
+
+	const host = fakeHost();
+	retroExtension(host.pi, { dataDir: ownDir, now: () => nowMs, env: {} });
+	const context = (await host.run({ session_id: SID, session_file: file }))!.additionalContext;
+	assert.match(context, /## Biggest time sink/);
+	assert.match(context, /Retro: .*empty-prompt[\\/]retros[\\/]/);
 });

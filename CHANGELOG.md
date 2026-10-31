@@ -9,6 +9,24 @@ Versioning restarts at `0.1.0` for this fork. Upstream
 `1.2.3`; carrying that number forward would have implied a continuity of
 package identity that does not exist, since this targets a different harness.
 
+## 0.1.0-rc.6 - 2026-10-31
+
+Release candidate. Install from git tag `v0.1.0-rc.6`; requires omp
+`>=18.8.4 <19`.
+
+### Added
+
+- `omp-insights/retro-prompt.md` replaces the retro's built-in instructions
+  (sections, rules, chat reply), so the retro's wording changes without a
+  release. `{{retroPath}}` is substituted; a missing or blank file keeps the
+  built-in text.
+
+### Changed
+
+- "don't" counts as a correction only at a sentence start or after
+  "please", so "I don't know what this is about" no longer fires a retro.
+- The built-in retro instructions say "the user" instead of a name.
+
 ## 0.1.0-rc.5 - 2026-10-31
 
 Release candidate. Install from git tag `v0.1.0-rc.5`; requires omp
