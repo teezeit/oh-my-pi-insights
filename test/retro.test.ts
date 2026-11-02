@@ -324,6 +324,14 @@ test("isCorrectionMessage: false positives are guarded", () => {
 	assert.equal(isCorrectionMessage("stop on green means stop once the check passes"), false);
 });
 
+test("isCorrectionMessage: harness-injected wrappers are not corrections", () => {
+	const inbox =
+		"Plannotator Inbox: Pruning (msg_01)\nThe person replied to you in the Plannotator Inbox.\n\nNo new answers in this reply; 2 questions are still open. Don't re-ask them.";
+	assert.equal(isCorrectionMessage(inbox), false);
+	const dispatch = "You are working inside Orca, a multi-agent IDE. You are a dispatched worker.\n\nDo not merge. Stop when done.";
+	assert.equal(isCorrectionMessage(dispatch), false);
+});
+
 test("isCorrectionMessage: don't counts only when it is aimed at the agent", () => {
 	assert.equal(isCorrectionMessage("I don't know what this is about"), false);
 	assert.equal(isCorrectionMessage("we don't need that file anymore"), false);

@@ -145,10 +145,16 @@ const CORRECTION_PATTERNS: RegExp[] = [
 
 const CORRECTION_FALSE_POSITIVES: RegExp[] = [/don't worry/i, /no problem/i, /stop on green/i];
 
+// Why: harness text arrives as a user message (Plannotator Inbox replies, Orca
+// dispatch preambles) and its boilerplate ("Don't re-ask", "Do not merge")
+// matched the patterns above in 10+ retros, quoted as corrections from Tobias.
+const INJECTED_WRAPPER_PREFIXES: RegExp[] = [/^Plannotator Inbox:/, /^You are working inside Orca\b/];
+
 /** A human message that reads as a correction: one of the EN/DE phrases above, unless it's a known false positive. */
 export function isCorrectionMessage(text: string): boolean {
 	const trimmed = text.trim();
 	if (!trimmed) return false;
+	if (INJECTED_WRAPPER_PREFIXES.some((re) => re.test(trimmed))) return false;
 	if (CORRECTION_FALSE_POSITIVES.some((re) => re.test(trimmed))) return false;
 	return CORRECTION_PATTERNS.some((re) => re.test(trimmed));
 }
