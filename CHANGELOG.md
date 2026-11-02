@@ -9,6 +9,17 @@ Versioning restarts at `0.1.0` for this fork. Upstream
 `1.2.3`; carrying that number forward would have implied a continuity of
 package identity that does not exist, since this targets a different harness.
 
+## 0.1.0-rc.7 - 2026-11-02
+
+Release candidate. Install from git tag `v0.1.0-rc.7`; requires omp
+`>=18.8.4 <19`.
+
+### Fixed
+
+- Retro correction detection skips harness-injected messages (Plannotator
+  Inbox replies, Orca dispatch preambles). Their boilerplate ("Don't re-ask",
+  "Do not merge") was quoted as a correction in every retro of such a session.
+
 ## 0.1.0-rc.6 - 2026-10-31
 
 Release candidate. Install from git tag `v0.1.0-rc.6`; requires omp
