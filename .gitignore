@@ -6,4 +6,4 @@ dist/
 .orca/
 
 # Local-only plans and notes
-.gitignorelocal/
+.local/
